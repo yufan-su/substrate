@@ -23,7 +23,9 @@
 #   * boomer-glutton: Go re-implementation of GluttonUser. Connects to the
 #     master at localhost:5557 via the locust worker ZMQ protocol; exposes
 #     its own per-worker diagnostics at /metrics on :8001 (aggregate stats
-#     flow through the master via boomer.RecordSuccess).
+#     flow through the master via boomer.RecordSuccess). Omitted when
+#     deploy.sh is run with --no-boomer, leaving two containers — see the
+#     marker comments around it for why that matters.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -115,6 +117,18 @@ spec:
             cpu: "500m"
             memory: "512Mi"
 
+      # BEGIN boomer
+      # deploy.sh --no-boomer strips everything between these markers with a
+      # sed range delete. The marker comments, not the container name, are what
+      # define the range — keep them wrapped tightly around this one container.
+      #
+      # Strip it for any run that is not a glutton benchmark. boomer's
+      # sumUsersAmount (vendor/github.com/myzhan/boomer/runner.go) sums the
+      # counts in a spawn message and discards the class names, so this
+      # container answers spawns for *any* user class the master assigns it and
+      # runs glutton instead. spawnComplete echoes the original class counts
+      # back verbatim, so the web UI reports the class you picked either way and
+      # the only tell is glutton's rows in the stats table.
       - name: boomer-glutton
         # Same image as the master/worker — the boomer-glutton Go binary is
         # baked in at /app/boomer-glutton by benchmarking/locust/Dockerfile.
@@ -147,6 +161,7 @@ spec:
           requests:
             cpu: "500m"
             memory: "256Mi"
+      # END boomer
 
       volumes:
       - name: servicedns-ca

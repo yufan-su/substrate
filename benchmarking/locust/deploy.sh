@@ -31,13 +31,32 @@ fi
 
 MANIFEST="benchmarking/locust/manifests/locust.yaml"
 
+NO_BOOMER=""
+
 usage() {
   echo "Usage: $0 [options]"
   echo ""
   echo "Options:"
-  echo "  --deploy   Deploy the locust workers"
-  echo "  --delete   Delete the locust workers"
-  echo "  -h|--help  Show this help message"
+  echo "  --deploy      Deploy the locust workers"
+  echo "  --delete      Delete the locust workers"
+  echo "  --no-boomer   Omit the boomer-glutton container. It claims spawn"
+  echo "                messages for any user class, not just GluttonUser, so"
+  echo "                leave it out unless you are running a glutton"
+  echo "                benchmark. Only affects --deploy."
+  echo "  -h|--help     Show this help message"
+}
+
+# Render the manifest, honoring --no-boomer. delete goes through this too, for
+# symmetry rather than necessity: kubectl deletes by name and kind, and the
+# object set is the same with or without the container.
+render() {
+  if [[ -n "${NO_BOOMER}" ]]; then
+    # Marker-range delete rather than yq: keeps this dependency-free and the
+    # markers live in the manifest right next to the container they bracket.
+    envsubst < "${MANIFEST}" | sed '/# BEGIN boomer/,/# END boomer/d'
+  else
+    envsubst < "${MANIFEST}"
+  fi
 }
 
 deploy() {
@@ -47,12 +66,15 @@ deploy() {
   echo "Ensuring benchmarking namespace exists..."
   kubectl create namespace benchmarking --dry-run=client -o yaml | kubectl apply -f -
   echo "Deploying Locust load (PROJECT_ID=${PROJECT_ID})..."
-  envsubst < "${MANIFEST}" | kubectl apply -f -
+  if [[ -n "${NO_BOOMER}" ]]; then
+    echo "  (without the boomer-glutton container)"
+  fi
+  render | kubectl apply -f -
 }
 
 delete() {
   echo "Deleting Locust load..."
-  envsubst < "${MANIFEST}" | kubectl delete --ignore-not-found -f -
+  render | kubectl delete --ignore-not-found -f -
 }
 
 if [[ "$#" -eq 0 ]]; then
@@ -65,6 +87,7 @@ while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --deploy) action="deploy" ;;
     --delete) action="delete" ;;
+    --no-boomer) NO_BOOMER="1" ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "Error: Unknown option: $1" >&2
