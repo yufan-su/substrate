@@ -101,17 +101,55 @@ counter actor and holds it for the whole run.
 
 ### What each iteration covers
 
-* **`ActorPing`** — every iteration. A `POST /` through `atenet-router` to the
-  actor and back, covering the data path (router → worker → sandbox → actor).
-* **`ActorSuspend` / `ActorResume`** — every `--soak-pings-per-cycle`
-  iterations. A full suspend/resume, covering checkpoint upload, worker
-  release, scheduler placement and snapshot restore.
+The loop follows the shape a real actor's life has — suspended most of the
+time, resumed to serve a short burst, suspended again:
 
-The cycle is not optional decoration. Pinging alone leaves the actor
-`STATUS_RUNNING` forever, so resume runs exactly once — at startup, with
-`boot=True`, which skips snapshots entirely. A restore that degrades at hour 18
-or a scheduler that leaks worker assignments would be invisible. Set
-`--soak-pings-per-cycle 0` to disable cycling and test only the data path.
+```
+resolve → ResumeActor → ping × N → SuspendActor → (wait)
+```
+
+The wait therefore elapses with the actor **suspended**, and every ping is
+served by an actor that was just restored from its own snapshot.
+
+* **`ActorDNS`** — every iteration. An `A` lookup of the actor's FQDN. See
+  [Why DNS is timed separately](#why-dns-is-timed-separately).
+* **`ActorResume` / `ActorSuspend`** — every iteration. Checkpoint upload,
+  worker release, scheduler placement, snapshot restore.
+* **`ActorPing`** — N per iteration, back to back. A `POST /` to
+  `http://<actor>.<atespace>.actors.resources.substrate.ate.dev/`, covering the
+  data path (DNS → router → worker → sandbox → actor).
+
+`--soak-pings-per-cycle` sets N (default 3): how long the actor stays awake.
+Keeping it small is what makes the model faithful, and it puts the lifecycle —
+the thing most likely to drift over 24h — on the critical path of every
+iteration. The tradeoff is that nothing stays up long enough to catch a slow
+leak in a *running* sandbox; raise N if that is the failure mode you are after.
+`0` disables cycling entirely and leaves the actor running, reducing the run to
+a data-path test.
+
+Only one resume in the whole run uses `boot=True`: the cold start in
+`on_start`, which is immediately followed by a suspend so that the snapshot
+exists. From the first iteration onward every resume restores from the snapshot
+store.
+
+### Why DNS is timed separately
+
+`SoakUser` addresses actors by name, the way a real client does, rather than
+POSTing to the router's service DNS name with a spoofed `Host` header (which is
+what `CounterUser` does, and what the port-forward `curl` examples elsewhere in
+the repo do). That puts two real hops on the path: `atenet` reconciles a
+stub-domain entry into `kube-system:kube-dns` pointing
+`actors.resources.substrate.ate.dev` at the CoreDNS it runs in `ate-system`
+(`cmd/atenet/internal/dns/dns.go`), and that CoreDNS answers `<actor>.<atespace>`
+with the router's IP at TTL 60 (`cmd/atenet/internal/dns/corefile.go`).
+
+Using the FQDN is not by itself enough to cover DNS. `requests` holds one
+pooled connection to the router for the whole run, so `getaddrinfo` fires when
+that connection is opened and effectively never again — DNS could break for
+twenty hours while every ping kept succeeding over the established connection.
+The explicit per-iteration lookup is what closes that gap. A lookup failure is
+recorded but not fatal; between `ActorDNS` and `ActorPing` the Failures tab
+tells you which layer went.
 
 ### What a ping asserts
 
@@ -121,7 +159,7 @@ durability, so a ping proves more than "something replied":
 | Counter | Where it lives | Across a cycle | Assertion |
 | --- | --- | --- | --- |
 | `preserved file counter` | `durableDir` at `/home/counter` | **survives** | strictly increasing for the whole run |
-| `preserved memory count` | process memory | resets | `+1` per ping within a window with no cycle |
+| `preserved memory count` | process memory | resets | `+1` per ping within one awake window |
 
 The file counter is the headline assertion: it proves the DurableDir →
 snapshot store → restore round trip preserved state on every cycle. A reset
@@ -131,22 +169,33 @@ The memory counter resets because `SuspendActor` takes an `EXTERNAL` checkpoint
 scoped by the template's `onCommit`, which the counter sets to `Data`
 (`demos/counter/counter.yaml.tmpl`); `SNAPSHOT_SCOPE_DATA` excludes memory and
 the rest of rootfs. (`onPause: Full` would preserve it, but only `PauseActor`
-uses that scope.) Between cycles, though, nothing should be restarting the
-actor, so a memory counter that jumps means the actor was silently replaced —
-which a check that only looked at HTTP status would read as perfect health.
+uses that scope.) Within a single awake window, though, nothing should be
+restarting the actor, so a memory counter that jumps means the actor was
+silently replaced — which a check that only looked at HTTP status would read as
+perfect health.
 
 ### Reading the latency rows
 
-Each transition produces **two** rows, and the difference between them is the
-point:
+`SuspendActor` and `ResumeActor` are **synchronous**: `ActorWorkflow` runs every
+step inline, including the blocking atelet `Checkpoint` / `Restore`, and
+finalizes the status before returning
+(`cmd/ateapi/internal/controlapi/workflow.go`). The RPC latency therefore
+already includes the snapshot work — that is the number that grows as the
+snapshot store fills.
 
-* `SuspendActorCycle` / `ResumeActorCycle` — the RPC's own server-side handler
-  time. That is just the control plane accepting the request; it returns long
-  before the work is done.
-* `ActorSuspend` / `ActorResume` — wall-clock until the actor actually reaches
-  its terminal status, checkpoint upload or snapshot restore included.
+Each transition still produces **two** rows:
 
-Watch the second pair. It is the one that drifts as the snapshot store fills.
+* `SuspendActorCycle` / `ResumeActorCycle` — ateapi's server-side handler time,
+  read from the `x-server-elapsed-us` trailer. Deliberately excludes the
+  client's gevent scheduling delay.
+* `ActorSuspend` / `ActorResume` — client wall-clock around the same RPC plus
+  one confirming `GetActor`.
+
+They nearly coincide, and that is expected. Their **difference** is the useful
+part: it is how long the locust greenlet spent queued, which tells you whether
+a latency rise is Substrate or your load generator. The extra `GetActor` also
+confirms the status independently, since a successful RPC is only ateapi's
+claim about it.
 
 ### Worker capacity
 
@@ -156,9 +205,13 @@ returns `ErrNoCapacity` otherwise. The counter demo has its **own** WorkerPool,
 `counter` in `ate-demo-counter` with `replicas: 5`, not `benchmark-ateom`, so
 `--worker-count` does not affect it.
 
-A cycling user releases its worker mid-cycle and needs a free slot to resume
-onto, so leave headroom above the user count. At exactly 1:1 the first worker
-pod restart strands an actor and reads as a Substrate failure.
+Because the loop keeps each actor suspended between iterations, steady-state
+worker demand is well below the user count — but resumes are uncoordinated, so
+every user must be able to find a free slot at any moment. Leave real headroom;
+at exactly 1:1 the first worker pod restart strands an actor and reads as a
+Substrate failure. A resume with nowhere to go surfaces as `ActorResume`
+failing with `ErrNoCapacity`, which is a harness sizing problem, not a
+Substrate one.
 
 ```bash
 kubectl scale workerpool counter -n ate-demo-counter --replicas=12
@@ -181,13 +234,19 @@ The default 0–0.5s wait would turn this into a load test. `--soak-channel-max-
 exists because pod certificates are capped at 24h, exactly the length of the
 run, and Python gRPC bakes the certificate in at channel construction.
 
-**Do a short run first.** With `--soak-pings-per-cycle 3` a 15-minute run forces
-several cycles. Check that `ActorPing` failures are 0, that `ActorSuspend` /
-`ActorResume` are present and larger than their `*Cycle` counterparts, and that
-`kubectl ate get actors -a benchmark` shows no leftover `sb-*` actors
-afterwards. Rerun once with `--soak-channel-max-age 120` to exercise the channel
-rebuild — that is the one path the real run cannot validate until it is too
-late.
+**Do a short run first.** A 15-minute run at the default settings is already
+~60 cycles per user. Check that `ActorPing` and `ActorDNS` failures are 0, that
+`ActorSuspend` / `ActorResume` are present with equal counts and close to their
+`*Cycle` counterparts (a large gap means the locust greenlets are queueing —
+back off the user count), and that `kubectl ate get actors -a benchmark` shows
+no leftover `sb-*` actors afterwards.
+
+If `ActorDNS` fails from the very first iteration, the cluster's DNS
+integration is not in place rather than broken — check that `kube-system:kube-dns`
+has a `stubDomains` entry for the suffix and that the `ate-system:dns`
+Deployment is up. Rerun once with `--soak-channel-max-age 120`
+to exercise the channel rebuild — that is the one path the real run cannot
+validate until it is too late.
 
 ## Optional: Prometheus + Grafana
 
