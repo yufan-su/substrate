@@ -56,6 +56,14 @@ spec:
         - "--master"
         - "--master-bind-host=0.0.0.0"
         - "--class-picker"
+        # Stats otherwise live only in the master's memory, which is fine for a
+        # ten-minute run and useless for a 24h soak: there is nothing to compare
+        # hour 1 against hour 23, and a master restart erases the run silently.
+        # --csv-full-history is the important half — plain --csv appends only
+        # aggregated rows, so per-endpoint drift (e.g. ActorPing alone) is not
+        # recoverable. Retrieve with `kubectl cp`; see benchmarking/README.md.
+        - "--csv=/tmp/soak"
+        - "--csv-full-history"
         env:
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: http://opentelemetry-collector.gke-managed-otel.svc.cluster.local:4317
@@ -90,11 +98,12 @@ spec:
         - "-f"
         - "/app/tests"
         - "--worker"
-        # Literal IPv4, not "localhost". The master binds 0.0.0.0:5557, which
-        # is IPv4-only; locust sets ZMQ_IPV6 on the worker socket whenever the
-        # master host resolves to anything AF_INET6, and the pod's /etc/hosts
-        # maps localhost to ::1 as well as 127.0.0.1. The worker would then
-        # dial [::1]:5557 and retry forever against a silent master.
+        # 127.0.0.1, not "localhost": the distroless base cannot resolve the
+        # name, so pyzmq retries for 5 minutes and the container exits 255.
+        # Nothing then runs the Python user classes, and the master silently
+        # hands their spawns to the boomer container — which only knows
+        # GluttonUser, so a run reports the class you picked while executing
+        # glutton. boomer already dials the literal (tcp://127.0.0.1:5557).
         - "--master-host=127.0.0.1"
         env:
         - name: OTEL_EXPORTER_OTLP_ENDPOINT

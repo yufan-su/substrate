@@ -15,7 +15,9 @@
 # Build context must be the monorepo root so the Go builder can pull in
 # cmd/, internal/, pkg/, and vendor/. build_and_push.sh sets this up.
 
-# Stage 1: Python dependency builder
+# Stage 1: Python dependency builder. Runs as the *target* platform (emulated
+# when they differ) on purpose: grpcio and protobuf ship arch-specific
+# manylinux wheels, so pip has to see the arch the image will actually run on.
 FROM python:3.11-slim AS pydeps
 WORKDIR /app
 COPY benchmarking/locust/requirements.txt .
@@ -23,15 +25,19 @@ RUN pip install --no-cache-dir --target=/app/deps -r requirements.txt
 
 # Stage 2: Go build of the boomer-glutton worker. Lives in the same image so
 # runner.py can spawn it as a subprocess during headless runs of glutton.
-# CGO_ENABLED=0 keeps us on boomer's pure-Go ZMQ (gomq), no libzmq needed.
-FROM golang:1.26-bookworm AS goboomer
+# CGO_ENABLED=0 keeps us on boomer's pure-Go ZMQ (gomq), no libzmq needed —
+# and makes the build trivially cross-compilable, so this stage runs natively
+# on the build host and emits a TARGETARCH binary instead of paying for QEMU.
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS goboomer
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY vendor ./vendor
 COPY cmd ./cmd
 COPY internal ./internal
 COPY pkg ./pkg
-RUN CGO_ENABLED=0 GOFLAGS=-mod=vendor go build -o /out/boomer-glutton ./cmd/benchmarking/boomer-glutton
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} GOFLAGS=-mod=vendor \
+      go build -o /out/boomer-glutton ./cmd/benchmarking/boomer-glutton
 
 # Stage 3: Distroless runner. Carries the locust install AND the boomer
 # binary; the manifest decides which to launch via the `args` field.

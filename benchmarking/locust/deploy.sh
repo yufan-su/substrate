@@ -31,13 +31,46 @@ fi
 
 MANIFEST="benchmarking/locust/manifests/locust.yaml"
 
+NO_BOOMER=0
+
 usage() {
   echo "Usage: $0 [options]"
   echo ""
   echo "Options:"
-  echo "  --deploy   Deploy the locust workers"
-  echo "  --delete   Delete the locust workers"
-  echo "  -h|--help  Show this help message"
+  echo "  --deploy      Deploy the locust workers"
+  echo "  --delete      Delete the locust workers"
+  echo "  --no-boomer   Omit the boomer-glutton container (see below)"
+  echo "  -h|--help     Show this help message"
+  echo ""
+  echo "--no-boomer is for running a Python-only user class (e.g. SoakUser)"
+  echo "without the risk of the master handing its spawn to boomer, which runs"
+  echo "glutton regardless of the class name it was sent. GluttonUser still"
+  echo "appears in the class picker but has no worker to run it — redeploy"
+  echo "without the flag before running a glutton benchmark."
+  echo ""
+  echo "Pass --no-boomer to --delete too, or just use a plain --delete: the"
+  echo "objects deleted are the same Deployment and Service either way."
+}
+
+# render prints the manifest with env vars substituted, dropping the
+# boomer-glutton container when --no-boomer is set.
+#
+# The drop is a text filter rather than a post-apply `kubectl patch` so the
+# deployment rolls once instead of twice (the manifest uses strategy:
+# Recreate, so each roll is a full stop/start). It skips from the container's
+# `- name:` line to the next line at the same indent, i.e. the next list item
+# or the `volumes:` key; everything belonging to the container is indented
+# deeper and so is consumed.
+render() {
+  if [[ "${NO_BOOMER}" -eq 1 ]]; then
+    envsubst < "${MANIFEST}" | awk '
+      /^      - name: boomer-glutton$/ { skip = 1; next }
+      skip && /^      [^ ]/           { skip = 0 }
+      !skip                           { print }
+    '
+  else
+    envsubst < "${MANIFEST}"
+  fi
 }
 
 deploy() {
@@ -46,13 +79,17 @@ deploy() {
   # benchmarking/monitoring.yaml is otherwise optional.
   echo "Ensuring benchmarking namespace exists..."
   kubectl create namespace benchmarking --dry-run=client -o yaml | kubectl apply -f -
-  echo "Deploying Locust load (PROJECT_ID=${PROJECT_ID})..."
-  envsubst < "${MANIFEST}" | kubectl apply -f -
+  if [[ "${NO_BOOMER}" -eq 1 ]]; then
+    echo "Deploying Locust load without boomer (PROJECT_ID=${PROJECT_ID})..."
+  else
+    echo "Deploying Locust load (PROJECT_ID=${PROJECT_ID})..."
+  fi
+  render | kubectl apply -f -
 }
 
 delete() {
   echo "Deleting Locust load..."
-  envsubst < "${MANIFEST}" | kubectl delete --ignore-not-found -f -
+  render | kubectl delete --ignore-not-found -f -
 }
 
 if [[ "$#" -eq 0 ]]; then
@@ -65,6 +102,7 @@ while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --deploy) action="deploy" ;;
     --delete) action="delete" ;;
+    --no-boomer) NO_BOOMER=1 ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "Error: Unknown option: $1" >&2

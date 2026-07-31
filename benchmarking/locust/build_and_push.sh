@@ -31,13 +31,17 @@ fi
 
 IMAGE="us-docker.pkg.dev/${PROJECT_ID}/gcr.io/ate-images/locust-test:latest"
 
-# Target platform must match the cluster's nodes, not the build host.
+# GKE nodes are amd64 (tools/setup-gcp defaults the pool to c3-standard-4), so
+# pin the target rather than inheriting the host's arch — otherwise an arm64
+# laptop pushes an arm64 image and the pod fails with `exec format error`.
+# Unlike the ko-built workloads, this image is not cross-compiled by ko, so it
+# does not pick up KO_DEFAULTPLATFORMS. Override for an arm64 target.
 PLATFORM="${LOCUST_IMAGE_PLATFORM:-linux/amd64}"
 
-echo "Building Docker image: $IMAGE (platform: $PLATFORM)"
+echo "Building Docker image: $IMAGE (platform=${PLATFORM})"
 # Build context is the monorepo root because the Dockerfile compiles the
 # boomer-glutton Go binary alongside the Python install (see Dockerfile).
-docker build --platform "$PLATFORM" -t "$IMAGE" -f benchmarking/locust/Dockerfile .
+docker build --platform "${PLATFORM}" -t "$IMAGE" -f benchmarking/locust/Dockerfile .
 
 echo "Pushing Docker image..."
 docker push "$IMAGE"

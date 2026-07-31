@@ -27,6 +27,7 @@ BENCHMARKING_DIR="${ROOT}/benchmarking"
 
 WORKER_COUNT=1
 SKIP_BUILD=0
+NO_BOOMER=0
 
 usage() {
   echo "Usage: $0 [options]"
@@ -36,6 +37,8 @@ usage() {
   echo "  --delete             Delete locust and then workloads"
   echo "  --worker-count N     Number of WorkerPool replicas (default: 1)"
   echo "  --skip-build         Skip locust image build/push (use the existing :latest image)"
+  echo "  --no-boomer          Deploy locust without the boomer-glutton container;"
+  echo "                       required for Python-only classes like SoakUser"
   echo "  -h|--help            Show this help message"
   echo ""
   echo "Environment:"
@@ -56,6 +59,7 @@ while [[ "$#" -gt 0 ]]; do
     --worker-count) shift; WORKER_COUNT="$1" ;;
     --worker-count=*) WORKER_COUNT="${1#*=}" ;;
     --skip-build) SKIP_BUILD=1 ;;
+    --no-boomer) NO_BOOMER=1 ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "Error: Unknown option: $1" >&2
@@ -79,9 +83,14 @@ if [[ "${action}" == "deploy" ]]; then
     echo "=== Skipping locust image build/push (--skip-build) ==="
   fi
 
+  locust_args=(--deploy)
+  if [[ "${NO_BOOMER}" -eq 1 ]]; then
+    locust_args+=(--no-boomer)
+  fi
+
   echo
   echo "=== Deploying locust ==="
-  "${BENCHMARKING_DIR}/locust/deploy.sh" --deploy
+  "${BENCHMARKING_DIR}/locust/deploy.sh" "${locust_args[@]}"
 elif [[ "${action}" == "delete" ]]; then
   echo "=== Deleting locust ==="
   "${BENCHMARKING_DIR}/locust/deploy.sh" --delete
