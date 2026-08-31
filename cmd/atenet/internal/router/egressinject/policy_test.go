@@ -31,7 +31,7 @@ func sampleEgressPolicy() *ateapipb.EgressPolicy {
 			Hostnames: &ateapipb.HostnameRule{
 				Patterns: []string{"api.example.com"},
 				Effects: &ateapipb.EgressRuleEffects{
-					InjectStaticHeader: []*ateapipb.CredentialHeaderInjection{{
+					InjectStaticHeaders: []*ateapipb.CredentialHeaderInjection{{
 						Header:        "Authorization",
 						Prefix:        "Bearer ",
 						CredentialUri: "substrate-secret://kubernetes.io/team-secrets/ns1/example-api",
@@ -68,7 +68,7 @@ func TestEvaluate(t *testing.T) {
 			{Hostnames: &ateapipb.HostnameRule{Patterns: []string{"api.example.com"}}},
 			{Hostnames: &ateapipb.HostnameRule{
 				Patterns: []string{"api.example.com"},
-				Effects: &ateapipb.EgressRuleEffects{InjectStaticHeader: []*ateapipb.CredentialHeaderInjection{{
+				Effects: &ateapipb.EgressRuleEffects{InjectStaticHeaders: []*ateapipb.CredentialHeaderInjection{{
 					Header: "Authorization", CredentialUri: "substrate-secret://kubernetes.io/p/ns/s",
 				}}},
 			}},

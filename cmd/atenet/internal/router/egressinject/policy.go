@@ -42,7 +42,7 @@ type policyClient interface {
 func evaluate(policy *ateapipb.EgressPolicy, host string) (inject []*ateapipb.CredentialHeaderInjection, matched bool) {
 	for _, r := range policy.GetRules() {
 		if ruleMatches(r, host) {
-			return r.GetHostnames().GetEffects().GetInjectStaticHeader(), true
+			return r.GetHostnames().GetEffects().GetInjectStaticHeaders(), true
 		}
 	}
 	return nil, false

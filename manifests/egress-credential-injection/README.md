@@ -21,7 +21,7 @@ Substrate never persists.
 - **egress policy** — the actor egress policy resource served by the `ateapi`
   `Control` API (`GetActorEgressPolicy`, `pkg/proto/ateapipb`). Each actor has at
   most one policy (named `default`); its `hostnames` rules carry the
-  `inject_static_header` effects the injector applies. Create one with
+  `inject_static_headers` effects the injector applies. Create one with
   `CreateActorEgressPolicy`.
 - **namespace authorization** (`internal/proto/nsauthzpb`) — an atespace→namespace
   mapping `credprovider` enforces (default-deny) so an atespace can only resolve
@@ -77,7 +77,7 @@ flag.
 
 First give the actor an egress policy through the `ateapi` `Control` API. Create
 one `default` policy for atespace `team-a`, actor `my-actor` with a `hostnames`
-rule for `api.example.com` whose `inject_static_header` effect sets header
+rule for `api.example.com` whose `inject_static_headers` effect sets header
 `Authorization`, prefix `Bearer `, and credential URI
 `substrate-secret://kubernetes.io/team-secrets/ns1/example-api`
 (`CreateActorEgressPolicy`). The change takes effect immediately — the injector
