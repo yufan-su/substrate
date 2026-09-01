@@ -105,6 +105,81 @@ that is empty or contains a control character — which Envoy would reject and, 
 CR/LF, could turn into header injection — fails closed (503) rather than being
 sent as a bare `Bearer ` or a malformed header.
 
+## Alternative backend: Google Secret Manager (`gsmcredprovider`)
+
+`credprovider` is one implementation of the `CredentialProvider` plugin API.
+`gsmcredprovider` (`cmd/gsmcredprovider`) is a second, backed by Google Cloud
+Secret Manager instead of Kubernetes Secrets. It is a drop-in alternative: the
+injector dials a single provider address, so a deployment points
+`--credential-provider-address` at whichever backend it wants — the two are not
+run side by side yet (a future step routes by URI class so both can serve at
+once, which is why each backend claims a distinct provider class).
+
+- **URI form**: the path is the Secret Manager resource name,
+  `substrate-secret://secretmanager.googleapis.com/projects/<project>/secrets/<secret>/versions/<version>`.
+  The `/versions/<version>` tail is optional and defaults to `latest`; a version
+  is a positive integer or the `latest` alias.
+- **Authorization**: none in the provider (POC). Any request resolves any secret
+  the provider's own Secret Manager access permits — authorization is delegated
+  entirely to the IAM granted to its identity. (Unlike `credprovider`, there is
+  no atespace→project mapping; keeping it was judged too heavy for the POC.)
+- **GCP access**: Application Default Credentials. In-cluster this is a GKE
+  Workload Identity binding on the `gsmcredprovider` ServiceAccount to a Google
+  service account holding `roles/secretmanager.secretAccessor` on the served
+  secrets (per-secret) or project (project-wide). It needs **no** Kubernetes
+  Secret RBAC.
+- **Integrity**: when Secret Manager returns a payload CRC32C, the provider
+  verifies it and fails closed on a mismatch.
+
+To use it instead of the Kubernetes backend, deploy `gsmcredprovider.yaml`
+(after setting the `iam.gke.io/gcp-service-account` annotation and creating the
+matching IAM binding) and repoint the injector:
+
+```
+--credential-provider-address=gsmcredprovider.ate-system.svc:50051
+--provider-server-name=gsmcredprovider.ate-system.svc
+```
+
+Then reference a Secret Manager URI in the actor egress policy's
+`inject_static_headers` credential, e.g.
+`substrate-secret://secretmanager.googleapis.com/projects/proj-123/secrets/egress-creds/versions/latest`.
+The cleartext refusal, credential sanitization, and fail-closed behavior
+described above are the injector's and apply unchanged regardless of backend.
+
+## Credential format: host-keyed credential sets
+
+A credential is not a bare token but a **credential set**: a JSON object mapping
+a destination host to the complete HTTP headers to inject for requests to that
+host.
+
+```json
+{
+  "github.com": {
+    "Authorization": "Bearer <literal token>",
+    "X-Custom-Header": "value"
+  },
+  "api.example.com": {
+    "X-Api-Key": "<key>"
+  }
+}
+```
+
+Store that JSON as the secret value (e.g. a Secret Manager secret version, or a
+Kubernetes Secret key). The injector, on a matching hostname rule, fetches the
+set through the provider, looks up the entry for the request's destination host,
+and injects **all** of that entry's headers with their literal values. This is
+why a single policy rule + one credential set can serve many hosts, and why the
+provider (`gsmcredprovider` / `credprovider`) needs no knowledge of headers — it
+just returns the JSON blob.
+
+Consequences for the egress policy: the `inject_static_headers` entry's `header`
+and `prefix` fields are **ignored** — header names and values come entirely from
+the set — so `header` is set to a placeholder (e.g. `X-Substrate-Credential-Set`)
+only to satisfy the required-field validation, and `credential_uri` points at the
+credential set. A matched host that has **no** entry in the set passes through
+uninjected (the rule still authorizes egress); a set that is missing, unparseable,
+or holds an unusable header name/value fails closed.
+
 ## POC simplifications (not production-ready)
 
 - **Attestation**: the injector passes the actor's SPIFFE URI as the attested

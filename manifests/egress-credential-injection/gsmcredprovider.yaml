@@ -1,0 +1,130 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The GSM credential provider: a gRPC service that resolves substrate-secret://
+# URIs of the secretmanager.googleapis.com class to Google Cloud Secret Manager
+# payloads. It is a drop-in alternative to credprovider (the Kubernetes-Secret
+# backend) — point the injector's --credential-provider-address at whichever a
+# deployment wants. Unlike credprovider it needs NO Kubernetes Secret RBAC; its
+# only credential-store access is Secret Manager, reached through GKE Workload
+# Identity bound to this ServiceAccount.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gsmcredprovider
+  namespace: ate-system
+  annotations:
+    # POC placeholder: bind this KSA to a Google service account that holds
+    # roles/secretmanager.secretAccessor on the served projects. Replace
+    # GCP_PROJECT and the GSA name for your environment, and create the IAM
+    # policy binding (see the README).
+    iam.gke.io/gcp-service-account: gsmcredprovider@yufans-test.iam.gserviceaccount.com
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gsmcredprovider
+  namespace: ate-system
+  labels:
+    app: gsmcredprovider
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gsmcredprovider
+  template:
+    metadata:
+      labels:
+        app: gsmcredprovider
+    spec:
+      serviceAccountName: gsmcredprovider
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+      containers:
+      - name: gsmcredprovider
+        image: ko://github.com/agent-substrate/substrate/cmd/gsmcredprovider
+        args:
+        - "--listen-address=:50051"
+        - "--metrics-address=:9090"
+        # Serve with the pod's servicedns identity (SAN gsmcredprovider.ate-system.svc)
+        # and require the injector to present a podidentity client cert.
+        - "--server-cred-bundle=/run/servicedns.podcert.ate.dev/credential-bundle.pem"
+        - "--client-ca-file=/run/podidentity.podcert.ate.dev/trust-bundle.pem"
+        - "--log-level=info"
+        ports:
+        - name: grpc
+          containerPort: 50051
+        - name: metrics
+          containerPort: 9090
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: metrics
+          periodSeconds: 10
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: servicedns
+          mountPath: /run/servicedns.podcert.ate.dev
+          readOnly: true
+        - name: podidentity
+          mountPath: /run/podidentity.podcert.ate.dev
+          readOnly: true
+      volumes:
+      - name: servicedns
+        projected:
+          sources:
+          - podCertificate:
+              signerName: servicedns.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem
+      - name: podidentity
+        projected:
+          sources:
+          - podCertificate:
+              signerName: podidentity.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: podidentity.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gsmcredprovider
+  namespace: ate-system
+spec:
+  type: ClusterIP
+  selector:
+    app: gsmcredprovider
+  ports:
+  - name: grpc
+    port: 50051
+    targetPort: grpc
+    protocol: TCP

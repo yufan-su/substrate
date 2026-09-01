@@ -68,10 +68,10 @@ spec:
         - "--client-ca-file=/run/podidentity.podcert.ate.dev/trust-bundle.pem"
         # Dial credprovider over mTLS: present podidentity, validate its servicedns
         # serving cert against the servicedns CA, pin its SAN.
-        - "--credential-provider-address=credprovider.ate-system.svc:50051"
+        - "--credential-provider-address=gsmcredprovider.ate-system.svc:50051"
         - "--provider-client-cert=/run/podidentity.podcert.ate.dev/credential-bundle.pem"
         - "--provider-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem"
-        - "--provider-server-name=credprovider.ate-system.svc"
+        - "--provider-server-name=gsmcredprovider.ate-system.svc"
         # Fetch each actor's egress policy from ateapi over mTLS: present
         # podidentity, validate ateapi's servicedns serving cert against the
         # servicedns CA. Dialed by DNS (not the k8s:/// resolver) because the

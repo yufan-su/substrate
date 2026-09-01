@@ -43,6 +43,11 @@ func (f *fakeProvider) RequestSecret(_ context.Context, req *credproviderpb.Requ
 	return f.resp, f.err
 }
 
+// providerWithSet returns a fakeProvider serving the given credential-set JSON.
+func providerWithSet(json string) *fakeProvider {
+	return &fakeProvider{resp: &credproviderpb.RequestSecretResponse{Secret: []byte(json)}}
+}
+
 // fakePolicyClient is a stub ateapi policy client: it returns the policy keyed
 // by the requested actor, NotFound when the actor is absent, or a fixed error.
 type fakePolicyClient struct {
@@ -72,6 +77,9 @@ func sampleAPIClient() *fakePolicyClient {
 
 const testActorURI = "spiffe://substrate-actor.local/atespace/team-a/actor/my-actor"
 
+// sampleSet is a credential set holding two headers for api.example.com.
+const sampleSet = `{"api.example.com": {"Authorization": "Bearer s3cr3t", "X-Custom-Header": "value"}}`
+
 func metadataFor(t *testing.T, identity, host string) *extproc.RequestMetadata {
 	t.Helper()
 	// Default to https so the HTTPS path is what unscoped tests exercise.
@@ -95,7 +103,7 @@ func metadataForScheme(t *testing.T, identity, host, scheme string) *extproc.Req
 }
 
 func TestHandleRequestHeadersInjects(t *testing.T) {
-	provider := &fakeProvider{resp: &credproviderpb.RequestSecretResponse{Secret: []byte("s3cr3t")}}
+	provider := providerWithSet(sampleSet)
 	h := New(sampleAPIClient(), provider, NoMatchAllow)
 
 	res, err := h.HandleRequestHeaders(context.Background(), metadataFor(t, testActorURI, "api.example.com:443"))
@@ -103,23 +111,30 @@ func TestHandleRequestHeadersInjects(t *testing.T) {
 		t.Fatalf("HandleRequestHeaders: %v", err)
 	}
 
+	// Both headers from the host's entry are injected, in sorted order.
 	setHeaders := res.Response.GetResponse().GetHeaderMutation().GetSetHeaders()
-	if len(setHeaders) != 1 {
-		t.Fatalf("got %d header mutations, want 1", len(setHeaders))
+	if len(setHeaders) != 2 {
+		t.Fatalf("got %d header mutations, want 2", len(setHeaders))
 	}
-	h0 := setHeaders[0]
-	if got := h0.GetHeader().GetKey(); got != "Authorization" {
-		t.Errorf("header key = %q, want Authorization", got)
+	got := map[string]string{}
+	for _, hv := range setHeaders {
+		got[hv.GetHeader().GetKey()] = string(hv.GetHeader().GetRawValue())
+		if hv.GetAppendAction() != corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD {
+			t.Errorf("append action = %v, want OVERWRITE_IF_EXISTS_OR_ADD", hv.GetAppendAction())
+		}
 	}
-	if got := string(h0.GetHeader().GetRawValue()); got != "Bearer s3cr3t" {
-		t.Errorf("header value = %q, want %q", got, "Bearer s3cr3t")
+	if got["Authorization"] != "Bearer s3cr3t" {
+		t.Errorf("Authorization = %q, want %q", got["Authorization"], "Bearer s3cr3t")
 	}
-	if h0.GetAppendAction() != corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD {
-		t.Errorf("append action = %v, want OVERWRITE_IF_EXISTS_OR_ADD", h0.GetAppendAction())
+	if got["X-Custom-Header"] != "value" {
+		t.Errorf("X-Custom-Header = %q, want %q", got["X-Custom-Header"], "value")
+	}
+	if setHeaders[0].GetHeader().GetKey() != "Authorization" || setHeaders[1].GetHeader().GetKey() != "X-Custom-Header" {
+		t.Errorf("headers not in sorted order: %q, %q", setHeaders[0].GetHeader().GetKey(), setHeaders[1].GetHeader().GetKey())
 	}
 
 	// The provider was asked for the policy's URI with the attested context.
-	if got := provider.gotReq.GetUri(); got != "substrate-secret://kubernetes.io/team-secrets/ns1/example-api" {
+	if got := provider.gotReq.GetUri(); got != "substrate-secret://secretmanager.googleapis.com/projects/yufans-test/secrets/egress-creds/versions/latest" {
 		t.Errorf("provider URI = %q", got)
 	}
 	if got := provider.gotReq.GetContext().GetScope(); got != credproviderpb.SecretScope_SECRET_SCOPE_EGRESS_CREDENTIAL_INJECTION {
@@ -135,7 +150,7 @@ func TestHandleRequestHeadersInjects(t *testing.T) {
 
 func TestHandleRequestHeadersFetchesPolicyForActor(t *testing.T) {
 	api := sampleAPIClient()
-	h := New(api, &fakeProvider{resp: &credproviderpb.RequestSecretResponse{Secret: []byte("s3cr3t")}}, NoMatchAllow)
+	h := New(api, providerWithSet(sampleSet), NoMatchAllow)
 
 	if _, err := h.HandleRequestHeaders(context.Background(), metadataFor(t, testActorURI, "api.example.com")); err != nil {
 		t.Fatalf("HandleRequestHeaders: %v", err)
@@ -146,7 +161,7 @@ func TestHandleRequestHeadersFetchesPolicyForActor(t *testing.T) {
 }
 
 func TestHandleRequestHeadersCleartextDenied(t *testing.T) {
-	provider := &fakeProvider{resp: &credproviderpb.RequestSecretResponse{Secret: []byte("s3cr3t")}}
+	provider := providerWithSet(sampleSet)
 	h := New(sampleAPIClient(), provider, NoMatchAllow)
 
 	// A matched rule carries an injection; the API has no cleartext opt-in, so
@@ -159,7 +174,7 @@ func TestHandleRequestHeadersCleartextDenied(t *testing.T) {
 }
 
 func TestHandleRequestHeadersMissingSchemeDenied(t *testing.T) {
-	provider := &fakeProvider{resp: &credproviderpb.RequestSecretResponse{Secret: []byte("s3cr3t")}}
+	provider := providerWithSet(sampleSet)
 	h := New(sampleAPIClient(), provider, NoMatchAllow)
 
 	// An absent scheme must fail closed, not be treated as https.
@@ -170,16 +185,21 @@ func TestHandleRequestHeadersMissingSchemeDenied(t *testing.T) {
 	}
 }
 
-func TestHandleRequestHeadersHTTPSInjects(t *testing.T) {
-	provider := &fakeProvider{resp: &credproviderpb.RequestSecretResponse{Secret: []byte("s3cr3t")}}
-	h := New(sampleAPIClient(), provider, NoMatchAllow)
+func TestHandleRequestHeadersHostNotInSetPassesThrough(t *testing.T) {
+	// The rule matches api.example.com (authorized), but the credential set only
+	// carries an entry for another host: nothing to inject, pass through.
+	provider := providerWithSet(`{"github.com": {"Authorization": "Bearer other"}}`)
+	h := New(sampleAPIClient(), provider, NoMatchDeny)
 
 	res, err := h.HandleRequestHeaders(context.Background(), metadataFor(t, testActorURI, "api.example.com"))
 	if err != nil {
 		t.Fatalf("HandleRequestHeaders: %v", err)
 	}
-	if setHeaders := res.Response.GetResponse().GetHeaderMutation().GetSetHeaders(); len(setHeaders) != 1 {
-		t.Fatalf("got %d header mutations, want 1", len(setHeaders))
+	if muts := res.Response.GetResponse().GetHeaderMutation(); muts != nil {
+		t.Errorf("got header mutation %+v, want none", muts)
+	}
+	if provider.gotReq == nil {
+		t.Error("provider should have been consulted for the credential set")
 	}
 }
 
@@ -261,41 +281,53 @@ func TestHandleRequestHeadersProviderFailsClosed(t *testing.T) {
 	assertReqErrCode(t, err, envoy_type.StatusCode_ServiceUnavailable)
 }
 
-func TestHandleRequestHeadersEmptySecretFailsClosed(t *testing.T) {
-	// An empty credential must not go upstream as a bare "Bearer ".
-	provider := &fakeProvider{resp: &credproviderpb.RequestSecretResponse{Secret: []byte("")}}
+func TestHandleRequestHeadersMalformedSetFailsClosed(t *testing.T) {
+	// A blob that is not a host->headers JSON object (e.g. a bare token, or empty)
+	// must fail closed rather than be injected blindly.
+	for _, blob := range []string{"", "s3cr3t", `{"api.example.com": "not-an-object"}`} {
+		provider := providerWithSet(blob)
+		h := New(sampleAPIClient(), provider, NoMatchAllow)
+		_, err := h.HandleRequestHeaders(context.Background(), metadataFor(t, testActorURI, "api.example.com"))
+		assertReqErrCode(t, err, envoy_type.StatusCode_ServiceUnavailable)
+	}
+}
+
+func TestHandleRequestHeadersControlCharValueFailsClosed(t *testing.T) {
+	// An embedded CR/LF in a value would enable header injection; fail closed.
+	provider := providerWithSet(`{"api.example.com": {"X-Api-Key": "a\r\nb"}}`)
 	h := New(sampleAPIClient(), provider, NoMatchAllow)
 
 	_, err := h.HandleRequestHeaders(context.Background(), metadataFor(t, testActorURI, "api.example.com"))
 	assertReqErrCode(t, err, envoy_type.StatusCode_ServiceUnavailable)
 }
 
-func TestHandleRequestHeadersTrailingNewlineTrimmed(t *testing.T) {
-	// A Secret created from a file commonly carries a trailing newline; it must
-	// not end up in the header value (Envoy would reject it).
-	provider := &fakeProvider{resp: &credproviderpb.RequestSecretResponse{Secret: []byte("s3cr3t\n")}}
+func TestHandleRequestHeadersUnusableHeaderNameFailsClosed(t *testing.T) {
+	// A credential set naming a system header the gateway forbids mutating must
+	// fail closed rather than be dropped silently.
+	provider := providerWithSet(`{"api.example.com": {"Host": "evil.example.com"}}`)
 	h := New(sampleAPIClient(), provider, NoMatchAllow)
 
-	res, err := h.HandleRequestHeaders(context.Background(), metadataFor(t, testActorURI, "api.example.com"))
+	_, err := h.HandleRequestHeaders(context.Background(), metadataFor(t, testActorURI, "api.example.com"))
+	assertReqErrCode(t, err, envoy_type.StatusCode_ServiceUnavailable)
+}
+
+func TestParseCredentialSet(t *testing.T) {
+	set, err := parseCredentialSet([]byte(`{"API.Example.com.": {"Authorization": "Bearer x"}}`))
 	if err != nil {
-		t.Fatalf("HandleRequestHeaders: %v", err)
+		t.Fatalf("parseCredentialSet: %v", err)
 	}
-	setHeaders := res.Response.GetResponse().GetHeaderMutation().GetSetHeaders()
-	if len(setHeaders) != 1 || string(setHeaders[0].GetHeader().GetRawValue()) != "Bearer s3cr3t" {
-		t.Fatalf("header value = %q, want %q", string(setHeaders[0].GetHeader().GetRawValue()), "Bearer s3cr3t")
+	// Host keys are normalized (lowercased, trailing dot dropped) for lookup.
+	if got := set["api.example.com"]["Authorization"]; got != "Bearer x" {
+		t.Errorf("normalized lookup = %q, want %q", got, "Bearer x")
+	}
+	for _, bad := range []string{"", "s3cr3t", "[]", `{"h": "not-an-object"}`} {
+		if _, err := parseCredentialSet([]byte(bad)); err == nil {
+			t.Errorf("parseCredentialSet(%q) = nil error, want error", bad)
+		}
 	}
 }
 
-func TestHandleRequestHeadersControlCharSecretFailsClosed(t *testing.T) {
-	// An embedded CR/LF would enable header injection; fail closed.
-	provider := &fakeProvider{resp: &credproviderpb.RequestSecretResponse{Secret: []byte("s3\r\ncr3t")}}
-	h := New(sampleAPIClient(), provider, NoMatchAllow)
-
-	_, err := h.HandleRequestHeaders(context.Background(), metadataFor(t, testActorURI, "api.example.com"))
-	assertReqErrCode(t, err, envoy_type.StatusCode_ServiceUnavailable)
-}
-
-func TestSanitizeSecret(t *testing.T) {
+func TestSanitizeHeaderValue(t *testing.T) {
 	tests := []struct {
 		name    string
 		in      []byte
@@ -313,18 +345,18 @@ func TestSanitizeSecret(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := sanitizeSecret(tc.in)
+			got, err := sanitizeHeaderValue(tc.in)
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("sanitizeSecret(%q) = %q, want error", tc.in, got)
+					t.Fatalf("sanitizeHeaderValue(%q) = %q, want error", tc.in, got)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("sanitizeSecret(%q) unexpected error: %v", tc.in, err)
+				t.Fatalf("sanitizeHeaderValue(%q) unexpected error: %v", tc.in, err)
 			}
 			if string(got) != tc.want {
-				t.Errorf("sanitizeSecret(%q) = %q, want %q", tc.in, got, tc.want)
+				t.Errorf("sanitizeHeaderValue(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
