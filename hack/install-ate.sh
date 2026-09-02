@@ -87,6 +87,11 @@ function usage() {
   echo "                                         Deploy the egress credential-injection stack (credprovider, injector,"
   echo "                                         namespace policy, sample secret) and wire the egress gateway to it."
   echo "                                         Implies --experimental-use-sdsmint; requires --atenet-router=envoy. (experimental)"
+  echo "  --credential-provider-backend BACKEND  Which credential provider to deploy: kubernetes or secretmanager"
+  echo "                                         (default kubernetes). secretmanager deploys the Secret Manager-backed"
+  echo "                                         provider (no in-cluster Secret or namespace policy) and defaults the"
+  echo "                                         injector to its class and Service unless overridden below."
+  echo "                                         Only meaningful with --experimental-egress-credential-injection. (experimental)"
   echo "  --credential-provider-name NAME        Provider the injector serves, as a substrate-secret:// class prefix,"
   echo "                                         e.g. substrate-secret://kubernetes.io (default substrate-secret://kubernetes.io)."
   echo "                                         Only meaningful with --experimental-egress-credential-injection. (experimental)"
@@ -718,13 +723,27 @@ deploy_atenet() {
 
 # render_atenet_egress_inject_manifest echoes the injector manifest with its
 # --credential-provider-name and --credential-provider-address arguments set to
-# the configured values. The manifest ships the in-cluster defaults;
-# --credential-provider-name / --credential-provider-address override them (e.g.
-# to point at a different provider class or address). Substituting the literal
-# defaults keeps the manifest applyable by hand with no placeholder.
+# the configured values. The manifest ships the kubernetes-backend defaults;
+# they are overridden per --credential-provider-backend (so the secretmanager
+# backend points the injector at its class and Service without extra flags) and
+# then by explicit --credential-provider-name / --credential-provider-address.
+# Substituting the literal defaults keeps the manifest applyable by hand with no
+# placeholder.
 render_atenet_egress_inject_manifest() {
-  local name="${ATE_CREDENTIAL_PROVIDER_NAME:-substrate-secret://kubernetes.io}"
-  local addr="${ATE_CREDENTIAL_PROVIDER_ADDRESS:-credprovider.ate-system.svc:50051}"
+  local backend="${ATE_CREDENTIAL_PROVIDER_BACKEND:-kubernetes}"
+  local default_name default_addr
+  case "${backend}" in
+    secretmanager)
+      default_name="substrate-secret://secretmanager.googleapis.com"
+      default_addr="credprovider-secretmanager.ate-system.svc:50051"
+      ;;
+    *)
+      default_name="substrate-secret://kubernetes.io"
+      default_addr="credprovider.ate-system.svc:50051"
+      ;;
+  esac
+  local name="${ATE_CREDENTIAL_PROVIDER_NAME:-${default_name}}"
+  local addr="${ATE_CREDENTIAL_PROVIDER_ADDRESS:-${default_addr}}"
   sed -e "s|--credential-provider-name=substrate-secret://kubernetes.io|--credential-provider-name=${name}|" \
       -e "s|--credential-provider-address=credprovider.ate-system.svc:50051|--credential-provider-address=${addr}|" \
       manifests/egress-credential-injection/atenet-egress-inject.yaml
@@ -746,17 +765,30 @@ deploy_egress_credential_injection() {
   run_kubectl apply -f manifests/ate-install/ate-system-namespace.yaml \
     && run_kubectl wait --for=jsonpath='{.status.phase}'=Active namespace/ate-system --timeout=60s
 
-  # The authorization mapping and sample secret first, so the pods that mount
-  # them start cleanly.
-  run_kubectl apply -f manifests/egress-credential-injection/namespace-policy.yaml
-  run_kubectl apply -f manifests/egress-credential-injection/sample-secret.yaml
+  # The provider selected by --credential-provider-backend, then the injector.
+  # The kubernetes backend reads in-cluster Secrets, so its namespace mapping and
+  # sample secret go first, before the pods that mount them start; the
+  # secretmanager backend authenticates via Workload Identity and has neither.
+  local backend="${ATE_CREDENTIAL_PROVIDER_BACKEND:-kubernetes}"
+  local provider_deployment
+  case "${backend}" in
+    kubernetes)
+      run_kubectl apply -f manifests/egress-credential-injection/namespace-policy.yaml
+      run_kubectl apply -f manifests/egress-credential-injection/sample-secret.yaml
+      run_ko apply -f manifests/egress-credential-injection/credprovider.yaml
+      provider_deployment=credprovider
+      ;;
+    secretmanager)
+      run_ko apply -f manifests/egress-credential-injection/credprovider-secretmanager.yaml
+      provider_deployment=credprovider-secretmanager
+      ;;
+  esac
 
-  # The provider and the injector. Roll both out before wiring the gateway: the
+  # Roll both the provider and the injector out before wiring the gateway: the
   # gateway's ext_proc filter is failure_mode_allow: false, so the Service must
   # be answering before it starts receiving traffic.
-  run_ko apply -f manifests/egress-credential-injection/credprovider.yaml
   render_atenet_egress_inject_manifest | run_ko apply -f -
-  run_kubectl rollout status deployment/credprovider -n ate-system --timeout="$(rollout_timeout)"
+  run_kubectl rollout status "deployment/${provider_deployment}" -n ate-system --timeout="$(rollout_timeout)"
   run_kubectl rollout status deployment/atenet-egress-inject -n ate-system --timeout="$(rollout_timeout)"
 
   # Re-wire the egress gateway to splice in the injector's ext_proc filter.
@@ -1062,6 +1094,16 @@ for ((i = 0; i < ${#prescan_args[@]}; i++)); do
       ;;
     # Read in the prescan so the values are set before the main loop dispatches
     # deploy_egress_credential_injection, regardless of flag order in argv.
+    --credential-provider-backend=*)
+      ATE_CREDENTIAL_PROVIDER_BACKEND="${prescan_args[i]#*=}"
+      ;;
+    --credential-provider-backend)
+      if (( i + 1 >= ${#prescan_args[@]} )); then
+        echo "Error: --credential-provider-backend requires kubernetes or secretmanager" >&2
+        exit 1
+      fi
+      ATE_CREDENTIAL_PROVIDER_BACKEND="${prescan_args[$((i + 1))]}"
+      ;;
     --credential-provider-name=*)
       ATE_CREDENTIAL_PROVIDER_NAME="${prescan_args[i]#*=}"
       ;;
@@ -1145,6 +1187,13 @@ case "${BENCHMARK_SANDBOX_CLASS}" in
     exit 1
     ;;
 esac
+case "${ATE_CREDENTIAL_PROVIDER_BACKEND:-kubernetes}" in
+  kubernetes|secretmanager) ;;
+  *)
+    echo "Error: --credential-provider-backend must be kubernetes or secretmanager, got '${ATE_CREDENTIAL_PROVIDER_BACKEND}'" >&2
+    exit 1
+    ;;
+esac
 podcert_workers_per_signer >/dev/null
 rollout_timeout >/dev/null
 
@@ -1179,6 +1228,8 @@ while [[ "$#" -gt 0 ]]; do
     --experimental-egress-credential-injection) deploy_egress_credential_injection ;;
     # Captured in the pre-scan above; matched here only so they are consumed and
     # the `*)` branch does not reject them as unknown options.
+    --credential-provider-backend) shift ;;
+    --credential-provider-backend=*) ;;
     --credential-provider-name) shift ;;
     --credential-provider-name=*) ;;
     --credential-provider-address) shift ;;

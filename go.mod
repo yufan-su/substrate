@@ -8,6 +8,7 @@ require (
 	cloud.google.com/go/iam v1.9.0
 	cloud.google.com/go/monitoring v1.24.3
 	cloud.google.com/go/resourcemanager v1.13.0
+	cloud.google.com/go/secretmanager v1.16.0
 	cloud.google.com/go/serviceusage v1.14.0
 	cloud.google.com/go/storage v1.62.1
 	github.com/aws/aws-sdk-go-v2 v1.41.7
@@ -25,6 +26,7 @@ require (
 	github.com/google/go-containerregistry v0.21.7
 	github.com/google/nftables v0.3.0
 	github.com/google/uuid v1.6.0
+	github.com/googleapis/gax-go/v2 v2.21.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/klauspost/compress v1.19.0
@@ -144,7 +146,6 @@ require (
 	github.com/google/pprof v0.0.0-20250602020802-c6617b811d0e // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.14 // indirect
-	github.com/googleapis/gax-go/v2 v2.21.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect

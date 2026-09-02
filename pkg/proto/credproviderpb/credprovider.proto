@@ -36,6 +36,13 @@ message SecretRequestContext {
   // this is the actor's SPIFFE URI as verified by the egress gateway; a
   // verifiable Actor JWT is the intended future form.
   string actor_identity = 1;
+
+  // The target host of the outbound request the credential is for, as the
+  // egress injector matched it: the request :authority with any port removed,
+  // lowercased. A provider whose store is keyed by host (e.g. the Secret
+  // Manager provider) selects the entry for this host; providers that resolve a
+  // single value from the URI alone (e.g. the Kubernetes provider) ignore it.
+  string target_host = 2;
 }
 
 // RequestSecretRequest asks a provider to resolve one credential URI.
@@ -46,6 +53,13 @@ message RequestSecretRequest {
 
   // The attested context for the request.
   SecretRequestContext context = 2;
+
+  // The request header the resolved credential will be injected into,
+  // case-insensitive. A provider whose store maps host -> {header: value} (the
+  // Secret Manager provider) uses it together with context.target_host to
+  // select the value; providers that resolve a single value from the URI alone
+  // (the Kubernetes provider) ignore it.
+  string header = 3;
 }
 
 // RequestSecretResponse carries the resolved secret material.

@@ -187,9 +187,11 @@ func (h *Handler) HandleRequestHeaders(ctx context.Context, md *extproc.RequestM
 		}
 
 		resp, err := h.provider.RequestSecret(ctx, &credproviderpb.RequestSecretRequest{
-			Uri: inj.GetCredentialUri(),
+			Uri:    inj.GetCredentialUri(),
+			Header: inj.GetHeader(),
 			Context: &credproviderpb.SecretRequestContext{
 				ActorIdentity: identity,
+				TargetHost:    host,
 			},
 		})
 		if err != nil {

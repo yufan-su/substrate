@@ -44,6 +44,12 @@ type SecretRequestContext struct {
 	// this is the actor's SPIFFE URI as verified by the egress gateway; a
 	// verifiable Actor JWT is the intended future form.
 	ActorIdentity string `protobuf:"bytes,1,opt,name=actor_identity,json=actorIdentity,proto3" json:"actor_identity,omitempty"`
+	// The target host of the outbound request the credential is for, as the
+	// egress injector matched it: the request :authority with any port removed,
+	// lowercased. A provider whose store is keyed by host (e.g. the Secret
+	// Manager provider) selects the entry for this host; providers that resolve a
+	// single value from the URI alone (e.g. the Kubernetes provider) ignore it.
+	TargetHost    string `protobuf:"bytes,2,opt,name=target_host,json=targetHost,proto3" json:"target_host,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -85,6 +91,13 @@ func (x *SecretRequestContext) GetActorIdentity() string {
 	return ""
 }
 
+func (x *SecretRequestContext) GetTargetHost() string {
+	if x != nil {
+		return x.TargetHost
+	}
+	return ""
+}
+
 // RequestSecretRequest asks a provider to resolve one credential URI.
 type RequestSecretRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -92,7 +105,13 @@ type RequestSecretRequest struct {
 	//   substrate-secret://<provider class>/<provider name>/<provider tail>
 	Uri string `protobuf:"bytes,1,opt,name=uri,proto3" json:"uri,omitempty"`
 	// The attested context for the request.
-	Context       *SecretRequestContext `protobuf:"bytes,2,opt,name=context,proto3" json:"context,omitempty"`
+	Context *SecretRequestContext `protobuf:"bytes,2,opt,name=context,proto3" json:"context,omitempty"`
+	// The request header the resolved credential will be injected into,
+	// case-insensitive. A provider whose store maps host -> {header: value} (the
+	// Secret Manager provider) uses it together with context.target_host to
+	// select the value; providers that resolve a single value from the URI alone
+	// (the Kubernetes provider) ignore it.
+	Header        string `protobuf:"bytes,3,opt,name=header,proto3" json:"header,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -139,6 +158,13 @@ func (x *RequestSecretRequest) GetContext() *SecretRequestContext {
 		return x.Context
 	}
 	return nil
+}
+
+func (x *RequestSecretRequest) GetHeader() string {
+	if x != nil {
+		return x.Header
+	}
+	return ""
 }
 
 // RequestSecretResponse carries the resolved secret material.
@@ -192,12 +218,15 @@ var File_credprovider_proto protoreflect.FileDescriptor
 
 const file_credprovider_proto_rawDesc = "" +
 	"\n" +
-	"\x12credprovider.proto\x12\fcredprovider\"=\n" +
+	"\x12credprovider.proto\x12\fcredprovider\"^\n" +
 	"\x14SecretRequestContext\x12%\n" +
-	"\x0eactor_identity\x18\x01 \x01(\tR\ractorIdentity\"f\n" +
+	"\x0eactor_identity\x18\x01 \x01(\tR\ractorIdentity\x12\x1f\n" +
+	"\vtarget_host\x18\x02 \x01(\tR\n" +
+	"targetHost\"~\n" +
 	"\x14RequestSecretRequest\x12\x10\n" +
 	"\x03uri\x18\x01 \x01(\tR\x03uri\x12<\n" +
-	"\acontext\x18\x02 \x01(\v2\".credprovider.SecretRequestContextR\acontext\"/\n" +
+	"\acontext\x18\x02 \x01(\v2\".credprovider.SecretRequestContextR\acontext\x12\x16\n" +
+	"\x06header\x18\x03 \x01(\tR\x06header\"/\n" +
 	"\x15RequestSecretResponse\x12\x16\n" +
 	"\x06secret\x18\x01 \x01(\fR\x06secret2p\n" +
 	"\x12CredentialProvider\x12Z\n" +

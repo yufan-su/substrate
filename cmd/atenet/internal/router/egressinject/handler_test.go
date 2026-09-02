@@ -122,12 +122,19 @@ func TestHandleRequestHeadersInjects(t *testing.T) {
 		t.Errorf("append action = %v, want OVERWRITE_IF_EXISTS_OR_ADD", h0.GetAppendAction())
 	}
 
-	// The provider was asked for the policy's URI with the attested context.
+	// The provider was asked for the policy's URI with the attested context,
+	// including the target host and header a host-keyed provider needs.
 	if got := provider.gotReq.GetUri(); got != "substrate-secret://kubernetes.io/team-secrets/ns1/example-api" {
 		t.Errorf("provider URI = %q", got)
 	}
 	if got := provider.gotReq.GetContext().GetActorIdentity(); got != testActorURI {
 		t.Errorf("actor identity = %q", got)
+	}
+	if got := provider.gotReq.GetContext().GetTargetHost(); got != "api.example.com" {
+		t.Errorf("target host = %q, want api.example.com", got)
+	}
+	if got := provider.gotReq.GetHeader(); got != "Authorization" {
+		t.Errorf("header = %q, want Authorization", got)
 	}
 }
 

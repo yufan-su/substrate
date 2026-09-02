@@ -9,10 +9,17 @@ Substrate never persists.
 ## Pieces
 
 - **`credprovider`** (`cmd/credprovider`) — a gRPC service implementing the
-  `CredentialProvider.RequestSecret` plugin API (`pkg/proto/credproviderpb`),
-  backed by Kubernetes Secrets. It resolves
-  `substrate-secret://kubernetes.io/<provider>/<namespace>/<secret>[/<key>]`.
-  It is the only component here with Kubernetes access.
+  `CredentialProvider.RequestSecret` plugin API (`pkg/proto/credproviderpb`).
+  `--backend` selects the store it fronts (each instance serves one
+  `substrate-secret://` class):
+  - `kubernetes` (default) — backed by Kubernetes Secrets, resolving
+    `substrate-secret://kubernetes.io/<provider>/<namespace>/<secret>[/<key>]`.
+    It is the only component here with Kubernetes access.
+  - `secretmanager` — backed by Google Cloud Secret Manager, resolving
+    `substrate-secret://secretmanager.googleapis.com/projects/<p>/secrets/<s>/versions/<v>`.
+    The secret payload is a JSON object mapping upstream host -> {header: value};
+    the provider returns the value the injector's target host and header select.
+    See `credprovider-secretmanager.yaml`.
 - **`atenet egress-inject`** (`cmd/atenet/internal/router/egressinject`) — the
   ext_proc server the egress gateway's MITM leg dials
   (`additional_egress_ext_proc`). For each decrypted request it fetches the
@@ -68,15 +75,31 @@ hack/install-ate.sh --experimental-egress-credential-injection
 ```
 
 It implies `--experimental-use-sdsmint` and requires the (default)
-`--atenet-router=envoy`. Two flags configure which credential provider the
-injector uses:
+`--atenet-router=envoy`. Three flags configure which credential provider is
+deployed and which the injector dials:
 
+- `--credential-provider-backend BACKEND` — which provider to deploy:
+  `kubernetes` (default) or `secretmanager`. `secretmanager` deploys
+  `credprovider-secretmanager.yaml` (no in-cluster Secret or namespace policy;
+  it authenticates to Secret Manager with Workload Identity) and defaults the
+  injector's class and address to the Secret Manager provider unless the two
+  flags below override them.
 - `--credential-provider-name NAME` — the provider the injector serves, as a
   `substrate-secret://` class prefix (e.g. `substrate-secret://kubernetes.io`); a
-  policy credential URI of any other class is refused. Default
-  `substrate-secret://kubernetes.io`.
+  policy credential URI of any other class is refused. Defaults to the selected
+  backend's class.
 - `--credential-provider-address HOST:PORT` — where the injector dials the
-  provider. Default `credprovider.ate-system.svc:50051`.
+  provider. Defaults to the selected backend's Service.
+
+For the `secretmanager` backend, first edit
+`credprovider-secretmanager.yaml`'s `iam.gke.io/gcp-service-account` annotation to
+a Google service account that holds `roles/secretmanager.secretAccessor` on the
+secrets it should serve, then:
+
+```
+hack/install-ate.sh --experimental-egress-credential-injection \
+  --credential-provider-backend secretmanager
+```
 
 To deploy the pieces by hand instead, see the manifests in this directory and the
 underlying
@@ -145,4 +168,10 @@ sent as a bare `Bearer ` or a malformed header.
   faithfully reproduced here — the control plane's first-match ordering may
   differ. Avoid pairing `ip_blocks` rules with credential injection until the
   destination IP is plumbed to this leg.
-- Only the `kubernetes.io` provider class is implemented.
+- **Provider classes**: the `kubernetes.io` and `secretmanager.googleapis.com`
+  provider classes are implemented. The `secretmanager` backend applies **no
+  authorization** yet — any actor whose request reaches it can resolve any secret
+  the provider's Google identity can access (the `kubernetes` backend's
+  atespace→namespace mapping has no Secret Manager equivalent yet). Scope the
+  provider's Workload Identity to only the secrets it should serve, and treat an
+  atespace→secret allowlist as a follow-up before relying on it.

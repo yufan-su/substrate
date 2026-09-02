@@ -40,6 +40,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/agent-substrate/substrate/cmd/credprovider/internal/kubeprovider"
+	"github.com/agent-substrate/substrate/cmd/credprovider/internal/smprovider"
 	"github.com/agent-substrate/substrate/internal/credbundle"
 	"github.com/agent-substrate/substrate/internal/serverboot"
 	"github.com/agent-substrate/substrate/internal/version"
@@ -53,8 +54,9 @@ var (
 	metricsAddr  = pflag.String("metrics-address", ":9090", "Prometheus/health HTTP listen address")
 	serverBundle = pflag.String("server-cred-bundle", "", "credential bundle (PEM key+chain) presented for serving TLS; empty serves plaintext (dev only)")
 	clientCAFile = pflag.String("client-ca-file", "", "CA bundle that caller (injector) client certificates must chain to; empty accepts any client when TLS is on")
-	defaultKey   = pflag.String("default-secret-key", "", "Secret data key used when a credential URI omits one; empty requires a single-key Secret")
-	nsPolicyFile = pflag.String("namespace-policy-file", "", "path to the atespace→namespace authorization textproto; empty disables authorization (dev only)")
+	backend      = pflag.String("backend", "kubernetes", "credential backend: one of kubernetes, secretmanager")
+	defaultKey   = pflag.String("default-secret-key", "", "kubernetes backend: Secret data key used when a credential URI omits one; empty requires a single-key Secret")
+	nsPolicyFile = pflag.String("namespace-policy-file", "", "kubernetes backend: path to the atespace→namespace authorization textproto; empty disables authorization (dev only)")
 	logLevel     = pflag.String("log-level", "info", "one of debug, info, warn, error")
 	drainGrace   = pflag.Duration("drain-grace", 5*time.Second, "how long to wait for in-flight RPCs on shutdown before a hard stop")
 )
@@ -89,21 +91,11 @@ func run(ctx context.Context) error {
 		EnableHealthz: true,
 	})
 
-	client, err := newKubeClient()
+	provider, cleanup, err := buildProvider(ctx)
 	if err != nil {
-		return fmt.Errorf("kubernetes client: %w", err)
+		return err
 	}
-
-	var nsAuth *kubeprovider.NamespaceAuthorizer
-	if *nsPolicyFile != "" {
-		nsAuth, err = kubeprovider.LoadNamespaceAuthorizer(*nsPolicyFile)
-		if err != nil {
-			return fmt.Errorf("namespace policy: %w", err)
-		}
-		slog.InfoContext(ctx, "loaded namespace authorization policy", slog.String("file", *nsPolicyFile))
-	} else {
-		slog.WarnContext(ctx, "no --namespace-policy-file set; authorization disabled, any atespace may resolve any namespace (dev only)")
-	}
+	defer cleanup()
 
 	creds, err := buildServerCreds(ctx)
 	if err != nil {
@@ -116,7 +108,7 @@ func run(ctx context.Context) error {
 	}
 	srv := grpc.NewServer(opts...)
 	reflection.Register(srv)
-	credproviderpb.RegisterCredentialProviderServer(srv, kubeprovider.NewServer(client, *defaultKey, nsAuth))
+	credproviderpb.RegisterCredentialProviderServer(srv, provider)
 
 	lis, err := (&net.ListenConfig{}).Listen(ctx, "tcp", *listenAddr)
 	if err != nil {
@@ -142,11 +134,48 @@ func run(ctx context.Context) error {
 		}
 	}()
 
-	slog.InfoContext(ctx, "credprovider listening", slog.String("address", lis.Addr().String()), slog.Bool("tls", creds != nil))
+	slog.InfoContext(ctx, "credprovider listening",
+		slog.String("address", lis.Addr().String()), slog.String("backend", *backend), slog.Bool("tls", creds != nil))
 	if err := srv.Serve(lis); err != nil && err != grpc.ErrServerStopped {
 		return fmt.Errorf("serving: %w", err)
 	}
 	return nil
+}
+
+// buildProvider constructs the credential provider selected by --backend,
+// returning a cleanup to run at shutdown. Each backend fronts exactly one
+// substrate-secret:// class and builds only its own client, so an unset k8s or
+// GCP environment for the other backend never blocks startup.
+func buildProvider(ctx context.Context) (credproviderpb.CredentialProviderServer, func(), error) {
+	switch *backend {
+	case "kubernetes":
+		client, err := newKubeClient()
+		if err != nil {
+			return nil, nil, fmt.Errorf("kubernetes client: %w", err)
+		}
+		var nsAuth *kubeprovider.NamespaceAuthorizer
+		if *nsPolicyFile != "" {
+			nsAuth, err = kubeprovider.LoadNamespaceAuthorizer(*nsPolicyFile)
+			if err != nil {
+				return nil, nil, fmt.Errorf("namespace policy: %w", err)
+			}
+			slog.InfoContext(ctx, "loaded namespace authorization policy", slog.String("file", *nsPolicyFile))
+		} else {
+			slog.WarnContext(ctx, "no --namespace-policy-file set; authorization disabled, any atespace may resolve any namespace (dev only)")
+		}
+		return kubeprovider.NewServer(client, *defaultKey, nsAuth), func() {}, nil
+
+	case "secretmanager":
+		client, err := smprovider.NewClient(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("secret manager client: %w", err)
+		}
+		slog.WarnContext(ctx, "secretmanager backend: authorization disabled, any actor may resolve any secret this provider can access (dev only)")
+		return smprovider.NewServer(client), func() { _ = client.Close() }, nil
+
+	default:
+		return nil, nil, fmt.Errorf("invalid --backend %q (want kubernetes or secretmanager)", *backend)
+	}
 }
 
 func newKubeClient() (kubernetes.Interface, error) {
