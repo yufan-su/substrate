@@ -727,8 +727,10 @@ deploy_atenet() {
 # they are overridden per --credential-provider-backend (so the secretmanager
 # backend points the injector at its class and Service without extra flags) and
 # then by explicit --credential-provider-name / --credential-provider-address.
-# Substituting the literal defaults keeps the manifest applyable by hand with no
-# placeholder.
+# The provider's serving-cert SAN to pin (--provider-server-name) tracks the
+# address host, so pinning stays correct when the address changes with the
+# backend or an override. Substituting the literal defaults keeps the manifest
+# applyable by hand with no placeholder.
 render_atenet_egress_inject_manifest() {
   local backend="${ATE_CREDENTIAL_PROVIDER_BACKEND:-kubernetes}"
   local default_name default_addr
@@ -744,8 +746,13 @@ render_atenet_egress_inject_manifest() {
   esac
   local name="${ATE_CREDENTIAL_PROVIDER_NAME:-${default_name}}"
   local addr="${ATE_CREDENTIAL_PROVIDER_ADDRESS:-${default_addr}}"
+  # The serving cert is issued for the Service DNS name, i.e. the address host
+  # without its port. Strip the last :port so the pinned SAN matches the dialed
+  # provider (bare Service DNS names carry no other colon).
+  local server_name="${addr%:*}"
   sed -e "s|--credential-provider-name=substrate-secret://kubernetes.io|--credential-provider-name=${name}|" \
       -e "s|--credential-provider-address=credprovider.ate-system.svc:50051|--credential-provider-address=${addr}|" \
+      -e "s|--provider-server-name=credprovider.ate-system.svc|--provider-server-name=${server_name}|" \
       manifests/egress-credential-injection/atenet-egress-inject.yaml
 }
 

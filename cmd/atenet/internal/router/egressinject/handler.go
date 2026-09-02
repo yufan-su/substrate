@@ -227,6 +227,17 @@ func (h *Handler) HandleRequestHeaders(ctx context.Context, md *extproc.RequestM
 		slog.String("atespace", atespace), slog.String("actor", actor),
 		slog.String("host", host), slog.Int("headers", len(setHeaders)))
 
+	// WARNING: this logs each injected header's full value — the resolved
+	// credential — in cleartext, on every request. It exists for local
+	// verification only; remove it (or gate it) before any shared or real
+	// deployment, where it would leak secrets into whatever ships these logs.
+	for _, h := range setHeaders {
+		slog.InfoContext(ctx, "egress-inject: injected header",
+			slog.String("atespace", atespace), slog.String("actor", actor),
+			slog.String("host", host), slog.String("header", h.GetHeader().GetKey()),
+			slog.String("value", string(h.GetHeader().GetRawValue())))
+	}
+
 	return extproc.Result{
 		Target: host,
 		Response: &extprocv3.HeadersResponse{

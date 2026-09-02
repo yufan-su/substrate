@@ -91,10 +91,17 @@ deployed and which the injector dials:
 - `--credential-provider-address HOST:PORT` — where the injector dials the
   provider. Defaults to the selected backend's Service.
 
-For the `secretmanager` backend, first edit
-`credprovider-secretmanager.yaml`'s `iam.gke.io/gcp-service-account` annotation to
-a Google service account that holds `roles/secretmanager.secretAccessor` on the
-secrets it should serve, then:
+For the `secretmanager` backend, grant `roles/secretmanager.secretAccessor` on
+each secret it should serve directly to the provider's Workload Identity
+principal (no intermediate Google service account):
+
+```
+gcloud secrets add-iam-policy-binding SECRET --project="$PROJECT_ID" \
+  --role=roles/secretmanager.secretAccessor \
+  --member="principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/ate-system/sa/credprovider-secretmanager"
+```
+
+(the member is keyed to the project NUMBER, not the ID). Then:
 
 ```
 hack/install-ate.sh --experimental-egress-credential-injection \
