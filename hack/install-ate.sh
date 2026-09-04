@@ -89,15 +89,19 @@ function usage() {
   echo "                                         Run an additional ext_proc authorization filter, served by that Service."
   echo "                                         Requires --experimental-use-sdsmint. (experimental)"
   echo "  --experimental-egress-credential-injection"
-  echo "                                         Deploy the egress credential-injection stack (credprovider, injector,"
-  echo "                                         namespace policy, sample secret) and wire the egress gateway to it."
+  echo "                                         Deploy the egress credential-injection stack (credential provider, injector)"
+  echo "                                         and wire the egress gateway to it."
   echo "                                         Implies --experimental-use-sdsmint; requires --atenet-router=envoy. (experimental)"
-  echo "  --credential-provider-name NAME        Provider the injector serves, as a substrate-secret:// class prefix,"
-  echo "                                         e.g. substrate-secret://kubernetes.io (default substrate-secret://kubernetes.io)."
+  echo "  --credential-provider-backend BACKEND  Credential-provider backend to deploy and wire the injector to:"
+  echo "                                         kubesecret (Kubernetes Secrets, default) or secretmanager (Google Secret"
+  echo "                                         Manager). Selects the provider manifest, class, address, and server name."
   echo "                                         Only meaningful with --experimental-egress-credential-injection. (experimental)"
+  echo "  --gsm-service-account EMAIL            For --credential-provider-backend=secretmanager: the Google service account"
+  echo "                                         (holding roles/secretmanager.secretAccessor) to bind the provider's KSA to"
+  echo "                                         via Workload Identity. (experimental)"
   echo "  --credential-provider-address HOST:PORT"
-  echo "                                         Address the injector dials the credential provider at"
-  echo "                                         (default credprovider.ate-system.svc:50051)."
+  echo "                                         Override the address the injector dials the provider at"
+  echo "                                         (default depends on the backend)."
   echo "                                         Only meaningful with --experimental-egress-credential-injection. (experimental)"
   echo ""
   echo "Infrastructure components:"
@@ -1109,17 +1113,45 @@ deploy_atenet() {
 }
 
 # render_atenet_egress_inject_manifest echoes the injector manifest with its
-# --credential-provider-name and --credential-provider-address arguments set to
-# the configured values. The manifest ships the in-cluster defaults;
-# --credential-provider-name / --credential-provider-address override them (e.g.
-# to point at a different provider class or address). Substituting the literal
-# defaults keeps the manifest applyable by hand with no placeholder.
+# provider class, address, and server name set for the selected backend. The
+# manifest ships the kubesecret defaults; the secretmanager backend rewrites all
+# three to the gsmcredprovider service, and --credential-provider-address
+# overrides the address for either. Substituting the literal defaults keeps the
+# manifest applyable by hand with no placeholder.
 render_atenet_egress_inject_manifest() {
-  local name="${ATE_CREDENTIAL_PROVIDER_NAME:-substrate-secret://kubernetes.io}"
-  local addr="${ATE_CREDENTIAL_PROVIDER_ADDRESS:-credprovider.ate-system.svc:50051}"
+  local backend="${ATE_CREDENTIAL_PROVIDER_BACKEND:-kubesecret}"
+  local name server default_addr
+  case "$backend" in
+    kubesecret)
+      name="substrate-secret://kubernetes.io"
+      server="credprovider.ate-system.svc"
+      default_addr="credprovider.ate-system.svc:50051"
+      ;;
+    secretmanager)
+      name="substrate-secret://secretmanager.googleapis.com"
+      server="gsmcredprovider.ate-system.svc"
+      default_addr="gsmcredprovider.ate-system.svc:50051"
+      ;;
+  esac
+  local addr="${ATE_CREDENTIAL_PROVIDER_ADDRESS:-$default_addr}"
   sed -e "s|--credential-provider-name=substrate-secret://kubernetes.io|--credential-provider-name=${name}|" \
       -e "s|--credential-provider-address=credprovider.ate-system.svc:50051|--credential-provider-address=${addr}|" \
+      -e "s|--provider-server-name=credprovider.ate-system.svc|--provider-server-name=${server}|" \
       manifests/egress-credential-injection/atenet-egress-inject.yaml
+}
+
+# render_gsmcredprovider_manifest echoes the GSM provider manifest with its
+# Workload Identity annotation set to --gsm-service-account when given. Without
+# it the manifest's placeholder is used and the provider will lack Secret Manager
+# access, so warn.
+render_gsmcredprovider_manifest() {
+  if [[ -n "${ATE_GSM_SERVICE_ACCOUNT:-}" ]]; then
+    sed -e "s|iam.gke.io/gcp-service-account: .*|iam.gke.io/gcp-service-account: ${ATE_GSM_SERVICE_ACCOUNT}|" \
+        manifests/egress-credential-injection/gsmcredprovider.yaml
+  else
+    echo "Warning: --gsm-service-account not set; using the placeholder Google service account in gsmcredprovider.yaml, which will lack Secret Manager access" >&2
+    cat manifests/egress-credential-injection/gsmcredprovider.yaml
+  fi
 }
 
 # deploy_egress_credential_injection deploys the credential provider and the
@@ -1133,22 +1165,42 @@ deploy_egress_credential_injection() {
     echo "Error: --experimental-egress-credential-injection requires --experimental-use-sdsmint" >&2
     return 1
   fi
+  local backend="${ATE_CREDENTIAL_PROVIDER_BACKEND:-kubesecret}"
+  case "$backend" in
+    kubesecret | secretmanager) ;;
+    *)
+      echo "Error: --credential-provider-backend must be kubesecret or secretmanager (got \"$backend\")" >&2
+      return 1
+      ;;
+  esac
   ensure_crds
 
   run_kubectl apply -f manifests/ate-install/ate-system-namespace.yaml \
     && run_kubectl wait --for=jsonpath='{.status.phase}'=Active namespace/ate-system --timeout=60s
 
-  # The authorization mapping and sample secret first, so the pods that mount
-  # them start cleanly.
-  run_kubectl apply -f manifests/egress-credential-injection/namespace-policy.yaml
-  run_kubectl apply -f manifests/egress-credential-injection/sample-secret.yaml
-
-  # The provider and the injector. Roll both out before wiring the gateway: the
-  # gateway's ext_proc filter is failure_mode_allow: false, so the Service must
-  # be answering before it starts receiving traffic.
-  run_ko apply -f manifests/egress-credential-injection/credprovider.yaml
+  # Deploy the selected credential-provider backend, then the injector. Roll both
+  # out before wiring the gateway: the gateway's ext_proc filter is
+  # failure_mode_allow: false, so the Service must be answering before it starts
+  # receiving traffic.
+  local provider_deploy
+  case "$backend" in
+    kubesecret)
+      # kubesecret-only supporting resources: the atespace->namespace policy and
+      # the sample Secret, applied first so the pods that mount them start cleanly.
+      run_kubectl apply -f manifests/egress-credential-injection/namespace-policy.yaml
+      run_kubectl apply -f manifests/egress-credential-injection/sample-secret.yaml
+      run_ko apply -f manifests/egress-credential-injection/credprovider.yaml
+      provider_deploy="credprovider"
+      ;;
+    secretmanager)
+      # The GSM provider reaches Secret Manager through Workload Identity; it needs
+      # no in-cluster Secret, namespace policy, or Secret RBAC.
+      render_gsmcredprovider_manifest | run_ko apply -f -
+      provider_deploy="gsmcredprovider"
+      ;;
+  esac
   render_atenet_egress_inject_manifest | run_ko apply -f -
-  run_kubectl rollout status deployment/credprovider -n ate-system --timeout="$(rollout_timeout)"
+  run_kubectl rollout status "deployment/${provider_deploy}" -n ate-system --timeout="$(rollout_timeout)"
   run_kubectl rollout status deployment/atenet-egress-inject -n ate-system --timeout="$(rollout_timeout)"
 
   # Re-wire the egress gateway to splice in the injector's ext_proc filter.
@@ -1524,15 +1576,25 @@ for ((i = 0; i < ${#prescan_args[@]}; i++)); do
       ;;
     # Read in the prescan so the values are set before the main loop dispatches
     # deploy_egress_credential_injection, regardless of flag order in argv.
-    --credential-provider-name=*)
-      ATE_CREDENTIAL_PROVIDER_NAME="${prescan_args[i]#*=}"
+    --credential-provider-backend=*)
+      ATE_CREDENTIAL_PROVIDER_BACKEND="${prescan_args[i]#*=}"
       ;;
-    --credential-provider-name)
+    --credential-provider-backend)
       if (( i + 1 >= ${#prescan_args[@]} )); then
-        echo "Error: --credential-provider-name requires a value" >&2
+        echo "Error: --credential-provider-backend requires kubesecret or secretmanager" >&2
         exit 1
       fi
-      ATE_CREDENTIAL_PROVIDER_NAME="${prescan_args[$((i + 1))]}"
+      ATE_CREDENTIAL_PROVIDER_BACKEND="${prescan_args[$((i + 1))]}"
+      ;;
+    --gsm-service-account=*)
+      ATE_GSM_SERVICE_ACCOUNT="${prescan_args[i]#*=}"
+      ;;
+    --gsm-service-account)
+      if (( i + 1 >= ${#prescan_args[@]} )); then
+        echo "Error: --gsm-service-account requires a Google service account email" >&2
+        exit 1
+      fi
+      ATE_GSM_SERVICE_ACCOUNT="${prescan_args[$((i + 1))]}"
       ;;
     --credential-provider-address=*)
       ATE_CREDENTIAL_PROVIDER_ADDRESS="${prescan_args[i]#*=}"
@@ -1650,8 +1712,10 @@ while [[ "$#" -gt 0 ]]; do
     --experimental-egress-credential-injection) deploy_egress_credential_injection ;;
     # Captured in the pre-scan above; matched here only so they are consumed and
     # the `*)` branch does not reject them as unknown options.
-    --credential-provider-name) shift ;;
-    --credential-provider-name=*) ;;
+    --credential-provider-backend) shift ;;
+    --credential-provider-backend=*) ;;
+    --gsm-service-account) shift ;;
+    --gsm-service-account=*) ;;
     --credential-provider-address) shift ;;
     --credential-provider-address=*) ;;
     --podcert-workers-per-signer=*) ATE_INSTALL_PODCERT_WORKERS_PER_SIGNER="${1#*=}" ;;

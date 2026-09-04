@@ -36,6 +36,16 @@ message SecretRequestContext {
   // this is the actor's SPIFFE URI as verified by the egress gateway; a
   // verifiable Actor JWT is the intended future form.
   string actor_identity = 1;
+
+  // The egress destination hostname, so a provider can select and authorize a
+  // credential per origin (e.g. "this key is only for api.example.com"). Empty
+  // when the request has no destination.
+  string destination = 2;
+
+  // The HTTP header the caller intends to inject. A provider whose credential is
+  // a host-keyed set uses this to select the value for (destination, header_key)
+  // and returns just that value; the caller names and formats the header itself.
+  string header_key = 3;
 }
 
 // RequestSecretRequest asks a provider to resolve one credential URI.

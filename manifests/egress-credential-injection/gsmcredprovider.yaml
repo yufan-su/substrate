@@ -12,77 +12,57 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The egress credential injector: the ext_proc server the egress gateway's MITM
-# leg dials (cluster additional_egress_ext_proc). It fetches the requesting
-# actor's egress policy from ateapi and, on a matching rule that carries a
-# credential injection, fetches the credential from credprovider and injects it
-# as a request header.
-#
-# Wire the gateway to this service by installing MITM egress with:
-#   hack/install-ate.sh --experimental-use-sdsmint \
-#     --experimental-additional-egress-extproc-service ate-system/atenet-egress-inject:50051
-#
-# Like atenet-egress, this ServiceAccount is bound to no RBAC on purpose: the
-# injector has no Kubernetes access. It reads egress policy from ateapi over
-# mTLS; only credprovider reads Secrets.
+# The GSM credential provider: a gRPC service that resolves substrate-secret://
+# URIs of the secretmanager.googleapis.com class to Google Cloud Secret Manager
+# payloads. It is a drop-in alternative to credprovider (the Kubernetes-Secret
+# backend) — point the injector's --credential-provider-address at whichever a
+# deployment wants. Unlike credprovider it needs NO Kubernetes Secret RBAC; its
+# only credential-store access is Secret Manager, reached through GKE Workload
+# Identity bound to this ServiceAccount.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: atenet-egress-inject
+  name: gsmcredprovider
   namespace: ate-system
+  annotations:
+    # POC placeholder: bind this KSA to a Google service account that holds
+    # roles/secretmanager.secretAccessor on the served projects. Replace
+    # GCP_PROJECT and the GSA name for your environment, and create the IAM
+    # policy binding (see the README).
+    iam.gke.io/gcp-service-account: gsmcredprovider@yufans-test.iam.gserviceaccount.com
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: atenet-egress-inject
+  name: gsmcredprovider
   namespace: ate-system
   labels:
-    app: atenet-egress-inject
+    app: gsmcredprovider
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: atenet-egress-inject
+      app: gsmcredprovider
   template:
     metadata:
       labels:
-        app: atenet-egress-inject
+        app: gsmcredprovider
     spec:
-      serviceAccountName: atenet-egress-inject
+      serviceAccountName: gsmcredprovider
       securityContext:
         runAsUser: 65532
         runAsGroup: 65532
         runAsNonRoot: true
       containers:
-      - name: egress-inject
-        image: ko://github.com/agent-substrate/substrate/cmd/atenet
+      - name: gsmcredprovider
+        image: ko://github.com/agent-substrate/substrate/cmd/gsmcredprovider
         args:
-        - "egress-inject"
-        - "--port-extproc=50051"
+        - "--listen-address=:50051"
         - "--metrics-address=:9090"
-        # Serve mTLS to the gateway: present the pod's servicedns identity (SAN
-        # atenet-egress-inject.ate-system.svc, which the gateway pins) and verify
-        # the gateway's podidentity client cert.
+        # Serve with the pod's servicedns identity (SAN gsmcredprovider.ate-system.svc)
+        # and require the injector to present a podidentity client cert.
         - "--server-cred-bundle=/run/servicedns.podcert.ate.dev/credential-bundle.pem"
         - "--client-ca-file=/run/podidentity.podcert.ate.dev/trust-bundle.pem"
-        # Dial credprovider over mTLS: present podidentity, validate its servicedns
-        # serving cert against the servicedns CA, pin its SAN. --credential-provider-name
-        # is the provider class this injector serves; a policy URI of another class is refused.
-        # To use the Google Secret Manager backend instead, repoint the address and server
-        # name at gsmcredprovider.ate-system.svc and set the class to
-        # substrate-secret://secretmanager.googleapis.com (see the README).
-        - "--credential-provider-name=substrate-secret://kubernetes.io"
-        - "--credential-provider-address=credprovider.ate-system.svc:50051"
-        - "--provider-client-cert=/run/podidentity.podcert.ate.dev/credential-bundle.pem"
-        - "--provider-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem"
-        - "--provider-server-name=credprovider.ate-system.svc"
-        # Fetch each actor's egress policy from ateapi over mTLS: present
-        # podidentity, validate ateapi's servicedns serving cert against the
-        # servicedns CA. Dialed by DNS (not the k8s:/// resolver) because the
-        # injector has no Kubernetes access to read endpoints.
-        - "--ateapi-address=dns:///api.ate-system.svc:443"
-        - "--ateapi-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem"
-        - "--ateapi-client-cert=/run/podidentity.podcert.ate.dev/credential-bundle.pem"
         - "--log-level=info"
         ports:
         - name: grpc
@@ -137,12 +117,12 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: atenet-egress-inject
+  name: gsmcredprovider
   namespace: ate-system
 spec:
   type: ClusterIP
   selector:
-    app: atenet-egress-inject
+    app: gsmcredprovider
   ports:
   - name: grpc
     port: 50051

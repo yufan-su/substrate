@@ -44,6 +44,14 @@ type SecretRequestContext struct {
 	// this is the actor's SPIFFE URI as verified by the egress gateway; a
 	// verifiable Actor JWT is the intended future form.
 	ActorIdentity string `protobuf:"bytes,1,opt,name=actor_identity,json=actorIdentity,proto3" json:"actor_identity,omitempty"`
+	// The egress destination hostname, so a provider can select and authorize a
+	// credential per origin (e.g. "this key is only for api.example.com"). Empty
+	// when the request has no destination.
+	Destination string `protobuf:"bytes,2,opt,name=destination,proto3" json:"destination,omitempty"`
+	// The HTTP header the caller intends to inject. A provider whose credential is
+	// a host-keyed set uses this to select the value for (destination, header_key)
+	// and returns just that value; the caller names and formats the header itself.
+	HeaderKey     string `protobuf:"bytes,3,opt,name=header_key,json=headerKey,proto3" json:"header_key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -81,6 +89,20 @@ func (*SecretRequestContext) Descriptor() ([]byte, []int) {
 func (x *SecretRequestContext) GetActorIdentity() string {
 	if x != nil {
 		return x.ActorIdentity
+	}
+	return ""
+}
+
+func (x *SecretRequestContext) GetDestination() string {
+	if x != nil {
+		return x.Destination
+	}
+	return ""
+}
+
+func (x *SecretRequestContext) GetHeaderKey() string {
+	if x != nil {
+		return x.HeaderKey
 	}
 	return ""
 }
@@ -192,9 +214,12 @@ var File_credprovider_proto protoreflect.FileDescriptor
 
 const file_credprovider_proto_rawDesc = "" +
 	"\n" +
-	"\x12credprovider.proto\x12\fcredprovider\"=\n" +
+	"\x12credprovider.proto\x12\fcredprovider\"~\n" +
 	"\x14SecretRequestContext\x12%\n" +
-	"\x0eactor_identity\x18\x01 \x01(\tR\ractorIdentity\"f\n" +
+	"\x0eactor_identity\x18\x01 \x01(\tR\ractorIdentity\x12 \n" +
+	"\vdestination\x18\x02 \x01(\tR\vdestination\x12\x1d\n" +
+	"\n" +
+	"header_key\x18\x03 \x01(\tR\theaderKey\"f\n" +
 	"\x14RequestSecretRequest\x12\x10\n" +
 	"\x03uri\x18\x01 \x01(\tR\x03uri\x12<\n" +
 	"\acontext\x18\x02 \x01(\v2\".credprovider.SecretRequestContextR\acontext\"/\n" +

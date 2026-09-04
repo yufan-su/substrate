@@ -8,6 +8,7 @@ require (
 	cloud.google.com/go/iam v1.9.0
 	cloud.google.com/go/monitoring v1.24.3
 	cloud.google.com/go/resourcemanager v1.13.0
+	cloud.google.com/go/secretmanager v1.16.0
 	cloud.google.com/go/serviceusage v1.14.0
 	cloud.google.com/go/storage v1.62.1
 	github.com/aws/aws-sdk-go-v2 v1.41.7

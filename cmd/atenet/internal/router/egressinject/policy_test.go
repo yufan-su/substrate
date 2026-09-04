@@ -23,7 +23,8 @@ import (
 )
 
 // sampleEgressPolicy is the actor egress policy the handler tests resolve for
-// team-a/my-actor: a single hostname rule injecting a bearer token.
+// team-a/my-actor: a single hostname rule injecting the Authorization header,
+// whose value the provider resolves from the credential the credential_uri names.
 func sampleEgressPolicy() *ateapipb.EgressPolicy {
 	return &ateapipb.EgressPolicy{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "default"},
@@ -34,7 +35,7 @@ func sampleEgressPolicy() *ateapipb.EgressPolicy {
 					InjectStaticHeaders: []*ateapipb.CredentialHeaderInjection{{
 						Header:        "Authorization",
 						Prefix:        "Bearer ",
-						CredentialUri: "substrate-secret://kubernetes.io/team-secrets/ns1/example-api",
+						CredentialUri: "substrate-secret://secretmanager.googleapis.com/projects/yufans-test/secrets/egress-creds/versions/latest",
 					}},
 				},
 			},
@@ -50,7 +51,7 @@ func TestEvaluate(t *testing.T) {
 		if !matched {
 			t.Fatal("evaluate did not match the hostname rule")
 		}
-		if len(inj) != 1 || inj[0].GetCredentialUri() != "substrate-secret://kubernetes.io/team-secrets/ns1/example-api" {
+		if len(inj) != 1 || inj[0].GetCredentialUri() != "substrate-secret://secretmanager.googleapis.com/projects/yufans-test/secrets/egress-creds/versions/latest" {
 			t.Errorf("evaluate returned %+v", inj)
 		}
 	})
@@ -130,39 +131,6 @@ func TestHostFromAuthority(t *testing.T) {
 		if got := hostFromAuthority(tc.in); got != tc.want {
 			t.Errorf("hostFromAuthority(%q) = %q, want %q", tc.in, got, tc.want)
 		}
-	}
-}
-
-func TestCredentialURIClass(t *testing.T) {
-	tests := []struct {
-		name    string
-		raw     string
-		want    string
-		wantErr bool
-	}{
-		{name: "full uri", raw: "substrate-secret://kubernetes.io/team-secrets/ns1/example-api", want: "kubernetes.io"},
-		{name: "class prefix only", raw: "substrate-secret://kubernetes.io", want: "kubernetes.io"},
-		{name: "other class", raw: "substrate-secret://vault.hashicorp.com/p/ns/s", want: "vault.hashicorp.com"},
-		{name: "wrong scheme", raw: "https://kubernetes.io/x", wantErr: true},
-		{name: "bare class no scheme", raw: "kubernetes.io", wantErr: true},
-		{name: "empty", raw: "", wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := credentialURIClass(tc.raw)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("credentialURIClass(%q) = %q, want error", tc.raw, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("credentialURIClass(%q) unexpected error: %v", tc.raw, err)
-			}
-			if got != tc.want {
-				t.Errorf("credentialURIClass(%q) = %q, want %q", tc.raw, got, tc.want)
-			}
-		})
 	}
 }
 
