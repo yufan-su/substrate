@@ -35,15 +35,10 @@ const (
 	// read AuthorityFilterStateKey back out.
 	AuthorityFilterStateAttribute = "filter_state['" + AuthorityFilterStateKey + "']"
 
-	// ActorIdentityFilterStateKey is the filter-state key holding the actor
-	// identity the egress gateway read from the peer certificate it verified
-	// against the actor-identity CA. Egress-only, and set and read entirely in
-	// manifests/ate-install/atenet-egress-with-sdsmint.yaml: the MITM access
-	// logs stamp it, and the optional additional ext_proc service
-	// (hack/experimental-additional-egress-extproc.sh) requests it. No Go in
-	// this repository reads it — this handler authenticates the certificate
-	// itself — but it is part of the same namespace and drifts if it is not
-	// declared with the rest.
+	// ActorIdentityFilterStateKey holds the actor's SPIFFE ID
+	// (resources.ActorSPIFFEID), read from the peer certificate's URI SAN.
+	// The outer CONNECT chain sets it from %DOWNSTREAM_PEER_URI_SAN% and
+	// shares it with the inner legs, which have no certificate of their own.
 	ActorIdentityFilterStateKey = "dev.ate.actor.identity"
 
 	// directionAttribute carries the Direction outright, for dataplanes that

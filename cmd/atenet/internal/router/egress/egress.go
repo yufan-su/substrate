@@ -76,9 +76,8 @@ type Handler struct {
 	actorIdentityRoots *x509.CertPool
 }
 
-// New builds the egress handler. actorIdentityRoots is the same trust bundle
-// the egress listener uses as its trusted_ca; see verifyActorCertificate for
-// why the check is made again here.
+// New builds the egress handler. actorIdentityRoots is the egress listener's
+// trusted_ca; see verifyActorCertificate for why it is checked again here.
 func New(apiClient ateapipb.ControlClient, actorIdentityRoots *x509.CertPool) *Handler {
 	return &Handler{apiClient: apiClient, actorIdentityRoots: actorIdentityRoots}
 }
