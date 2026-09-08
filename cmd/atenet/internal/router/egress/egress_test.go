@@ -29,6 +29,7 @@ import (
 	"math/big"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +38,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/agent-substrate/substrate/cmd/atenet/internal/router/extproc"
@@ -195,10 +197,21 @@ func egressHandler(roots *x509.CertPool, actor *ateapipb.Actor, err error) *Hand
 	return New(&egressMockClient{actor: actor, err: err}, roots)
 }
 
+// egressMockClient is the slice of ateapi the egress handler talks to.
 type egressMockClient struct {
 	ateapipb.ControlClient
 	actor *ateapipb.Actor
 	err   error
+
+	// policy is what GetActorEgressPolicy returns; nil answers NotFound.
+	// policyErr, when set, is returned instead.
+	policy    *ateapipb.EgressPolicy
+	policyErr error
+	// policyCalls counts GetActorEgressPolicy calls, for the cache tests.
+	policyCalls atomic.Int32
+	// policyGate, when non-nil, blocks each GetActorEgressPolicy until it is
+	// closed, so a test can hold several callers on one fetch.
+	policyGate chan struct{}
 }
 
 func (m *egressMockClient) GetActor(context.Context, *ateapipb.GetActorRequest, ...grpc.CallOption) (*ateapipb.Actor, error) {
@@ -206,6 +219,34 @@ func (m *egressMockClient) GetActor(context.Context, *ateapipb.GetActorRequest, 
 		return nil, m.err
 	}
 	return m.actor, nil
+}
+
+func (m *egressMockClient) GetActorEgressPolicy(ctx context.Context, _ *ateapipb.GetActorEgressPolicyRequest, _ ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
+	m.policyCalls.Add(1)
+	if m.policyGate != nil {
+		select {
+		case <-m.policyGate:
+		case <-ctx.Done():
+			return nil, status.FromContextError(ctx.Err()).Err()
+		}
+	}
+	if m.policyErr != nil {
+		return nil, m.policyErr
+	}
+	if m.policy == nil {
+		return nil, status.Error(codes.NotFound, "EgressPolicy not found")
+	}
+	return m.policy, nil
+}
+
+func allowAllPolicy() *ateapipb.EgressPolicy {
+	return &ateapipb.EgressPolicy{Rules: []*ateapipb.EgressRule{{All: &emptypb.Empty{}}}}
+}
+
+func hostnamesPolicy(patterns ...string) *ateapipb.EgressPolicy {
+	return &ateapipb.EgressPolicy{Rules: []*ateapipb.EgressRule{{
+		Hostnames: &ateapipb.HostnameRule{Patterns: patterns},
+	}}}
 }
 
 func runningActor() *ateapipb.Actor {
