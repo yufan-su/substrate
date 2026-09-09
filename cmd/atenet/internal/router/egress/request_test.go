@@ -133,7 +133,9 @@ func TestRequestLegAuthorizesHost(t *testing.T) {
 		{name: "ip literal host outside the block", policy: ipBlocksPolicy("203.0.113.0/24"), authority: "198.51.100.1", want: envoy_type.StatusCode_Forbidden},
 		{name: "unparseable host", policy: allowAllPolicy(), authority: "exa mple.com", want: envoy_type.StatusCode_Forbidden},
 		{name: "empty host", policy: allowAllPolicy(), authority: "", want: envoy_type.StatusCode_Forbidden},
-		{name: "matching rule requires injection", policy: credentialInjectionPolicySample("api.example.com"), authority: "api.example.com", want: envoy_type.StatusCode_NotImplemented},
+		// A rule that declares a credential injection is allowed through: the
+		// injection is serviced by a separate ext_proc filter, not this handler.
+		{name: "matching rule with injection effect is allowed", policy: credentialInjectionPolicySample("api.example.com"), authority: "api.example.com"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

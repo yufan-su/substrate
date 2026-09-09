@@ -71,9 +71,13 @@ func (h *Handler) handleRequest(ctx context.Context, md *extproc.RequestMetadata
 		slog.WarnContext(ctx, "egress denied: no rule allows the destination", attrs()...)
 		return extproc.Result{}, extproc.NewReqError(envoy_type.StatusCode_Forbidden, deniedBody)
 	}
-	if err := applyEffects(ctx, ref, dest, decision.Effects); err != nil {
-		return extproc.Result{}, err
-	}
+	// The destination is authorized. Any credential injection the matched rule
+	// declares (inject_static_headers, the only EgressRuleEffects effect today)
+	// is performed by a separate ext_proc filter earlier in the egress gateway's
+	// filter chain, not here: this handler only authorizes the destination, so a
+	// matched rule that declares an injection is allowed through for that filter
+	// to service. In a deployment without that filter the injection simply does
+	// not happen.
 	if slog.Default().Enabled(ctx, slog.LevelDebug) {
 		slog.DebugContext(ctx, "egress allowed", attrs()...)
 	}

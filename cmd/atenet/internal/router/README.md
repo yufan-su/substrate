@@ -110,9 +110,11 @@ create, update or delete is visible to new requests within one TTL, and a
 deleted policy becomes a deny. Every policy denial answers a fixed
 `egress denied` body; the reason is in the sidecar's log.
 
-Credential injection (`inject_static_headers`) is not implemented yet: a
-matched rule that declares one is denied with 501 rather than forwarded
-without the credential the policy promised.
+Credential injection (`inject_static_headers`) is not performed by this
+handler. A matched rule that declares one is authorized like any other; the
+injection itself is serviced by a separate ext_proc filter earlier in the
+egress gateway's filter chain. In a deployment without that filter the rule is
+still allowed, but no credential is attached.
 
 ## adding a dataplane attribute
 
