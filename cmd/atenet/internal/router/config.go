@@ -145,8 +145,7 @@ type routerConfig struct {
 	// CredentialProvider configures egress credential injection on the MITM leg.
 	// Only the egress gateway sets it, and only when injection is enabled: an
 	// empty CredentialProvider.Address leaves the injector disabled, so a rule
-	// that requires an injection is skipped and the request passes through
-	// without the credential. See egress.Handler.
+	// that requires an injection is denied with a 500. See egress.Handler.
 	CredentialProvider credentialProviderConfig
 
 	LogLevel    string

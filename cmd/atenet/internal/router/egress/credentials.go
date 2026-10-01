@@ -48,17 +48,28 @@ func mapCredentialProviderError(err error) error {
 	}
 }
 
+// The bodies of an injection denied because of how the gateway was installed.
+// Unlike deniedBody they say why: the fault is the gateway's configuration,
+// not the actor's request, and whoever reads the response needs to know which
+// provider is missing.
+const (
+	providerNotConfiguredBody = "egress denied: the egress policy requires credential injection, but no credential provider is configured on this egress gateway"
+	providerNotAvailableBody  = "egress denied: credential provider %q is not available on this egress gateway, which serves %q"
+)
+
 // applyEffects resolves a matched rule's credential injections and returns the
 // header mutations to add to the request, or an error that denies it. A rule
 // with no injections adds nothing.
 //
-// A credential is only ever injected on the TLS-terminated MITM leg with a
-// credential provider configured. When injection cannot be performed — a
-// cleartext request, or no provider configured — it is skipped and the request
-// is let through without the credential rather than denied.
+// A credential is only ever injected on the TLS-terminated MITM leg. On a
+// cleartext leg injection is skipped and the request is let through without
+// the credential, so a secret never goes out in the clear.
 //
-// Once injection is actually attempted (TLS leg, provider present), any failure
-// to produce the credential the policy required fails closed.
+// On the MITM leg any failure to produce the credential the policy requires
+// fails closed. A gateway with no credential provider configured, or one that
+// does not serve the provider a credential URI names, denies with a 500 whose
+// body names the problem: no request can succeed until the gateway is
+// reinstalled with that provider.
 //
 // This gateway cannot mint actor JWTs yet, so on the MITM leg a rule that asks
 // for one is denied. Actor JWTs don't come from the credential provider, so
@@ -83,9 +94,9 @@ func (h *Handler) applyEffects(ctx context.Context, ref resources.ActorRef, dest
 		}
 	}
 	if h.provider == nil {
-		slog.WarnContext(ctx, "egress: skipping credential injection because no credential provider is configured; the request proceeds without the credential",
+		slog.ErrorContext(ctx, "egress denied: the policy requires credential injection, but no credential provider is configured; install the egress gateway with --credential-provider",
 			slog.Any("actor", ref), slog.String("host", dest.Hostname))
-		return nil, nil
+		return nil, extproc.NewReqError(envoy_type.StatusCode_InternalServerError, providerNotConfiguredBody)
 	}
 
 	// Atunnel connected to us with an ateom-for-actor SPIFFE ID; translate it
@@ -115,7 +126,7 @@ func (h *Handler) applyEffects(ctx context.Context, ref resources.ActorRef, dest
 				slog.ErrorContext(ctx, "egress denied: credential URI names a provider this gateway does not serve",
 					slog.Any("actor", ref), slog.String("host", dest.Hostname), slog.String("uri", inj.GetCredentialUri()),
 					slog.String("provider", name), slog.String("serves", h.providerName))
-				return nil, extproc.NewReqError(envoy_type.StatusCode_InternalServerError, deniedBody)
+				return nil, extproc.NewReqError(envoy_type.StatusCode_InternalServerError, providerNotAvailableBody, name, h.providerName)
 			}
 		}
 

@@ -69,8 +69,25 @@ patch_atenet_egress_inject() {
     return 1
   fi
 
-  local name="${ATE_CREDENTIAL_PROVIDER_NAME:-ate-secret://k8s.io}"
-  local address="${ATE_CREDENTIAL_PROVIDER_ADDRESS:-k8s-credential-provider.ate-system.svc:50051}"
+  # ATE_CREDENTIAL_PROVIDER picks the installed provider's endpoint; the NAME
+  # and ADDRESS overrides point at a provider the installer does not install.
+  local default_name default_address
+  case "${ATE_CREDENTIAL_PROVIDER:-k8s}" in
+    k8s)
+      default_name="ate-secret://k8s.io"
+      default_address="k8s-credential-provider.ate-system.svc:50051"
+      ;;
+    gsm)
+      default_name="ate-secret://secretmanager.googleapis.com"
+      default_address="gsm-credential-provider.ate-system.svc:50051"
+      ;;
+    *)
+      echo "Error: ATE_CREDENTIAL_PROVIDER must be k8s or gsm, got ${ATE_CREDENTIAL_PROVIDER}" >&2
+      return 1
+      ;;
+  esac
+  local name="${ATE_CREDENTIAL_PROVIDER_NAME:-${default_name}}"
+  local address="${ATE_CREDENTIAL_PROVIDER_ADDRESS:-${default_address}}"
   # Pin the provider's serving-cert SAN to its Service DNS name (the address
   # without the port), so a rotated cert for the same Service still validates.
   local server_name="${address%:*}"

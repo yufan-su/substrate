@@ -99,48 +99,61 @@ func TestInjectionOnTLSLeg(t *testing.T) {
 	}
 }
 
-// When injection cannot be performed — a cleartext leg, or no provider
-// configured — the request is allowed through with no header added, and any
-// provider is never dialed, because the secret must not go out over cleartext or
-// block egress the policy allowed.
-func TestInjectionSkippedAndPassedThrough(t *testing.T) {
-	tests := []struct {
-		name     string
-		policy   *ateapipb.EgressPolicy
-		provider *fakeProvider // nil means no provider configured
-		leg      string
-	}{
-		{
-			name:     "cleartext leg skips injection",
-			policy:   cleartextInjectionPolicy("api.example.com"),
-			provider: &fakeProvider{resp: bearerTokenResponse("s3cr3t")},
-			leg:      extproc.EgressCleartextFilterChainName,
-		},
-		{
-			name:     "no provider configured skips injection",
-			policy:   credentialInjectionPolicySample("api.example.com"),
-			provider: nil,
-			leg:      extproc.EgressTLSMITMFilterChainName,
-		},
+// On a cleartext leg the request is allowed through with no header added, and
+// the provider is never dialed, because the secret must not go out over
+// cleartext.
+func TestInjectionSkippedOnCleartextLeg(t *testing.T) {
+	provider := &fakeProvider{resp: bearerTokenResponse("s3cr3t")}
+	h := injectionHandlerFor(cleartextInjectionPolicy("api.example.com"), provider, injectionProviderName)
+
+	res, err := h.HandleRequestHeaders(context.Background(),
+		innerMetadata(extproc.EgressCleartextFilterChainName, "GET", "api.example.com", nil))
+	if err != nil {
+		t.Fatalf("HandleRequestHeaders: %v", err)
 	}
+	if got := res.Response.GetResponse().GetHeaderMutation().GetSetHeaders(); len(got) != 0 {
+		t.Errorf("got %d injected headers, want 0 (injection should be skipped)", len(got))
+	}
+	if provider.got != nil {
+		t.Error("provider was dialed; injection should be skipped without a callout")
+	}
+}
+
+// A gateway that has no provider for the credential the policy names is
+// misconfigured, not unlucky: it denies with a 500 whose body says which
+// provider is missing, and never forwards the request without the credential.
+func TestInjectionWithoutTheProvider(t *testing.T) {
+	tests := []struct {
+		name         string
+		provider     *fakeProvider // nil means no provider configured
+		providerName string
+		wantBody     string
+	}{{
+		name:         "no provider configured",
+		providerName: injectionProviderName,
+		wantBody:     "egress denied: the egress policy requires credential injection, but no credential provider is configured on this egress gateway",
+	}, {
+		name:         "credential URI names a provider this gateway does not serve",
+		provider:     &fakeProvider{resp: bearerTokenResponse("s3cr3t")},
+		providerName: "vault", // policy URI is ate-secret://k8s/...
+		wantBody:     `egress denied: credential provider "k8s" is not available on this egress gateway, which serves "vault"`,
+	}}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var h *Handler
 			if tc.provider == nil {
-				h = injectionHandlerFor(tc.policy, nil, injectionProviderName)
+				h = injectionHandler(nil, tc.providerName)
 			} else {
-				h = injectionHandlerFor(tc.policy, tc.provider, injectionProviderName)
+				h = injectionHandler(tc.provider, tc.providerName)
 			}
-			res, err := h.HandleRequestHeaders(context.Background(),
-				innerMetadata(tc.leg, "GET", "api.example.com", nil))
-			if err != nil {
-				t.Fatalf("HandleRequestHeaders: %v", err)
-			}
-			if got := res.Response.GetResponse().GetHeaderMutation().GetSetHeaders(); len(got) != 0 {
-				t.Errorf("got %d injected headers, want 0 (injection should be skipped)", len(got))
+			_, err := h.HandleRequestHeaders(context.Background(),
+				innerMetadata(extproc.EgressTLSMITMFilterChainName, "GET", "api.example.com", nil))
+			wantStatus(t, err, envoy_type.StatusCode_InternalServerError)
+			if err.Error() != tc.wantBody {
+				t.Errorf("body = %q, want %q", err.Error(), tc.wantBody)
 			}
 			if tc.provider != nil && tc.provider.got != nil {
-				t.Error("provider was dialed; injection should be skipped without a callout")
+				t.Errorf("provider was asked for %v, want no fetch", tc.provider.got)
 			}
 		})
 	}
@@ -157,13 +170,6 @@ func TestInjectionDenials(t *testing.T) {
 		leg          string
 		want         envoy_type.StatusCode
 	}{
-		{
-			name:         "credential URI for another provider is refused",
-			provider:     &fakeProvider{resp: bearerTokenResponse("s3cr3t")},
-			providerName: "vault", // policy URI is ate-secret://k8s/...
-			leg:          extproc.EgressTLSMITMFilterChainName,
-			want:         envoy_type.StatusCode_InternalServerError,
-		},
 		{
 			// A transient provider failure is retryable.
 			name:         "provider unavailable fails closed as retryable",

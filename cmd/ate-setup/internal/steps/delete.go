@@ -56,6 +56,12 @@ func (e *Env) DeleteAteSystem(ctx context.Context) error {
 		return fmt.Errorf("while deleting atelet daemonsets: %w", err)
 	}
 
+	// The namespace delete takes the providers' namespaced objects, but not
+	// the k8s provider's cluster-wide RBAC.
+	if err := e.deleteCredentialProviders(ctx); err != nil {
+		return err
+	}
+
 	for _, path := range [][]string{
 		{"components", "agentgateway", "configmap.yaml"},
 		{"postgres", "postgres.yaml"},
@@ -89,7 +95,8 @@ func (e *Env) DeleteAtenet(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	// Installed with the egress gateway under --credential-provider.
+	return e.deleteCredentialProviders(ctx)
 }
 
 // Deleter is the demo teardown DeleteAll drives.

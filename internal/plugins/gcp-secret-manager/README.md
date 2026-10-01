@@ -148,7 +148,7 @@ gcloud iam service-accounts add-iam-policy-binding "$GSA" --project <cluster-pro
 Then uncomment the `iam.gke.io/gcp-service-account` annotation in
 `config/serviceaccount.yaml`, set to that email, before deploying the provider.
 
-For a regional secret, see step 5.
+For a regional secret, see step 4.
 
 **2. Apply the project policy.** Edit
 [`config/project-policy.yaml`](config/project-policy.yaml), the
@@ -168,39 +168,46 @@ After editing it, restart the provider:
 kubectl -n ate-system rollout restart deployment/gsm-credential-provider
 ```
 
-**3. Deploy the provider.** From this directory:
+**3. Deploy the provider and point the egress gateway at it.** From the
+repository root:
 
 ```bash
-KO_DOCKER_REPO=<registry> make deploy
-kubectl -n ate-system rollout status deployment/gsm-credential-provider
+hack/install-ate.sh --deploy-atenet --credential-provider gsm
 ```
 
-The provider exits at startup, logging `could not find default credentials`,
-if it finds no Application Default Credentials. Off GKE, on a kind cluster say,
-no metadata server supplies them; mount a service account key into the pod and
-point `GOOGLE_APPLICATION_CREDENTIALS` at it. A missing IAM grant does not stop
-the provider: it fails each fetch with `PermissionDenied`.
-
-**4. Point the egress gateway at the provider.** From the repository root:
-
-```bash
-hack/install-ate.sh --deploy-atenet --experimental-egress-credential-injection \
-  --credential-provider-name ate-secret://secretmanager.googleapis.com \
-  --credential-provider-address gsm-credential-provider.ate-system.svc:50051
-```
-
-This sets the `--credential-provider-*` flags on the `ext-proc` container of
-the `atenet-egress` Deployment and restarts it. It also redeploys the atenet
-router, building its images from the checkout with ko; for a published release,
-put `ATE_IMAGE_REPO=<repo> ATE_IMAGE_TAG=<tag>` in front of the command. The
-gateway serves one provider at a time, so this replaces any previous one. To
-confirm:
+This builds the provider's image from this directory with ko, deploys it and
+waits for it to become ready, then sets the `--credential-provider-*` flags on
+the `ext-proc` container of the `atenet-egress` Deployment and restarts it. If
+the project policy from step 2 is missing, it creates a default-deny one in
+its place, which an edit and a restart later open up. It also redeploys the
+atenet router, building its images from the checkout with ko. The gateway
+serves one provider at a time, so this replaces any previous one. To confirm:
 
 ```bash
 kubectl -n ate-system get deployment atenet-egress -o yaml | grep credential-provider
 ```
 
-**5. Store a secret.** The payload is the raw value:
+The provider exits at startup, logging `could not find default credentials`,
+if it finds no Application Default Credentials, and the install then fails
+waiting for it. Off GKE, on a kind cluster say, no metadata server supplies
+them; mount a service account key into the pod and point
+`GOOGLE_APPLICATION_CREDENTIALS` at it. A missing IAM grant does not stop the
+provider: it fails each fetch with `PermissionDenied`.
+
+*Or deploy the provider on its own*, then point the gateway at it. This is the
+way to go with a published substrate release (`ATE_IMAGE_REPO=<repo>
+ATE_IMAGE_TAG=<tag>` in front of `hack/install-ate.sh`), since releases do not
+publish the provider's image:
+
+```bash
+KO_DOCKER_REPO=<registry> make deploy   # from this directory
+kubectl -n ate-system rollout status deployment/gsm-credential-provider
+hack/install-ate.sh --deploy-atenet --experimental-egress-credential-injection \
+  --credential-provider-name ate-secret://secretmanager.googleapis.com \
+  --credential-provider-address gsm-credential-provider.ate-system.svc:50051   # from the repository root
+```
+
+**4. Store a secret.** The payload is the raw value:
 
 ```bash
 printf '%s' "$TOKEN" | gcloud secrets create example-api-token --project <project> --data-file=-

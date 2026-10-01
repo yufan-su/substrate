@@ -57,8 +57,9 @@ flowchart LR
    request on to the origin over a new TLS connection.
 
 The reference k8s secret provider, `cmd/credential-provider/kubernetes-secrets`, resolves
-Kubernetes Secrets and is the one [For cluster admins](#for-cluster-admins)
-deploys.
+Kubernetes Secrets, and `internal/plugins/gcp-secret-manager` resolves Google
+Cloud Secret Manager secrets. The installer deploys either one; see
+[For cluster admins](#for-cluster-admins).
 
 ## The policy
 
@@ -112,37 +113,68 @@ interpret. A URI the provider refuses denies the request with 403.
 | Request decided by an `https` rule, carries the header, provider configured, credential resolves | Header value replaced with the credential; request re-originated upstream |
 | Request decided by an `https` rule, does not carry the header | Forwarded without the credential. |
 | Cleartext request decided by an `http` rule with `replaceHeaders` | Injection **skipped**, request passes through without the credential — a secret is never put on a cleartext wire |
-| No provider configured (injection not enabled at install) | Injection **skipped**, request passes through — a policy that asks for injection does not break egress on a gateway that cannot perform it |
+| No provider configured (injection not enabled at install) | **500**, fail closed, with the body `egress denied: the egress policy requires credential injection, but no credential provider is configured on this egress gateway` |
+| URI names a provider class this gateway does not serve | **500**, fail closed, with the body `egress denied: credential provider "<class>" is not available on this egress gateway, which serves "<class>"` |
 | Secret missing, or namespace not authorized for the atespace | **403**, fail closed |
 | Provider unreachable or timed out | **503**, fail closed but retryable |
 | Provider returns an empty credential, or one containing control characters | **503**, fail closed |
-| URI names a provider class this gateway does not serve; unusable header name; unparseable URI | **500**, fail closed |
+| Unusable header name; unparseable URI | **500**, fail closed |
 
-The dividing line: skipping is only for a gateway that was never asked to
-inject on this request. Once injection is *attempted* — an intercepted HTTPS
-request, provider configured — any failure to produce the credential the
-policy promised denies the request rather than letting it out without it.
+The dividing line: skipping is only for cleartext, where the credential must
+never be sent. On an intercepted HTTPS request any failure to produce the
+credential the policy promised denies the request rather than letting it out
+without it. A gateway with no provider for the policy's credential URI answers
+500 with a body that names the problem, since only reinstalling the gateway
+with that provider (see [Enable it](#enable-it)) can fix it; every other denial
+body is a plain `egress denied`, and the reason is in the gateway's log.
 
 ## For cluster admins
 
 ### Enable it
 
-**1. The gateway.** Injection is an install-time modifier on the egress
-gateway and requires the Envoy dataplane (the default):
+**1. The gateway and its provider.** Injection is an install-time modifier on
+the egress gateway and requires the Envoy dataplane (the default). Name the
+provider to install with `--credential-provider`, and the installer deploys it
+ahead of the gateway and points the gateway at it:
 
 ```bash
-hack/install-ate.sh --deploy-atenet --experimental-egress-credential-injection
+# Kubernetes Secrets:
+hack/install-ate.sh --deploy-atenet --credential-provider k8s
+
+# Google Cloud Secret Manager (see its README for the IAM grants it needs):
+hack/install-ate.sh --deploy-atenet --credential-provider gsm
 ```
 
-| Flag | Purpose | Default |
-|---|---|---|
-| `--credential-provider-name` | Provider class the gateway serves, as an `ate-secret://` prefix; a policy URI of any other class fails closed | `ate-secret://k8s.io` |
-| `--credential-provider-address` | Where the gateway dials the provider | `k8s-credential-provider.ate-system.svc:50051` |
+| `--credential-provider` | Provider class the gateway serves | Address the gateway dials | Authorization policy |
+|---|---|---|---|
+| `k8s` | `ate-secret://k8s.io` | `k8s-credential-provider.ate-system.svc:50051` | `k8s-credential-provider-namespace-policy` ConfigMap |
+| `gsm` | `ate-secret://secretmanager.googleapis.com` | `gsm-credential-provider.ate-system.svc:50051` | `gsm-credential-provider-project-policy` ConfigMap ([README](../internal/plugins/gcp-secret-manager/README.md)) |
 
-**2. The provider.** A separate component — the flag above only configures the
-gateway's client side. Until something serves the configured address, every
-matching injection rule fails closed with 503. For the Kubernetes Secrets
-provider, deploy the manifests under `manifests/egress-credential-injection/`:
+The flag implies `--experimental-egress-credential-injection` and
+`--experimental-use-sdsmint`. A gateway serves one provider at a time: a policy
+URI of any other class fails closed with 500. `--deploy-ate-system` honors the
+flag too, and `--delete-atenet` and `--delete-ate-system` remove either
+provider.
+
+If the provider's authorization policy ConfigMap does not exist yet, the
+installer creates it **default-deny**, so the provider starts but resolves
+nothing until you grant atespaces access (step 2). An existing policy is never
+overwritten.
+
+To use a provider the installer does not deploy, pass
+`--experimental-egress-credential-injection` with `--credential-provider-name`
+(the class, as an `ate-secret://` prefix) and `--credential-provider-address`
+instead, and deploy the provider yourself. Until something serves that
+address, every matching injection rule fails closed with 503.
+
+**2. Grant access.** For Secret Manager, follow steps 1 and 2 of the plugin
+README's [Install](../internal/plugins/gcp-secret-manager/README.md#install):
+grant the provider's Google identity access to your secrets, and list the
+projects each atespace may read in its policy.
+
+For the Kubernetes Secrets provider, edit the atespace→namespace policy and add
+your secrets. The samples under `manifests/egress-credential-injection/` match
+[the example policy](#the-policy):
 
 ```bash
 # The atespace→namespace authorization policy (edit for your atespaces first;
@@ -151,9 +183,6 @@ kubectl apply -f manifests/egress-credential-injection/namespace-policy.yaml
 
 # A sample secret matching the sample policy:
 kubectl apply -f manifests/egress-credential-injection/sample-secret.yaml
-
-# The provider itself (ko builds its image):
-hack/run-tool.sh ko apply -f manifests/egress-credential-injection/k8s-credential-provider.yaml
 ```
 
 The provider loads the namespace policy **once at startup** and does not yet
@@ -170,7 +199,7 @@ all — see [egress-trust-bundle.md](egress-trust-bundle.md).
 
 ### Verify
 
-Confirm the provider is ready:
+Confirm the provider is ready (`gsm-credential-provider` for Secret Manager):
 
 ```bash
 kubectl -n ate-system rollout status deployment/k8s-credential-provider

@@ -112,14 +112,19 @@ usage() {
   echo "                                         Point the egress gateway's MITM-leg handler at a credential provider, so a"
   echo "                                         matching EgressPolicy rule injects its credential. A modifier applied when"
   echo "                                         the gateway is deployed (e.g. with --deploy-atenet); the credential provider"
-  echo "                                         itself is deployed separately. Implies --experimental-use-sdsmint; requires"
-  echo "                                         --atenet-dataplane=envoy. (experimental)"
-  echo "  --credential-provider-name NAME        Provider the injector serves, as a ate-secret:// prefix"
-  echo "                                         (default ate-secret://k8s.io). Only meaningful with"
-  echo "                                         --experimental-egress-credential-injection. (experimental)"
+  echo "                                         itself is deployed separately unless --credential-provider names one."
+  echo "                                         Implies --experimental-use-sdsmint; requires --atenet-dataplane=envoy. (experimental)"
+  echo "  --credential-provider k8s|gsm          Install that credential provider ahead of the egress gateway and point the"
+  echo "                                         gateway at it: k8s (Kubernetes Secrets) or gsm (Google Cloud Secret Manager,"
+  echo "                                         built from source). Creates a default-deny policy for it when there is none."
+  echo "                                         Implies --experimental-egress-credential-injection. (experimental)"
+  echo "  --credential-provider-name NAME        Provider the injector serves, as a ate-secret:// prefix, for a provider"
+  echo "                                         --credential-provider does not install (default ate-secret://k8s.io). Only"
+  echo "                                         meaningful with --experimental-egress-credential-injection. (experimental)"
   echo "  --credential-provider-address HOST:PORT"
-  echo "                                         Address the egress gateway dials the credential provider at"
-  echo "                                         (default k8s-credential-provider.ate-system.svc:50051). Only meaningful with"
+  echo "                                         Address the egress gateway dials the credential provider at, for a provider"
+  echo "                                         --credential-provider does not install (default"
+  echo "                                         k8s-credential-provider.ate-system.svc:50051). Only meaningful with"
   echo "                                         --experimental-egress-credential-injection. (experimental)"
   echo ""
   echo "Infrastructure components:"
@@ -279,6 +284,16 @@ for ((i = 0; i < ${#prescan_args[@]}; i++)); do
     --experimental-egress-credential-injection)
       GLOBAL_FLAGS+=(--experimental-use-sdsmint --experimental-egress-credential-injection)
       ;;
+    # Choosing a provider turns injection on in ate-setup, so it implies
+    # sdsmint here for the same reason.
+    --credential-provider=*) GLOBAL_FLAGS+=(--experimental-use-sdsmint "${prescan_args[i]}") ;;
+    --credential-provider)
+      if (( i + 1 >= ${#prescan_args[@]} )); then
+        echo "Error: --credential-provider requires k8s or gsm" >&2
+        exit 1
+      fi
+      GLOBAL_FLAGS+=(--experimental-use-sdsmint "--credential-provider=${prescan_args[$((i + 1))]}")
+      ;;
     --credential-provider-name=*) GLOBAL_FLAGS+=("${prescan_args[i]}") ;;
     --credential-provider-name)
       if (( i + 1 >= ${#prescan_args[@]} )); then
@@ -370,12 +385,13 @@ while [[ "$#" -gt 0 ]]; do
     --atenet-dataplane|--podcert-workers-per-signer|--rollout-timeout|--otlp-endpoint) shift ;;
     --cluster-size) shift ;;
     --experimental-additional-egress-extproc-service) shift ;;
-    --credential-provider-name|--credential-provider-address) shift ;;
+    --credential-provider|--credential-provider-name|--credential-provider-address) shift ;;
     --benchmark-worker-count|--benchmark-sandbox-class|--benchmark-actor-memory) shift ;;
     --atenet-dataplane=*|--podcert-workers-per-signer=*|--rollout-timeout=*|--otlp-endpoint=*) ;;
     --cluster-size=*|--cordon-control-plane|--cordon-control-plane=*) ;;
     --experimental-use-sdsmint|--experimental-additional-egress-extproc-service=*) ;;
-    --experimental-egress-credential-injection|--credential-provider-name=*|--credential-provider-address=*) ;;
+    --experimental-egress-credential-injection|--credential-provider=*) ;;
+    --credential-provider-name=*|--credential-provider-address=*) ;;
     --benchmark-worker-count=*|--benchmark-sandbox-class=*|--benchmark-actor-memory=*) ;;
 
     --deploy-ate-system) ate_setup deploy ate-system "--setup-csi=${SETUP_CSI}" ;;

@@ -15,7 +15,11 @@
 package ko
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -56,6 +60,43 @@ func TestArgsKeepTheSubcommandAndTargetInFront(t *testing.T) {
 	args := r.args("resolve", "-f", "-")
 	if got := args[:3]; !slices.Equal(got, []string{"resolve", "-f", "-"}) {
 		t.Errorf("args[:3] = %v, want [resolve -f -]", got)
+	}
+}
+
+// A plugin's packages live in a Go module of their own and only build from
+// inside it, so InModule has to move where ko runs, and only for the copy it
+// returns: the repository's own components still build from the root.
+func TestInModuleRunsKoFromTheModule(t *testing.T) {
+	t.Setenv("VERSION", "v0.0.0-test")
+	stub := filepath.Join(t.TempDir(), "ko")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\npwd -P\n"), 0o755); err != nil {
+		t.Fatalf("writing the stub ko: %v", err)
+	}
+	root, module := t.TempDir(), t.TempDir()
+	r := &Runner{Root: root, Stderr: os.Stderr, binary: stub}
+
+	for _, tc := range []struct {
+		name   string
+		runner *Runner
+		want   string
+	}{
+		{"repository", r, root},
+		{"module", r.InModule(module), module},
+		{"repository after InModule", r, root},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := tc.runner.ResolveBytes(context.Background(), nil)
+			if err != nil {
+				t.Fatalf("ResolveBytes: %v", err)
+			}
+			want, err := filepath.EvalSymlinks(tc.want)
+			if err != nil {
+				t.Fatalf("EvalSymlinks(%s): %v", tc.want, err)
+			}
+			if got := strings.TrimSpace(string(out)); got != want {
+				t.Errorf("ko ran in %s, want %s", got, want)
+			}
+		})
 	}
 }
 

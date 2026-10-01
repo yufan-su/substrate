@@ -90,7 +90,11 @@ var deployControllerCmd = &cobra.Command{
 var deployAtenetCmd = &cobra.Command{
 	Use:   "atenet",
 	Short: "Deploy the atenet dataplane only: router and egress",
-	Args:  cobra.NoArgs,
+	Long: `Deploy the atenet router and egress gateway.
+
+With --credential-provider k8s or gsm, the named credential provider is
+installed ahead of the egress gateway, which is pointed at it.`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return env.DeployAtenet(cmd.Context())
 	},

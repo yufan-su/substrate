@@ -62,6 +62,26 @@ func (c *Client) ApplyConfigMap(ctx context.Context, namespace, name string, dat
 	return nil
 }
 
+// CreateConfigMapIfAbsent creates a ConfigMap from string data unless one of
+// that name already exists, and reports whether it created it. Unlike
+// ApplyConfigMap it never changes an existing ConfigMap, which is what a
+// default an operator is meant to edit needs.
+func (c *Client) CreateConfigMapIfAbsent(ctx context.Context, namespace, name string, data map[string]string) (bool, error) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		Data:       data,
+	}
+	_, err := c.Typed.CoreV1().ConfigMaps(namespace).Create(ctx, cm, metav1.CreateOptions{FieldManager: FieldManager})
+	switch {
+	case err == nil:
+		return true, nil
+	case apierrors.IsAlreadyExists(err):
+		return false, nil
+	default:
+		return false, fmt.Errorf("while creating configmap %s/%s: %w", namespace, name, err)
+	}
+}
+
 // GetConfigMap returns a ConfigMap, or nil when it does not exist.
 func (c *Client) GetConfigMap(ctx context.Context, namespace, name string) (*corev1.ConfigMap, error) {
 	cm, err := c.Typed.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})

@@ -49,6 +49,7 @@ func loadEnv(t *testing.T) {
 		"ATE_API_POSTGRES_SERVER_CA_FILE",
 		"ATE_ATENET_DATAPLANE",
 		"ATE_CREDENTIAL_INJECTION_ENABLED",
+		"ATE_CREDENTIAL_PROVIDER",
 		"ATE_CREDENTIAL_PROVIDER_ADDRESS",
 		"ATE_CREDENTIAL_PROVIDER_NAME",
 		"ATE_EXPERIMENTAL_USE_SDSMINT",
@@ -535,6 +536,118 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := Load(tc.opts); err == nil {
 				t.Fatal("Load() succeeded, want an error")
+			}
+		})
+	}
+}
+
+// Choosing a provider to install turns injection on by itself, and reaches the
+// scripts ate-setup delegates to like every other install switch.
+func TestLoadCredentialProvider(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts Options
+		env  map[string]string
+		want string
+	}{
+		{name: "unset installs nothing", opts: Options{ExperimentalUseSDSMint: true}},
+		{name: "flag", opts: Options{ExperimentalUseSDSMint: true, CredentialProvider: CredentialProviderGSM}, want: CredentialProviderGSM},
+		{
+			name: "environment",
+			opts: Options{ExperimentalUseSDSMint: true},
+			env:  map[string]string{"ATE_CREDENTIAL_PROVIDER": CredentialProviderK8s},
+			want: CredentialProviderK8s,
+		},
+		{
+			name: "flag beats the environment",
+			opts: Options{ExperimentalUseSDSMint: true, CredentialProvider: CredentialProviderK8s},
+			env:  map[string]string{"ATE_CREDENTIAL_PROVIDER": CredentialProviderGSM},
+			want: CredentialProviderK8s,
+		},
+		{
+			// The k8s provider is published with every release, unlike the
+			// plugin, so a pre-built install can deploy it.
+			name: "k8s with pre-built images",
+			opts: Options{ExperimentalUseSDSMint: true, CredentialProvider: CredentialProviderK8s, ImageRepo: "registry.example.com/substrate", ImageTag: "v0.0.0"},
+			want: CredentialProviderK8s,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			loadEnv(t)
+			for name, value := range tc.env {
+				t.Setenv(name, value)
+			}
+			cfg, err := Load(tc.opts)
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.CredentialProvider != tc.want {
+				t.Errorf("CredentialProvider = %q, want %q", cfg.CredentialProvider, tc.want)
+			}
+			if wantInjection := tc.want != ""; cfg.ExperimentalEgressCredentialInjection != wantInjection {
+				t.Errorf("ExperimentalEgressCredentialInjection = %v, want %v", cfg.ExperimentalEgressCredentialInjection, wantInjection)
+			}
+			got, exported := scriptEnvMap(t, cfg)["ATE_CREDENTIAL_PROVIDER"]
+			if exported != (tc.want != "") || got != tc.want {
+				t.Errorf("ScriptEnv()[ATE_CREDENTIAL_PROVIDER] = %q (exported %v), want %q", got, exported, tc.want)
+			}
+		})
+	}
+}
+
+// Each refusal has to name the actual problem: an unknown provider must not be
+// reported as a missing --experimental-use-sdsmint, and the dependency errors
+// must name the flag the user passed.
+func TestLoadRejectsInvalidCredentialProvider(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		opts    Options
+		env     map[string]string
+		wantErr string
+	}{
+		{
+			name:    "unknown provider",
+			opts:    Options{CredentialProvider: "vault"},
+			wantErr: `--credential-provider must be k8s or gsm, got "vault"`,
+		},
+		{
+			name:    "missing sdsmint",
+			opts:    Options{CredentialProvider: CredentialProviderK8s},
+			wantErr: "--credential-provider requires --experimental-use-sdsmint",
+		},
+		{
+			name:    "agentgateway",
+			opts:    Options{ExperimentalUseSDSMint: true, Router: RouterAgentgateway, CredentialProvider: CredentialProviderK8s},
+			wantErr: "--credential-provider requires --atenet-dataplane=envoy",
+		},
+		{
+			name:    "provider name override",
+			opts:    Options{ExperimentalUseSDSMint: true, CredentialProvider: CredentialProviderGSM, CredentialProviderName: "ate-secret://k8s.io"},
+			wantErr: "are for a provider ate-setup does not install",
+		},
+		{
+			name:    "provider address override from the environment",
+			opts:    Options{ExperimentalUseSDSMint: true, CredentialProvider: CredentialProviderK8s},
+			env:     map[string]string{"ATE_CREDENTIAL_PROVIDER_ADDRESS": "cred.ate-system.svc:50051"},
+			wantErr: "are for a provider ate-setup does not install",
+		},
+		{
+			name:    "gsm with pre-built images",
+			opts:    Options{ExperimentalUseSDSMint: true, CredentialProvider: CredentialProviderGSM, ImageRepo: "registry.example.com/substrate", ImageTag: "v0.0.0"},
+			wantErr: "--credential-provider=gsm builds the provider from this checkout, which --image-repo does not do",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			loadEnv(t)
+			for name, value := range tc.env {
+				t.Setenv(name, value)
+			}
+			_, err := Load(tc.opts)
+			if err == nil {
+				t.Fatal("Load() succeeded, want an error")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Load() error = %q, want it to contain %q", err, tc.wantErr)
 			}
 		})
 	}

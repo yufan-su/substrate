@@ -69,6 +69,28 @@ func TestPatchAtenetEgressInject(t *testing.T) {
 		}
 	}
 
+	// --credential-provider=gsm points the gateway at the plugin instead,
+	// pinning its Service name as the serving certificate's SAN.
+	env.Cfg.CredentialProvider = config.CredentialProviderGSM
+	gsm, err := env.patchAtenetEgressInject(raw)
+	if err != nil {
+		t.Fatalf("patchAtenetEgressInject with gsm failed: %v", err)
+	}
+	for _, want := range []string{
+		"--credential-provider-name=ate-secret://secretmanager.googleapis.com",
+		"--credential-provider-address=gsm-credential-provider.ate-system.svc:50051",
+		"--credential-provider-server-name=gsm-credential-provider.ate-system.svc",
+	} {
+		if !strings.Contains(string(gsm), want) {
+			t.Errorf("gsm-patched manifest is missing spliced flag %q", want)
+		}
+	}
+	for _, stale := range []string{"ate-secret://k8s.io", "k8s-credential-provider"} {
+		if strings.Contains(string(gsm), stale) {
+			t.Errorf("gsm-patched manifest still names the k8s provider (%s)", stale)
+		}
+	}
+
 	// The result must still be valid YAML: find the atenet-egress ConfigMap's
 	// envoy.yaml and re-parse it.
 	for _, doc := range strings.Split(string(patched), "\n---\n") {

@@ -202,14 +202,7 @@ func (e *Env) patchAtenetEgressInject(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("--experimental-egress-credential-injection requires --experimental-use-sdsmint")
 	}
 
-	name := e.Cfg.CredentialProviderName
-	if name == "" {
-		name = "ate-secret://k8s.io"
-	}
-	address := e.Cfg.CredentialProviderAddress
-	if address == "" {
-		address = "k8s-credential-provider.ate-system.svc:50051"
-	}
+	name, address := e.credentialProviderEndpoint()
 	serverName := address
 	if i := strings.LastIndex(address, ":"); i >= 0 {
 		serverName = address[:i]
@@ -398,6 +391,10 @@ func (e *Env) applyAtenetEgress(ctx context.Context) error {
 		return err
 	}
 
+	// Ahead of the gateway, so it can serve the gateway's first fetch.
+	if err := e.deployCredentialProvider(ctx); err != nil {
+		return err
+	}
 	if err := e.Kube.ApplyBytes(ctx, manifests); err != nil {
 		return err
 	}

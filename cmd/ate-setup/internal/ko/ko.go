@@ -52,8 +52,12 @@ const baseImportPaths = "--base-import-paths"
 
 // Runner invokes ko with a fixed repository root and environment.
 type Runner struct {
-	// Root is the repository root; ko runs with this as its working directory.
+	// Root is the repository root; ko runs with this as its working directory
+	// unless Dir is set.
 	Root string
+	// Dir, when set, is the working directory ko runs in instead of Root. See
+	// InModule.
+	Dir string
 	// Env holds extra environment entries such as KO_DOCKER_REPO.
 	Env []string
 	// Stderr receives ko's build progress output.
@@ -93,13 +97,31 @@ func findBinary(root string) (string, error) {
 	return binary, nil
 }
 
+// InModule returns a copy of r that runs ko from dir, a Go module of its own
+// inside the repository such as a plugin. ko builds a ko:// reference with the
+// Go module of its working directory, and reads that directory's .ko.yaml, so
+// such a module's packages only build from inside it.
+func (r *Runner) InModule(dir string) *Runner {
+	c := *r
+	c.Dir = dir
+	return &c
+}
+
+// workDir is the directory ko runs in.
+func (r *Runner) workDir() string {
+	if r.Dir != "" {
+		return r.Dir
+	}
+	return r.Root
+}
+
 // Resolve builds and publishes the images referenced by the manifest read from
 // path (or from stdinManifest when path is "-") and returns the manifest with
 // image references replaced by digests.
 func (r *Runner) Resolve(ctx context.Context, path string, stdinManifest []byte) ([]byte, error) {
 	defer log.Elapsed(time.Now(), "ko resolve -f "+path)
 	cmd := exec.CommandContext(ctx, r.binary, r.args("resolve", "-f", path)...)
-	cmd.Dir = r.Root
+	cmd.Dir = r.workDir()
 	cmd.Env = append(os.Environ(), r.Env...)
 	if path == "-" {
 		cmd.Stdin = bytes.NewReader(stdinManifest)
@@ -124,7 +146,7 @@ func (r *Runner) Resolve(ctx context.Context, path string, stdinManifest []byte)
 func (r *Runner) Build(ctx context.Context, importPath string) (string, error) {
 	defer log.Elapsed(time.Now(), "ko build "+importPath)
 	cmd := exec.CommandContext(ctx, r.binary, r.args("build", importPath)...)
-	cmd.Dir = r.Root
+	cmd.Dir = r.workDir()
 	cmd.Env = append(os.Environ(), r.Env...)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout

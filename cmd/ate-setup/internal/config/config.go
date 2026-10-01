@@ -45,6 +45,11 @@ const (
 	// the podcertificate controller's API rate limits to match.
 	ClusterSizeSize0  = "size0"
 	ClusterSizeSize10 = "size10"
+
+	// Credential providers --credential-provider installs: the Kubernetes
+	// Secrets reference provider, and the Google Cloud Secret Manager plugin.
+	CredentialProviderK8s = "k8s"
+	CredentialProviderGSM = "gsm"
 )
 
 // DefaultRolloutTimeout is the default wait timeout for workload rollouts.
@@ -177,10 +182,17 @@ type Config struct {
 
 	// ExperimentalEgressCredentialInjection points the egress gateway's MITM-leg
 	// handler at a credential provider so a matching EgressPolicy rule injects its
-	// credential. CredentialProviderName/Address configure the provider.
+	// credential.
 	ExperimentalEgressCredentialInjection bool
-	CredentialProviderName                string
-	CredentialProviderAddress             string
+	// CredentialProvider is the provider ate-setup installs alongside the egress
+	// gateway and points it at (ATE_CREDENTIAL_PROVIDER): one of the
+	// CredentialProvider constants. Setting it enables injection. Empty
+	// installs no provider.
+	CredentialProvider string
+	// CredentialProviderName/Address point the gateway at a provider ate-setup
+	// does not install. Empty means the default provider's.
+	CredentialProviderName    string
+	CredentialProviderAddress string
 
 	// AnthropicAPIKey is required only by the claude-code-multiplex demo.
 	AnthropicAPIKey string
@@ -244,6 +256,7 @@ type Options struct {
 	ExperimentalUseSDSMint                bool
 	AdditionalEgressExtprocService        string
 	ExperimentalEgressCredentialInjection bool
+	CredentialProvider                    string
 	CredentialProviderName                string
 	CredentialProviderAddress             string
 	OtlpEndpoint                          string
@@ -321,7 +334,10 @@ func Load(opts Options) (*Config, error) {
 
 	sdsmint := opts.ExperimentalUseSDSMint || env["ATE_EXPERIMENTAL_USE_SDSMINT"] == "true"
 	extproc := firstNonEmpty(opts.AdditionalEgressExtprocService, env["ATE_ADDITIONAL_EGRESS_EXTPROC_SERVICE"])
-	injection := opts.ExperimentalEgressCredentialInjection || env["ATE_CREDENTIAL_INJECTION_ENABLED"] == "true"
+	// Choosing a provider to install only makes sense with injection on, so it
+	// turns injection on rather than asking for both.
+	credentialProvider := firstNonEmpty(opts.CredentialProvider, env["ATE_CREDENTIAL_PROVIDER"])
+	injection := opts.ExperimentalEgressCredentialInjection || env["ATE_CREDENTIAL_INJECTION_ENABLED"] == "true" || credentialProvider != ""
 	cordon := opts.CordonControlPlane || env["ATE_INSTALL_CORDON_CONTROL_PLANE"] == "true"
 
 	// Read with the two-value form: an exported but empty
@@ -364,6 +380,7 @@ func Load(opts Options) (*Config, error) {
 		ExperimentalUseSDSMint:                sdsmint,
 		AdditionalEgressExtprocService:        extproc,
 		ExperimentalEgressCredentialInjection: injection,
+		CredentialProvider:                    credentialProvider,
 		CredentialProviderName:                firstNonEmpty(opts.CredentialProviderName, env["ATE_CREDENTIAL_PROVIDER_NAME"]),
 		CredentialProviderAddress:             firstNonEmpty(opts.CredentialProviderAddress, env["ATE_CREDENTIAL_PROVIDER_ADDRESS"]),
 		AnthropicAPIKey:                       env["ANTHROPIC_API_KEY"],
@@ -459,13 +476,49 @@ func validate(cfg *Config) error {
 			return fmt.Errorf("--experimental-additional-egress-extproc-service requires --atenet-dataplane=envoy")
 		}
 	}
+	if err := validateCredentialProvider(cfg); err != nil {
+		return err
+	}
 	if cfg.ExperimentalEgressCredentialInjection {
+		// Name the flag the user actually passed: --credential-provider turns
+		// injection on by itself.
+		flag := "--experimental-egress-credential-injection"
+		if cfg.CredentialProvider != "" {
+			flag = "--credential-provider"
+		}
 		if !cfg.ExperimentalUseSDSMint {
-			return fmt.Errorf("--experimental-egress-credential-injection requires --experimental-use-sdsmint")
+			return fmt.Errorf("%s requires --experimental-use-sdsmint", flag)
 		}
 		if cfg.Router != RouterEnvoy {
-			return fmt.Errorf("--experimental-egress-credential-injection requires --atenet-dataplane=envoy")
+			return fmt.Errorf("%s requires --atenet-dataplane=envoy", flag)
 		}
+	}
+	return nil
+}
+
+// validateCredentialProvider checks --credential-provider against the flags
+// that would contradict it.
+func validateCredentialProvider(cfg *Config) error {
+	switch cfg.CredentialProvider {
+	case "":
+		return nil
+	case CredentialProviderK8s, CredentialProviderGSM:
+	default:
+		return fmt.Errorf("--credential-provider must be %s or %s, got %q", CredentialProviderK8s, CredentialProviderGSM, cfg.CredentialProvider)
+	}
+	// An installed provider is only reachable at its own Service name, which
+	// its serving certificate carries, so there is nothing to override.
+	if cfg.CredentialProviderName != "" || cfg.CredentialProviderAddress != "" {
+		return fmt.Errorf("--credential-provider=%s points the egress gateway at the provider it installs; "+
+			"--credential-provider-name and --credential-provider-address (or ATE_CREDENTIAL_PROVIDER_NAME and "+
+			"ATE_CREDENTIAL_PROVIDER_ADDRESS) are for a provider ate-setup does not install, so drop one or the other",
+			cfg.CredentialProvider)
+	}
+	// The plugin is its own Go module and no release publishes its image.
+	if cfg.CredentialProvider == CredentialProviderGSM && cfg.Images.IsPrebuilt() {
+		return fmt.Errorf("--credential-provider=%s builds the provider from this checkout, which --image-repo does not do; "+
+			"drop --image-repo, or deploy the provider yourself (internal/plugins/gcp-secret-manager/README.md) and point "+
+			"the gateway at it with --credential-provider-name and --credential-provider-address", CredentialProviderGSM)
 	}
 	return nil
 }
@@ -626,6 +679,10 @@ func (c *Config) ScriptEnv() []string {
 	}
 	if c.ExperimentalEgressCredentialInjection {
 		merged["ATE_CREDENTIAL_INJECTION_ENABLED"] = "true"
+	}
+	delete(merged, "ATE_CREDENTIAL_PROVIDER")
+	if c.CredentialProvider != "" {
+		merged["ATE_CREDENTIAL_PROVIDER"] = c.CredentialProvider
 	}
 	if c.CredentialProviderName != "" {
 		merged["ATE_CREDENTIAL_PROVIDER_NAME"] = c.CredentialProviderName
