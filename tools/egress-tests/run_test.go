@@ -378,7 +378,7 @@ func TestRun(t *testing.T) {
 
 			var printed bytes.Buffer
 			rep.print(&printed)
-			for _, want := range []string{"300 requests", "timeout=3", "egress-target-0 (3/300)"} {
+			for _, want := range []string{"request-interval=0s", "300 requests", "timeout=3", "egress-target-0 (3/300)"} {
 				if !strings.Contains(printed.String(), want) {
 					t.Errorf("printed report lacks %q:\n%s", want, printed.String())
 				}
