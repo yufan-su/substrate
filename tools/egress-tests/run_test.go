@@ -52,6 +52,8 @@ type fakeAPI struct {
 	calls    map[string][]string // RPC -> actor names, in call order
 	// resumeErrs are returned by ResumeActor, one per call, before it succeeds.
 	resumeErrs []error
+	// suspendErr, if set, is what SuspendActor returns.
+	suspendErr error
 	nextUID    int
 }
 
@@ -163,6 +165,9 @@ func (f *fakeAPI) SuspendActor(_ context.Context, in *ateapipb.SuspendActorReque
 	defer f.mu.Unlock()
 	name := in.GetActor().GetName()
 	f.record("SuspendActor", name)
+	if f.suspendErr != nil {
+		return nil, f.suspendErr
+	}
 	f.actors[name] = "suspended"
 	return &ateapipb.SuspendActorResponse{}, nil
 }
@@ -532,6 +537,42 @@ func TestStopReachesLoopsWhoseStartFailed(t *testing.T) {
 	}
 	if rep.Loop.Requests != 200 {
 		t.Errorf("merged requests = %d, want the 200 of the two loops that ran", rep.Loop.Requests)
+	}
+}
+
+func TestCleanupDeadlineStartsAfterTheLoops(t *testing.T) {
+	cfg := testConfig()
+	cfg.Duration = 100 * time.Millisecond
+	api := newFakeAPI()
+	r, fr, out := newTestRunner(t, cfg, api, cfg.Endpoints)
+	// Shorter than the run: a deadline counted from the resume would be spent
+	// before the loops are stopped.
+	r.cleanupTimeout = 50 * time.Millisecond
+
+	rep, err := r.run(t.Context())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	if len(fr.stops) != cfg.Parallel || rep.Suspend.Succeeded != cfg.Parallel {
+		t.Errorf("%d loops stopped and %d actors suspended, want %d each", len(fr.stops), rep.Suspend.Succeeded, cfg.Parallel)
+	}
+	if rep.Loop.Requests != 300 {
+		t.Errorf("merged requests = %d, want 300", rep.Loop.Requests)
+	}
+}
+
+func TestRunFailsWhenActorsAreLeftRunning(t *testing.T) {
+	cfg := testConfig()
+	api := newFakeAPI()
+	api.suspendErr = status.Error(codes.FailedPrecondition, "cannot suspend")
+	r, _, out := newTestRunner(t, cfg, api, cfg.Endpoints)
+
+	rep, err := r.run(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "3 actors were not suspended") {
+		t.Fatalf("run = %v, want an error naming the 3 unsuspended actors\n%s", err, out)
+	}
+	if rep == nil || rep.Suspend.Failed != cfg.Parallel {
+		t.Errorf("report = %+v, want it returned with the suspend failures", rep)
 	}
 }
 
