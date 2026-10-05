@@ -1,0 +1,67 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The server behind every endpoint of the egress scale test. deploy.sh renders
+# target-service.yaml.tmpl once per endpoint, and all of those Services select
+# these pods. Two replicas are plenty: one pod of this server answers far more
+# requests than one egress gateway replica can send.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: egress-tests-targets
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: egress-target
+  namespace: egress-tests-targets
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: egress-target
+  template:
+    metadata:
+      labels:
+        app: egress-target
+    spec:
+      containers:
+      - name: target
+        image: ko://github.com/agent-substrate/substrate/tools/egress-tests/target
+        args: ["--listen=:8080"]
+        ports:
+        - name: http
+          containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 2
+        resources:
+          requests:
+            cpu: 500m
+            memory: 64Mi
+        # runAsUser must be spelled out: ko's distroless static base declares
+        # no USER, so runAsNonRoot alone makes kubelet refuse to start it.
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          capabilities:
+            drop: ["ALL"]
