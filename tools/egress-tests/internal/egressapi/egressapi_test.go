@@ -217,27 +217,34 @@ func TestClassify(t *testing.T) {
 }
 
 func TestStartRequestValidate(t *testing.T) {
-	many := make([]string, MaxURLs+1)
-	for i := range many {
-		many[i] = "http://h/"
-	}
 	for _, tc := range []struct {
 		name    string
 		req     StartRequest
 		wantErr bool
 	}{
-		{"ok", StartRequest{URLs: []string{"http://a.b.svc.cluster.local/"}}, false},
-		{"no urls", StartRequest{}, true},
-		{"too many", StartRequest{URLs: many}, true},
-		{"https", StartRequest{URLs: []string{"https://a/"}}, true},
-		{"relative", StartRequest{URLs: []string{"/path"}}, true},
-		{"negative timeout", StartRequest{URLs: []string{"http://a/"}, RequestTimeoutMs: -1}, true},
-		{"negative interval", StartRequest{URLs: []string{"http://a/"}, IntervalMs: -1}, true},
+		{"ok", StartRequest{Endpoints: 10}, false},
+		{"most endpoints", StartRequest{Endpoints: MaxEndpoints}, false},
+		{"no endpoints", StartRequest{}, true},
+		{"too many endpoints", StartRequest{Endpoints: MaxEndpoints + 1}, true},
+		{"negative timeout", StartRequest{Endpoints: 1, RequestTimeoutMs: -1}, true},
+		{"negative interval", StartRequest{Endpoints: 1, IntervalMs: -1}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.req.Validate(); (err != nil) != tc.wantErr {
 				t.Errorf("Validate() = %v, wantErr %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestEndpointNames(t *testing.T) {
+	if got, want := ServiceName(7), "egress-target-7"; got != want {
+		t.Errorf("ServiceName(7) = %q, want %q", got, want)
+	}
+	if got, want := EndpointHost(7), "egress-target-7.egress-tests-targets.svc.cluster.local"; got != want {
+		t.Errorf("EndpointHost(7) = %q, want %q", got, want)
+	}
+	if got, want := EndpointURL(7), "http://egress-target-7.egress-tests-targets.svc.cluster.local/"; got != want {
+		t.Errorf("EndpointURL(7) = %q, want %q", got, want)
 	}
 }

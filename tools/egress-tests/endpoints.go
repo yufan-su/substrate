@@ -24,40 +24,16 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"github.com/agent-substrate/substrate/tools/egress-tests/internal/egressapi"
 )
 
-// targetNamespace holds the endpoint Services; deploy.sh creates it.
-const targetNamespace = "egress-tests-targets"
-
-// maxEndpoints is the most hostnames one egress policy rule admits.
-const maxEndpoints = 256
-
-// serviceName is the name of endpoint i's Service.
-func serviceName(i int) string {
-	return fmt.Sprintf("egress-target-%d", i)
-}
-
-// endpointHost is the DNS name of endpoint i. It is the one place the endpoint
-// names are defined: the loop's URLs and the egress policy both come from it.
-func endpointHost(i int) string {
-	return serviceName(i) + "." + targetNamespace + ".svc.cluster.local"
-}
-
-// endpointURLs returns the URLs of endpoints 0 through n-1.
-func endpointURLs(n int) []string {
-	urls := make([]string, n)
-	for i := range n {
-		urls[i] = "http://" + endpointHost(i) + "/"
-	}
-	return urls
-}
-
 // buildPolicy returns the egress policy every actor gets: cleartext HTTP on
-// port 80 to exactly endpoints 0 through n-1.
+// port 80 to exactly the hosts of endpoints 0 through n-1, the ones the
+// actor's loop calls.
 func buildPolicy(atespace string, n int) *ateapipb.EgressPolicy {
 	hosts := make([]string, n)
 	for i := range n {
-		hosts[i] = endpointHost(i)
+		hosts[i] = egressapi.EndpointHost(i)
 	}
 	return &ateapipb.EgressPolicy{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: "default"},
@@ -79,9 +55,9 @@ func samePolicyHosts(existing, want *ateapipb.EgressPolicy) bool {
 // preflight fails unless the Services of endpoints 0 through n-1 exist, so a
 // run never measures requests to names that do not resolve.
 func preflight(ctx context.Context, k8s kubernetes.Interface, n int) error {
-	list, err := k8s.CoreV1().Services(targetNamespace).List(ctx, metav1.ListOptions{})
+	list, err := k8s.CoreV1().Services(egressapi.TargetNamespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("listing endpoint Services in %s: %w", targetNamespace, err)
+		return fmt.Errorf("listing endpoint Services in %s: %w", egressapi.TargetNamespace, err)
 	}
 	have := make(map[string]bool, len(list.Items))
 	for _, svc := range list.Items {
@@ -89,8 +65,8 @@ func preflight(ctx context.Context, k8s kubernetes.Interface, n int) error {
 	}
 	var missing []string
 	for i := range n {
-		if !have[serviceName(i)] {
-			missing = append(missing, serviceName(i))
+		if !have[egressapi.ServiceName(i)] {
+			missing = append(missing, egressapi.ServiceName(i))
 		}
 	}
 	if len(missing) == 0 {
@@ -102,5 +78,5 @@ func preflight(ctx context.Context, k8s kubernetes.Interface, n int) error {
 		more = fmt.Sprintf(" and %d more", len(missing)-len(shown))
 	}
 	return fmt.Errorf("%d of %d endpoint Services are missing in %s (%s%s); deploy them with tools/egress-tests/deploy.sh --deploy --endpoints %d",
-		len(missing), n, targetNamespace, strings.Join(shown, ", "), more, n)
+		len(missing), n, egressapi.TargetNamespace, strings.Join(shown, ", "), more, n)
 }

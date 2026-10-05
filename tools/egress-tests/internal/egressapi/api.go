@@ -17,11 +17,7 @@
 // the stats it reports.
 package egressapi
 
-import (
-	"errors"
-	"fmt"
-	"net/url"
-)
+import "fmt"
 
 // Routes the actor serves on port 80, the only inbound port of a sandbox.
 const (
@@ -31,20 +27,16 @@ const (
 	StopRoute   = "/stop"
 )
 
-// MaxURLs bounds StartRequest.URLs. The egress policy admits at most 256
-// hostnames, so a larger list could never be allowed anyway.
-const MaxURLs = 256
-
 // DefaultRequestTimeoutMs applies when StartRequest.RequestTimeoutMs is zero.
 const DefaultRequestTimeoutMs = 5000
 
 // StartRequest is the JSON body of POST /start.
 type StartRequest struct {
-	// URLs are requested in order, one after another, round and round until
-	// the loop is stopped.
-	URLs []string `json:"urls"`
+	// Endpoints is C: the loop requests EndpointURL(0) through
+	// EndpointURL(Endpoints-1) in order, round and round until it is stopped.
+	Endpoints int `json:"endpoints"`
 	// NewConnPerRequest opens a new TCP connection for every request instead
-	// of keeping one alive per URL.
+	// of keeping one alive per endpoint.
 	NewConnPerRequest bool `json:"newConnPerRequest"`
 	// RequestTimeoutMs bounds one request; zero means DefaultRequestTimeoutMs.
 	RequestTimeoutMs int64 `json:"requestTimeoutMs"`
@@ -54,20 +46,8 @@ type StartRequest struct {
 
 // Validate reports whether r can start a loop.
 func (r *StartRequest) Validate() error {
-	if len(r.URLs) == 0 {
-		return errors.New("urls is required")
-	}
-	if len(r.URLs) > MaxURLs {
-		return fmt.Errorf("at most %d urls, got %d", MaxURLs, len(r.URLs))
-	}
-	for _, raw := range r.URLs {
-		u, err := url.Parse(raw)
-		if err != nil {
-			return fmt.Errorf("url %q: %w", raw, err)
-		}
-		if u.Scheme != "http" || u.Host == "" {
-			return fmt.Errorf("url %q: want an absolute http:// URL", raw)
-		}
+	if r.Endpoints < 1 || r.Endpoints > MaxEndpoints {
+		return fmt.Errorf("endpoints must be between 1 and %d, got %d", MaxEndpoints, r.Endpoints)
 	}
 	if r.RequestTimeoutMs < 0 {
 		return fmt.Errorf("requestTimeoutMs cannot be negative: %d", r.RequestTimeoutMs)

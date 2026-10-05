@@ -59,8 +59,8 @@ func (c *runConfig) validate() error {
 		return fmt.Errorf("--actors must be at least 1, got %d", c.Actors)
 	case c.Parallel < 1 || c.Parallel > c.Actors:
 		return fmt.Errorf("--parallel must be between 1 and --actors (%d), got %d", c.Actors, c.Parallel)
-	case c.Endpoints < 1 || c.Endpoints > maxEndpoints:
-		return fmt.Errorf("--endpoints must be between 1 and %d, got %d", maxEndpoints, c.Endpoints)
+	case c.Endpoints < 1 || c.Endpoints > egressapi.MaxEndpoints:
+		return fmt.Errorf("--endpoints must be between 1 and %d, got %d", egressapi.MaxEndpoints, c.Endpoints)
 	case c.Duration <= 0:
 		return fmt.Errorf("--duration must be positive, got %v", c.Duration)
 	case c.ConnMode != connModeKeepAlive && c.ConnMode != connModeNewConn:
@@ -371,7 +371,7 @@ func (r *runner) waitReady(ctx context.Context, name string) error {
 // returns the actors whose loop started.
 func (r *runner) startLoops(ctx context.Context, ready []*actorRun, rep *report) []*actorRun {
 	req := egressapi.StartRequest{
-		URLs:              endpointURLs(r.cfg.Endpoints),
+		Endpoints:         r.cfg.Endpoints,
 		NewConnPerRequest: r.cfg.ConnMode == connModeNewConn,
 		RequestTimeoutMs:  r.cfg.RequestTimeout.Milliseconds(),
 		IntervalMs:        r.cfg.RequestInterval.Milliseconds(),

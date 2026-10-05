@@ -39,7 +39,7 @@ type Stats struct {
 	NewConns int64 `json:"newConns"`
 	// Errors counts failed requests by Classify's class.
 	Errors map[string]int64 `json:"errors,omitempty"`
-	// Endpoints holds per-URL counts, indexed like StartRequest.URLs.
+	// Endpoints holds per-endpoint counts, indexed by endpoint number.
 	Endpoints []Endpoint `json:"endpoints,omitempty"`
 	// Latency holds the end-to-end time of successful requests.
 	Latency Histogram `json:"latency"`
@@ -47,7 +47,7 @@ type Stats struct {
 	DNS Histogram `json:"dns"`
 }
 
-// Endpoint holds the counts for one URL.
+// Endpoint holds the counts for one endpoint.
 type Endpoint struct {
 	Requests int64 `json:"requests"`
 	Errors   int64 `json:"errors"`

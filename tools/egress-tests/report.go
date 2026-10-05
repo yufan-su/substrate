@@ -285,7 +285,7 @@ func printWorstEndpoints(w io.Writer, s *egressapi.Stats) {
 	})
 	var parts []string
 	for _, i := range idx[:min(len(idx), 5)] {
-		parts = append(parts, fmt.Sprintf("%s (%d/%d)", serviceName(i), s.Endpoints[i].Errors, s.Endpoints[i].Requests))
+		parts = append(parts, fmt.Sprintf("%s (%d/%d)", egressapi.ServiceName(i), s.Endpoints[i].Errors, s.Endpoints[i].Requests))
 	}
 	fmt.Fprintf(w, "%-10s most errors: %s\n", "", strings.Join(parts, ", "))
 }
