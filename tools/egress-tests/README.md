@@ -22,7 +22,7 @@ The test has three pieces:
 Endpoint `i` is the Service DNS name
 `egress-target-<i>.egress-tests-targets.svc.cluster.local`, on port 80. Each
 endpoint has its own Service, so it has its own name and ClusterIP. All the
-Services select the same single `egress-target` pod.
+Services select the same five `egress-target` pods.
 
 The naming scheme is fixed in code, in
 [internal/egressapi/endpoints.go](internal/egressapi/endpoints.go). The driver
@@ -183,8 +183,8 @@ Record the `atenet-egress` replica count with each result. The default is 1.
 - **CPU per request.** Measured with `kubectl top` at about 820 req/s, every
   1,000 req/s costs roughly 0.94 core in the gateway (Envoy plus ext_proc),
   0.85 core in the workers (actor, gVisor, atunnel), and 0.14 core in the
-  target. So the gateway saturates long before the single target pod does. Add
-  target replicas only after scaling the gateway out.
+  target. The gateway saturates long before the target does; its five replicas
+  leave plenty of room even after scaling the gateway out.
 
 - **Keep-alive mode hits Envoy's default circuit breaker.** Every actor
   connection is its own atunnel tunnel, and its own connection in the gateway's
