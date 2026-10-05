@@ -153,10 +153,6 @@ func (r *runner) run(ctx context.Context) (*report, error) {
 
 	actors := r.resumeActors(ctx, names, rep)
 
-	// From here on, everything resumed is put back, even after an interrupt.
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.cleanupTimeout)
-	defer cancel()
-
 	var ready []*actorRun
 	for _, a := range actors {
 		if a.ready {
@@ -166,6 +162,11 @@ func (r *runner) run(ctx context.Context) (*report, error) {
 	if ctx.Err() == nil {
 		r.steady(ctx, r.startLoops(ctx, ready, rep))
 	}
+
+	// Everything resumed is put back, even after an interrupt, under its own
+	// deadline that starts only now, whatever the run's duration.
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.cleanupTimeout)
+	defer cancel()
 	// Every ready actor gets a stop: an interrupt can land after an actor
 	// started its loop but before the driver saw the answer.
 	r.stopLoops(cleanupCtx, ready, rep)
@@ -174,6 +175,10 @@ func (r *runner) run(ctx context.Context) (*report, error) {
 	if ctx.Err() != nil {
 		rep.Interrupted = true
 		return rep, ctx.Err()
+	}
+	if rep.Stop.Failed > 0 || rep.Suspend.Failed > 0 {
+		return rep, fmt.Errorf("%d loops were not stopped and %d actors were not suspended; they may still be sending traffic, so suspend them or run cleanup",
+			rep.Stop.Failed, rep.Suspend.Failed)
 	}
 	return rep, nil
 }

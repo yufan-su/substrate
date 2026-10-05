@@ -14,8 +14,9 @@
 
 # The server behind every endpoint of the egress scale test. deploy.sh renders
 # target-service.yaml.tmpl once per endpoint, and all of those Services select
-# this pod. One replica is enough: it answers far more requests than one
-# egress gateway replica can send.
+# these pods. Five replicas keep the target far from being the bottleneck:
+# one pod answers about 1,000 req/s on ~0.14 core, much less than the gateway
+# needs for the same traffic.
 
 apiVersion: v1
 kind: Namespace
@@ -30,7 +31,7 @@ metadata:
   name: egress-target
   namespace: egress-tests-targets
 spec:
-  replicas: 1
+  replicas: 5
   selector:
     matchLabels:
       app: egress-target
