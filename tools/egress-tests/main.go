@@ -120,7 +120,7 @@ func runCmd(ctx context.Context, args []string) error {
 	fs.DurationVar(&cfg.Duration, "duration", 5*time.Minute, "How long the loops run once all of them have started.")
 	fs.StringVar(&cfg.ConnMode, "conn-mode", connModeKeepAlive, "How the loops connect: keepalive (one connection per endpoint) or new-conn (one per request).")
 	fs.DurationVar(&cfg.RequestTimeout, "request-timeout", 5*time.Second, "Timeout of one request.")
-	fs.DurationVar(&cfg.RequestInterval, "request-interval", 0, "Pause after each request in a loop; 0 sends back to back.")
+	fs.DurationVar(&cfg.RequestInterval, "request-interval", 100*time.Millisecond, "Pause after each request in a loop, which sets each actor's rate; 0 sends back to back at full speed.")
 	fs.IntVar(&cfg.CreateConcurrency, "create-concurrency", 32, "Actors created at the same time.")
 	fs.DurationVar(&cfg.ResumeTimeout, "resume-timeout", 5*time.Minute, "Per actor: how long to keep resuming (a full pool is retried) and waiting for it to answer.")
 	fs.DurationVar(&cfg.ProgressInterval, "progress-interval", 30*time.Second, "How often to print progress; 0 turns it off.")
