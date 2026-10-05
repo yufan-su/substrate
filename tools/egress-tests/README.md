@@ -22,7 +22,13 @@ The test has three pieces:
 Endpoint `i` is the Service DNS name
 `egress-target-<i>.egress-tests-targets.svc.cluster.local`, on port 80. Each
 endpoint has its own Service, so it has its own name and ClusterIP. All the
-Services select the same `egress-target` pods.
+Services select the same single `egress-target` pod.
+
+The naming scheme is fixed in code, in
+[internal/egressapi/endpoints.go](internal/egressapi/endpoints.go). The driver
+sends each actor only the count C in the `POST /start` body (`{"endpoints": C,
+...}`). The actor then calls endpoints 0 to C−1 in order, round and round. The
+driver builds the egress policy from the same names, so the two always match.
 
 An actor without an egress policy gets no egress at all. Right after creating
 each actor, the driver gives it this policy:

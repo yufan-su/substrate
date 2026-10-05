@@ -277,7 +277,7 @@ func (fr *fakeRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func services(n int) []runtime.Object {
 	var objs []runtime.Object
 	for i := range n {
-		objs = append(objs, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: serviceName(i), Namespace: targetNamespace}})
+		objs = append(objs, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: egressapi.ServiceName(i), Namespace: egressapi.TargetNamespace}})
 	}
 	return objs
 }
@@ -346,15 +346,14 @@ func TestRun(t *testing.T) {
 			if want := []string{"egress-0", "egress-1", "egress-2"}; !slices.Equal(resumed, want) {
 				t.Errorf("resumed %v, want %v", resumed, want)
 			}
-			wantURLs := endpointURLs(cfg.Endpoints)
 			for _, name := range resumed {
 				req, ok := fr.starts[name]
 				if !ok {
 					t.Errorf("loop of %s never started", name)
 					continue
 				}
-				if !slices.Equal(req.URLs, wantURLs) {
-					t.Errorf("%s started with %v, want %v", name, req.URLs, wantURLs)
+				if req.Endpoints != cfg.Endpoints {
+					t.Errorf("%s started with %d endpoints, want %d", name, req.Endpoints, cfg.Endpoints)
 				}
 				if req.NewConnPerRequest != (mode == connModeNewConn) || req.RequestTimeoutMs != 2000 {
 					t.Errorf("%s started with %+v, want new-conn=%v and a 2000ms timeout", name, req, mode == connModeNewConn)
@@ -586,17 +585,7 @@ func TestCleanup(t *testing.T) {
 	}
 }
 
-func TestEndpointNamesAndPolicy(t *testing.T) {
-	if got, want := endpointHost(7), "egress-target-7.egress-tests-targets.svc.cluster.local"; got != want {
-		t.Errorf("endpointHost(7) = %q, want %q", got, want)
-	}
-	if got, want := endpointURLs(2), []string{
-		"http://egress-target-0.egress-tests-targets.svc.cluster.local/",
-		"http://egress-target-1.egress-tests-targets.svc.cluster.local/",
-	}; !slices.Equal(got, want) {
-		t.Errorf("endpointURLs(2) = %v, want %v", got, want)
-	}
-
+func TestBuildPolicy(t *testing.T) {
 	p := buildPolicy("ns", 3)
 	if p.GetMetadata().GetName() != "default" || p.GetMetadata().GetAtespace() != "ns" {
 		t.Errorf("policy metadata = %v, want default in ns", p.GetMetadata())
@@ -623,7 +612,7 @@ func TestConfigValidate(t *testing.T) {
 	for name, mutate := range map[string]func(*runConfig){
 		"parallel above actors": func(c *runConfig) { c.Parallel = c.Actors + 1 },
 		"no endpoints":          func(c *runConfig) { c.Endpoints = 0 },
-		"too many endpoints":    func(c *runConfig) { c.Endpoints = maxEndpoints + 1 },
+		"too many endpoints":    func(c *runConfig) { c.Endpoints = egressapi.MaxEndpoints + 1 },
 		"bad conn mode":         func(c *runConfig) { c.ConnMode = "pooled" },
 		"zero duration":         func(c *runConfig) { c.Duration = 0 },
 		"negative interval":     func(c *runConfig) { c.RequestInterval = -time.Second },

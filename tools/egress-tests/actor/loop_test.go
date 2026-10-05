@@ -55,6 +55,14 @@ func newTarget(t *testing.T, h http.HandlerFunc) *target {
 
 func okHandler(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) }
 
+// serve returns the actor's handler with endpoint i mapped to urls[i], in
+// place of the in-cluster Service names.
+func serve(urls ...string) http.Handler {
+	s := newServer()
+	s.endpointURL = func(i int) string { return urls[i] }
+	return s.handler()
+}
+
 func post(t *testing.T, h http.Handler, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	var buf bytes.Buffer
@@ -120,9 +128,9 @@ func TestKeepAliveReusesOneConnectionPerEndpoint(t *testing.T) {
 	for _, tg := range targets {
 		urls = append(urls, tg.URL+"/")
 	}
-	h := newServer().handler()
+	h := serve(urls...)
 
-	s := runLoop(t, h, egressapi.StartRequest{URLs: urls}, atLeast(30))
+	s := runLoop(t, h, egressapi.StartRequest{Endpoints: len(urls)}, atLeast(30))
 
 	if s.Successes != s.Requests || len(s.Errors) != 0 {
 		t.Errorf("successes %d of %d requests, errors %v", s.Successes, s.Requests, s.Errors)
@@ -147,9 +155,9 @@ func TestKeepAliveReusesOneConnectionPerEndpoint(t *testing.T) {
 
 func TestNewConnPerRequest(t *testing.T) {
 	tg := newTarget(t, okHandler)
-	h := newServer().handler()
+	h := serve(tg.URL + "/")
 
-	s := runLoop(t, h, egressapi.StartRequest{URLs: []string{tg.URL + "/"}, NewConnPerRequest: true}, atLeast(10))
+	s := runLoop(t, h, egressapi.StartRequest{Endpoints: 1, NewConnPerRequest: true}, atLeast(10))
 
 	if s.NewConns != s.Requests {
 		t.Errorf("NewConns = %d, want one per request (%d)", s.NewConns, s.Requests)
@@ -168,9 +176,9 @@ func TestRequestTimeoutIsClassified(t *testing.T) {
 		}
 	})
 	t.Cleanup(func() { close(release) })
-	h := newServer().handler()
+	h := serve(slow.URL + "/")
 
-	s := runLoop(t, h, egressapi.StartRequest{URLs: []string{slow.URL + "/"}, RequestTimeoutMs: 20}, atLeast(2))
+	s := runLoop(t, h, egressapi.StartRequest{Endpoints: 1, RequestTimeoutMs: 20}, atLeast(2))
 
 	if s.Errors["timeout"] != s.Requests || s.Successes != 0 {
 		t.Errorf("errors %v, successes %d for %d requests; want every request a timeout", s.Errors, s.Successes, s.Requests)
@@ -188,9 +196,9 @@ func TestNon200IsAnError(t *testing.T) {
 	failing := newTarget(t, func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "egress denied", http.StatusServiceUnavailable)
 	})
-	h := newServer().handler()
+	h := serve(ok.URL+"/", failing.URL+"/")
 
-	s := runLoop(t, h, egressapi.StartRequest{URLs: []string{ok.URL + "/", failing.URL + "/"}}, atLeast(10))
+	s := runLoop(t, h, egressapi.StartRequest{Endpoints: 2}, atLeast(10))
 
 	if s.Errors["HTTP 503"] == 0 {
 		t.Errorf("errors = %v, want HTTP 503 counted", s.Errors)
@@ -202,10 +210,10 @@ func TestNon200IsAnError(t *testing.T) {
 
 func TestIntervalPacesRequests(t *testing.T) {
 	tg := newTarget(t, okHandler)
-	h := newServer().handler()
+	h := serve(tg.URL + "/")
 
 	start := time.Now()
-	s := runLoop(t, h, egressapi.StartRequest{URLs: []string{tg.URL + "/"}, IntervalMs: 20}, atLeast(5))
+	s := runLoop(t, h, egressapi.StartRequest{Endpoints: 1, IntervalMs: 20}, atLeast(5))
 	elapsed := time.Since(start)
 
 	// n requests with a 20ms pause after each cannot finish in under (n-1)*20ms.
@@ -220,15 +228,13 @@ func TestDNSRecordedOnlyForHostnames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := newServer().handler()
-
-	byIP := runLoop(t, h, egressapi.StartRequest{URLs: []string{tg.URL + "/"}}, atLeast(3))
+	byIP := runLoop(t, serve(tg.URL+"/"), egressapi.StartRequest{Endpoints: 1}, atLeast(3))
 	if byIP.DNS.Count != 0 {
 		t.Errorf("an IP target recorded %d DNS lookups, want 0", byIP.DNS.Count)
 	}
 
-	byName := "http://localhost:" + u.Port() + "/"
-	s := runLoop(t, h, egressapi.StartRequest{URLs: []string{byName}, NewConnPerRequest: true}, atLeast(3))
+	byName := serve("http://localhost:" + u.Port() + "/")
+	s := runLoop(t, byName, egressapi.StartRequest{Endpoints: 1, NewConnPerRequest: true}, atLeast(3))
 	if s.DNS.Count == 0 {
 		t.Errorf("a hostname target with a new connection per request recorded no DNS lookups (stats %+v)", s)
 	}
@@ -236,8 +242,8 @@ func TestDNSRecordedOnlyForHostnames(t *testing.T) {
 
 func TestStartStopLifecycle(t *testing.T) {
 	tg := newTarget(t, okHandler)
-	h := newServer().handler()
-	req := egressapi.StartRequest{URLs: []string{tg.URL + "/"}}
+	h := serve(tg.URL + "/")
+	req := egressapi.StartRequest{Endpoints: 1}
 
 	if rec := get(h, egressapi.StatsRoute); rec.Code != http.StatusNotFound {
 		t.Errorf("GET /stats before start = %d, want 404", rec.Code)
@@ -274,7 +280,7 @@ func TestStartStopLifecycle(t *testing.T) {
 
 func TestStartRejectsBadRequests(t *testing.T) {
 	h := newServer().handler()
-	for _, body := range []string{`not json`, `{}`, `{"urls":["https://x/"]}`} {
+	for _, body := range []string{`not json`, `{}`, `{"endpoints":0}`, `{"endpoints":257}`} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, egressapi.StartRoute, strings.NewReader(body)))
 		if rec.Code != http.StatusBadRequest {
@@ -283,5 +289,14 @@ func TestStartRejectsBadRequests(t *testing.T) {
 	}
 	if rec := get(h, egressapi.ReadyzRoute); rec.Code != http.StatusOK {
 		t.Errorf("GET /readyz = %d, want 200", rec.Code)
+	}
+}
+
+func TestDefaultURLsAreTheEndpointServices(t *testing.T) {
+	s := newServer()
+	for _, i := range []int{0, 9, 255} {
+		if got, want := s.endpointURL(i), egressapi.EndpointURL(i); got != want {
+			t.Errorf("endpoint %d = %q, want %q", i, got, want)
+		}
 	}
 }

@@ -33,12 +33,16 @@ const maxBodyBytes = 1 << 20
 
 // server serves the egressapi routes. At most one loop runs at a time.
 type server struct {
+	// endpointURL maps an endpoint number to the URL the loop requests.
+	// Tests point it at local servers.
+	endpointURL func(i int) string
+
 	mu  sync.Mutex
 	run *loopRun // nil when no loop is running
 }
 
 func newServer() *server {
-	return &server{}
+	return &server{endpointURL: egressapi.EndpointURL}
 }
 
 func (s *server) handler() http.Handler {
@@ -69,7 +73,11 @@ func (s *server) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "a loop is already running; POST "+egressapi.StopRoute+" first", http.StatusConflict)
 		return
 	}
-	s.run = startLoop(req)
+	urls := make([]string, req.Endpoints)
+	for i := range urls {
+		urls[i] = s.endpointURL(i)
+	}
+	s.run = startLoop(req, urls)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -113,7 +121,7 @@ type loopRun struct {
 	stats egressapi.Stats
 }
 
-func startLoop(req egressapi.StartRequest) *loopRun {
+func startLoop(req egressapi.StartRequest, urls []string) *loopRun {
 	timeoutMs := req.RequestTimeoutMs
 	if timeoutMs == 0 {
 		timeoutMs = egressapi.DefaultRequestTimeoutMs
@@ -125,14 +133,14 @@ func startLoop(req egressapi.StartRequest) *loopRun {
 		started:   time.Now(),
 		transport: newTransport(req.NewConnPerRequest),
 	}
-	r.stats.Endpoints = make([]egressapi.Endpoint, len(req.URLs))
+	r.stats.Endpoints = make([]egressapi.Endpoint, len(urls))
 	client := &http.Client{
 		Transport: r.transport,
 		// Count a redirect as the endpoint's answer rather than following it
 		// somewhere the egress policy may not allow.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	go r.loop(ctx, client, req.URLs, time.Duration(timeoutMs)*time.Millisecond, time.Duration(req.IntervalMs)*time.Millisecond)
+	go r.loop(ctx, client, urls, time.Duration(timeoutMs)*time.Millisecond, time.Duration(req.IntervalMs)*time.Millisecond)
 	return r
 }
 
