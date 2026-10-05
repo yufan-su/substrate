@@ -86,13 +86,23 @@ go run ./tools/egress-tests run --actors 1000 --parallel 10 --endpoints 10 --dur
 | `--duration` | 5m | How long the loops run once they have all started. |
 | `--conn-mode` | `keepalive` | `keepalive` keeps one connection per endpoint. `new-conn` opens a new connection for every request. |
 | `--request-timeout` | 5s | Timeout of one request. |
-| `--request-interval` | 0 | Pause after each request. 0 sends back to back. |
+| `--request-interval` | 100ms | Pause after each request, which sets each actor's rate. 0 sends back to back at full speed. |
 | `--create-concurrency` | 32 | How many actors are created at the same time. |
 | `--resume-timeout` | 5m | Per actor: how long to keep resuming, then waiting for it to answer. |
 | `--progress-interval` | 30s | How often to print progress. 0 turns it off. |
 | `--output` | | Write the full report, including per-actor stats, as JSON to this file. Durations are in nanoseconds. |
 | `--kubeconfig`, `--context` | | Which cluster to use. |
 | `--api-endpoint`, `--router-url` | | When left empty, the driver port-forwards to the `api` and `atenet-router` Services. |
+
+### Pacing
+
+Each loop has one request in flight. With the default `--request-interval` of
+100ms, an actor sends about 10 requests per second, and one round over C
+endpoints takes about C × 100ms. B=100 then sends about 1,000 req/s in total,
+which one gateway replica handles. With `--request-interval 0`, each actor sends
+as fast as responses come back: about 800 req/s per actor on a c3-standard-4
+cluster. Use that only to find the gateway's limit, raising B (1, 2, 4, 8)
+until latency and errors climb.
 
 The run goes through these phases:
 1. **Preflight**: checks that the C endpoint Services exist.
@@ -118,21 +128,25 @@ C or the connection mode without rebuilding the template.
 
 ## Reading the report
 
+This is a real run: `--actors 100 --parallel 1 --endpoints 10 --duration 2m
+--request-interval 0`, on two c3-standard-4 nodes with one gateway replica.
+
 ```
-== egress-tests: actors=1000 parallel=10 endpoints=10 conn-mode=keepalive duration=5m0s
-create     1000/1000 ok in 41.2s (0 actors reused, 0 policies updated)
-resume     10/10 ok in 6.3s
-           resume p50 2.1s p99 6.2s max 6.2s; ready p50 40ms p99 90ms max 90ms
-start      10/10 ok in 12ms
-loop       5m0s: 812345 requests, 2707.8 req/s, 99.998% success, 100 new connections
-latency    p50 3.1ms p90 4.5ms p99 9.8ms p99.9 22ms max 310ms (mean 3.4ms)
-dns        100 lookups, p50 1.2ms p99 3.4ms max 3.4ms
-errors     EOF=12
-           req/s per actor: min 268.1 median 271.0 max 272.9
-           most errors: egress-target-3 (4/81234), ...
-stop       10/10 ok in 9ms
-suspend    10/10 ok in 2.1s
+== egress-tests: actors=100 parallel=1 endpoints=10 conn-mode=keepalive request-interval=0s duration=2m0s
+create     100/100 ok in 386.4ms (0 actors reused, 0 policies updated)
+resume     1/1 ok in 396.4ms
+           resume p50 298.8ms p99 298.8ms max 298.8ms; ready p50 97.6ms p99 97.6ms max 97.6ms
+start      1/1 ok in 32.9ms
+loop       2m0.1s: 99142 requests, 825.7 req/s, 100.000% success, 10 new connections
+latency    p50 1.26ms p90 1.41ms p99 2ms p99.9 3.98ms max 42.9ms (mean 1.2ms)
+dns        10 lookups, p50 17.8ms p99 32.2ms max 32.2ms
+           req/s per actor: min 825.7 median 825.7 max 825.7
+stop       1/1 ok in 33.9ms
+suspend    1/1 ok in 398.9ms
 ```
+
+When requests fail, the report adds an `errors` line with counts per class,
+and a line naming the endpoints with the most errors.
 
 - **Latency** is measured inside the actor, for successful requests only. It
   includes the DNS lookup when the request needed one.
@@ -156,12 +170,21 @@ Step up one factor at a time, and save each run with `--output`:
 1. A=1000, C=10, keepalive, with B = 1, then 10, then 100.
 2. The same with C=100.
 3. A=10000. The rerun creates only the missing actors.
-4. new-conn, starting again from B=1. Pace it with `--request-interval` while
-   you watch the control plane.
+4. new-conn, starting again from B=1, while you watch the control plane.
+
+Keep the default 100ms interval for these, so the factors under test, not the
+request rate, are what changes. Run `--request-interval 0` separately to find
+the gateway's limit.
 
 Record the `atenet-egress` replica count with each result. The default is 1.
 
 ## Limits to expect
+
+- **CPU per request.** Measured with `kubectl top` at about 820 req/s, every
+  1,000 req/s costs roughly 0.94 core in the gateway (Envoy plus ext_proc),
+  0.85 core in the workers (actor, gVisor, atunnel), and 0.14 core in the
+  target. So the gateway saturates long before the single target pod does. Add
+  target replicas only after scaling the gateway out.
 
 - **Keep-alive mode hits Envoy's default circuit breaker.** Every actor
   connection is its own atunnel tunnel, and its own connection in the gateway's
@@ -173,8 +196,14 @@ Record the `atenet-egress` replica count with each result. The default is 1.
   and read `cluster.mitm_internal.upstream_cx_overflow` under `/stats`.
 - **New-conn mode loads the control plane.** Every CONNECT makes the gateway
   call ateapi `GetActor`, uncached, to authenticate the actor.
+- **Confirming the gateway carried the traffic.**
+  `kubectl -n ate-system logs deploy/atenet-egress -c envoy --tail=3` should
+  show JSON lines with `"leg":"cleartext"`, the actor's SPIFFE ID
+  (`ateom-for-actor/egress-tests/egress-<n>`), and an `egress-target-<i>`
+  authority. The keys are in alphabetical order, so grep for one key at a time.
 - **Logging volume.** Envoy writes an access log line for every CONNECT and
-  every request, so keep high-rate runs short.
+  every request, so keep high-rate runs short. The kubelet also rotates the
+  log quickly: at about 800 req/s, only the last ~25 seconds survive.
 
 ## Cleanup
 
