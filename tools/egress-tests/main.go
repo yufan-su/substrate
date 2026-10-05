@@ -33,6 +33,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateclient"
 	"github.com/agent-substrate/substrate/internal/installdefaults"
 	"github.com/agent-substrate/substrate/internal/portforward"
+	"github.com/agent-substrate/substrate/tools/egress-tests/internal/egressapi"
 )
 
 const usage = `Usage: go run ./tools/egress-tests <command> [flags]
@@ -115,7 +116,7 @@ func runCmd(ctx context.Context, args []string) error {
 	cfg := runConfig{}
 	fs.IntVar(&cfg.Actors, "actors", 1000, "A: actors to create. Reruns reuse the actors that exist.")
 	fs.IntVar(&cfg.Parallel, "parallel", 1, "B: actors to resume and run the loop in, at the same time.")
-	fs.IntVar(&cfg.Endpoints, "endpoints", 10, fmt.Sprintf("C: endpoints each loop calls, egress-target-0 up to egress-target-<C-1> (at most %d).", maxEndpoints))
+	fs.IntVar(&cfg.Endpoints, "endpoints", 10, fmt.Sprintf("C: endpoints each loop calls, egress-target-0 up to egress-target-<C-1> (at most %d).", egressapi.MaxEndpoints))
 	fs.DurationVar(&cfg.Duration, "duration", 5*time.Minute, "How long the loops run once all of them have started.")
 	fs.StringVar(&cfg.ConnMode, "conn-mode", connModeKeepAlive, "How the loops connect: keepalive (one connection per endpoint) or new-conn (one per request).")
 	fs.DurationVar(&cfg.RequestTimeout, "request-timeout", 5*time.Second, "Timeout of one request.")
