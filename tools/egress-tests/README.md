@@ -224,8 +224,11 @@ connection and resolves every name, so the steady mean carries that setup
 cost. The `settled` line drops it. The settled window starts one progress
 poll after new connections stop growing. When the polls come further apart
 than one round, it starts 1.5 rounds (1.5 x C x `--request-interval`) into
-steady instead. `resources.settledWindow` records the start, the rule and
-the request rate, and each component carries `settled` beside `steady`.
+steady instead. `resources.settledWindow` records the start, the rule, the
+request rate and the settled p50 and p99, from the progress polls'
+latency histograms; each component carries `settled` beside `steady`.
+Whole-run p99 at low B is the first round's DNS lookups and connects;
+the settled p99 is the steady-state figure.
 At B=10 and C=100, a round takes 10s and opens 1,000 tunnels. Steady
 charges the workers 4.39 cores per 1000 req/s and the gateway 1.20. Settled
 gives about 2.5 and 1.0.

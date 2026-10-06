@@ -17,6 +17,7 @@ package main
 import (
 	"bytes"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -427,7 +428,7 @@ func TestSummarizeResourcesSettled(t *testing.T) {
 	}
 	var out bytes.Buffer
 	rep.printResources(&out)
-	want := "cores per 1000 req/s, settled: gateway 1.50 workers 0.50 (from steady +15.0s by 1.5 rounds, 1000.0 req/s)"
+	want := "cores per 1000 req/s, settled: gateway 1.50 workers 0.50 (from steady +15.0s by 1.5 rounds, 1000.0 req/s, p50 0s p99 0s)"
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("printed resources lack %q:\n%s", want, out.String())
 	}
@@ -492,5 +493,43 @@ func TestSummarizeResourcesBaseline(t *testing.T) {
 	summarizeResources(none)
 	if none.Resources.Baseline != nil {
 		t.Errorf("baseline without a pre-idle phase = %v, want nil", none.Resources.Baseline)
+	}
+}
+
+// TestSettledLatency checks that the settled p50 and p99 count only the
+// requests after the window starts: the first round's slow requests, with
+// their DNS lookups and connects, stay out.
+func TestSettledLatency(t *testing.T) {
+	t.Parallel()
+	t0 := time.Unix(1000, 0)
+	s := time.Second
+	steady := phaseMark{Name: "steady", Start: t0, End: t0.Add(60 * s)}
+	cfg := runConfig{Endpoints: 100, RequestInterval: 100 * time.Millisecond, ProgressInterval: 5 * s}
+	var h egressapi.Histogram
+	var polls []loopPoint
+	conns := []int64{400, 800, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000}
+	for i, c := range conns {
+		// 500 requests per poll: 50 ms each while connections open, 3 ms after.
+		d := 3 * time.Millisecond
+		if i < 3 {
+			d = 50 * time.Millisecond
+		}
+		for range 500 {
+			h.Record(d)
+		}
+		snap := h
+		snap.Counts = slices.Clone(h.Counts)
+		polls = append(polls, loopPoint{T: t0.Add(time.Duration(5*(i+1)) * s), NewConns: c, Requests: int64(500 * (i + 1)), Latency: snap})
+	}
+	w, ok := settledOf(cfg, steady, polls)
+	if !ok {
+		t.Fatal("no settled window")
+	}
+	// The window starts at the 20 s poll, after the 50 ms requests.
+	if w.P99 < 3*time.Millisecond || w.P99 > 4*time.Millisecond || w.P50 > w.P99 {
+		t.Errorf("settled p50 %v p99 %v, want both in the 3 ms bucket", w.P50, w.P99)
+	}
+	if whole := polls[len(polls)-1].Latency.Quantile(0.99); whole < 40*time.Millisecond {
+		t.Errorf("whole-run p99 %v, want the first round's 50 ms to show there", whole)
 	}
 }

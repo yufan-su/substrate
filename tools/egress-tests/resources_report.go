@@ -85,6 +85,11 @@ type settledWindow struct {
 	// Rule says which rule started the window.
 	Rule    string  `json:"rule"`
 	ReqPerS float64 `json:"reqPerS"`
+	// P50 and P99 are the latency quantiles of the requests between the
+	// first progress poll at or after Start and the last one, by the loop
+	// histograms' buckets.
+	P50 time.Duration `json:"p50,omitempty"`
+	P99 time.Duration `json:"p99,omitempty"`
 }
 
 // settledPlateauTolerance is the growth in new connections, as a fraction
@@ -128,6 +133,14 @@ func settledOf(cfg runConfig, steady phaseMark, timeline []loopPoint) (settledWi
 		return w, false
 	}
 	w.ReqPerS = (float64(last.Requests) - requestsAt(polls, steady.Start, w.Start)) / last.T.Sub(w.Start).Seconds()
+	for _, p := range polls {
+		if !p.T.Before(w.Start) {
+			if d := histogramDelta(last.Latency, p.Latency); d.Count > 0 {
+				w.P50, w.P99 = d.Quantile(0.5), d.Quantile(0.99)
+			}
+			break
+		}
+	}
 	return w, true
 }
 
@@ -564,8 +577,8 @@ func (rep *report) printResources(w io.Writer) {
 		fmt.Fprintf(w, "%-10s cores per 1000 req/s: %s (cAdvisor coverage %.0f%%)\n", "", strings.Join(perK, " "), 100*minCov)
 	}
 	if st := res.Settled; st != nil && len(settledK) > 0 {
-		fmt.Fprintf(w, "%-10s cores per 1000 req/s, settled: %s (from steady +%.1fs by %s, %.1f req/s)\n", "",
-			strings.Join(settledK, " "), st.Start.Sub(rep.phase("steady").Start).Seconds(), st.Rule, st.ReqPerS)
+		fmt.Fprintf(w, "%-10s cores per 1000 req/s, settled: %s (from steady +%.1fs by %s, %.1f req/s, p50 %v p99 %v)\n", "",
+			strings.Join(settledK, " "), st.Start.Sub(rep.phase("steady").Start).Seconds(), st.Rule, st.ReqPerS, st.P50, st.P99)
 	}
 	if len(res.Baseline) > 0 {
 		var base []string

@@ -61,8 +61,8 @@ FORMS: dict[str, tuple[str, ...]] = {
     "p99_settled_ms": ("1", "B"),
 }
 
-# The first 10 s of samples stand in for the --pre-idle baseline until the
-# driver records one. Provisional.
+# Without a --pre-idle baseline (runs before it existed), the first 10 s of
+# samples stand in for it.
 BASELINE_S = 10.0
 
 # Two-sided 97.5% t quantiles by degrees of freedom; 1.96 beyond 30.
@@ -115,13 +115,18 @@ def summed_mean(per_pod: dict[str, list[tuple[float, float]]], lo: float, hi: fl
 
 
 def ws_delta_mib(run: rr.Run, component: str, lo: float, hi: float) -> float | None:
-    """Steady max minus the baseline, summed over pods, from the pod cgroups."""
+    """Steady max minus the baseline, summed over pods, from the pod cgroups.
+    The baseline is the driver's pre-idle maximum when the run has one."""
+    base = ((run.report.get("resources") or {}).get("baseline") or {}).get(component)
     by_pod: dict[str, list[tuple[float, float]]] = {}
     for r in run.series("working_set_bytes", source_for(run, "working_set_bytes", component)):
         if r["component"] == component and r.get("container") == "POD":
             by_pod.setdefault(r.get("pod", ""), []).append((rr.parse_time(r["t"]), r["value"]))
     if not by_pod:
         return None
+    if base and not base.get("insufficient"):
+        steady = sum(max((v for t, v in pts if lo <= t <= hi), default=0.0) for pts in by_pod.values())
+        return (steady - base["workingSetBytes"]) / 2**20
     start = min(t for pts in by_pod.values() for t, _ in pts)
     total = 0.0
     for pts in by_pod.values():
@@ -130,25 +135,6 @@ def ws_delta_mib(run: rr.Run, component: str, lo: float, hi: float) -> float | N
         if base and steady:
             total += max(steady) - min(base)
     return total / 2**20
-
-
-def hist_delta(b: dict, a: dict) -> dict:
-    counts = list(b.get("counts") or [])
-    for i, c in enumerate(a.get("counts") or []):
-        if i < len(counts):
-            counts[i] -= c
-    return {"counts": counts, "count": b.get("count", 0) - a.get("count", 0), "maxMicros": b.get("maxMicros", 0)}
-
-
-def settled_p99_ms(report: dict, lo: float, hi: float) -> float | None:
-    """p99 of the requests between the first poll at or after lo and the last
-    poll at or before hi. Provisional until the driver reports it."""
-    polls = [(rr.parse_time(p["t"]), p["latency"]) for p in report.get("loopTimeline") or []]
-    inside = [p for p in polls if lo <= p[0] <= hi]
-    if len(inside) < 2:
-        return None
-    d = hist_delta(inside[-1][1], inside[0][1])
-    return rr.quantile_ms(d, 0.99) if d["count"] > 0 else None
 
 
 def extract(path: str | Path, base: str = "") -> dict:
@@ -183,7 +169,7 @@ def extract(path: str | Path, base: str = "") -> dict:
     resumes = [a["resumeLatency"] / 1e6 for a in rep.get("actors") or [] if a.get("resumeLatency")]
     row["resume_p50_ms"] = rr.median(resumes) if resumes else None
     row["dns_p99_ms"] = rr.quantile_ms(loop["dns"], 0.99) if (loop.get("dns") or {}).get("count") else None
-    row["p99_settled_ms"] = settled_p99_ms(rep, lo, s1)
+    row["p99_settled_ms"] = settled["p99"] / 1e6 if settled and settled.get("p99") else None
     start_env = [e for e in res.get("envoy") or [] if e.get("label") == "start:begin"]
     row["cleartext_active_at_start"] = sum(
         e["counters"].get("cluster.egress_forward_proxy_cleartext.upstream_cx_active", 0) for e in start_env)
