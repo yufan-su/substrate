@@ -579,12 +579,17 @@ func (rep *report) printResources(w io.Writer) {
 			if envoyMax(res.Envoy, "cluster."+c+".circuit_breakers.default.cx_open") > 0 {
 				cx += "; " + c + " connection breaker OPENED"
 			}
+			if envoyMax(res.Envoy, "cluster."+c+".circuit_breakers.default.rq_open") > 0 {
+				cx += "; " + c + " request breaker OPENED"
+			}
 		}
-		if over > 0 {
+		active, _ := envoyDelta(res.Envoy, "cluster.mitm_internal.upstream_rq_active_overflow")
+		if over > 0 || active > 0 {
 			queued, _ := envoyDelta(res.Envoy, "cluster.mitm_internal.upstream_rq_pending_total")
 			cancelled, _ := envoyDelta(res.Envoy, "cluster.mitm_internal.upstream_rq_cancelled")
-			refused, _ := envoyDelta(res.Envoy, "cluster.mitm_internal.upstream_rq_pending_overflow")
-			cx += fmt.Sprintf("; mitm_internal CONNECTs queued +%.0f, cancelled +%.0f, refused +%.0f", queued, cancelled, refused)
+			pending, _ := envoyDelta(res.Envoy, "cluster.mitm_internal.upstream_rq_pending_overflow")
+			cx += fmt.Sprintf("; mitm_internal CONNECTs queued +%.0f, cancelled +%.0f, refused +%.0f pending +%.0f active",
+				queued, cancelled, pending, active)
 		}
 	}
 	if len(mem) > 0 || cx != "" {

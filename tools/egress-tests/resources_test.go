@@ -145,7 +145,8 @@ func TestParseEnvoyStats(t *testing.T) {
 	filter := regexp.MustCompile(envoyStatsFilter)
 	for _, c := range envoyClusters {
 		for _, stat := range []string{"upstream_cx_total", "upstream_cx_active", "upstream_cx_overflow", "upstream_rq_pending_total",
-			"upstream_rq_pending_overflow", "upstream_rq_cancelled", "circuit_breakers.default.cx_open"} {
+			"upstream_rq_pending_overflow", "upstream_rq_active_overflow", "upstream_rq_cancelled",
+			"circuit_breakers.default.cx_open", "circuit_breakers.default.rq_open"} {
 			if name := "cluster." + c + "." + stat; !filter.MatchString(name) {
 				t.Errorf("envoyStatsFilter does not select %s", name)
 			}

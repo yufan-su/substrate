@@ -33,8 +33,10 @@ const (
 // counters, and the gauge that is 1 while a cluster's connection breaker is
 // open, from /stats. A CONNECT past max_connections waits in the pending
 // queue (pending_total, then cancelled if the client gives up) and is
-// refused only when that queue is full too (pending_overflow).
-const envoyStatsFilter = `^cluster\.(mitm_internal|egress_forward_proxy_cleartext)\.(upstream_cx_(total|active|overflow)|upstream_rq_(pending_total|pending_overflow|cancelled)|circuit_breakers\.default\.cx_open)$`
+// refused only when that queue is full too (pending_overflow). A stream
+// that gets a connection but would exceed max_requests is refused on
+// attach (active_overflow); rq_open is 1 while that breaker is open.
+const envoyStatsFilter = `^cluster\.(mitm_internal|egress_forward_proxy_cleartext)\.(upstream_cx_(total|active|overflow)|upstream_rq_(pending_total|pending_overflow|active_overflow|cancelled)|circuit_breakers\.default\.(cx_open|rq_open))$`
 
 // envoyClusters are the gateway clusters the sampler reads.
 var envoyClusters = []string{"mitm_internal", "egress_forward_proxy_cleartext"}
