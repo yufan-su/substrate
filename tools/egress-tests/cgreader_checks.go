@@ -395,6 +395,20 @@ func checkReaderOverhead(cg *cgreaderReport) []verifyResult {
 	return out
 }
 
+// cgreaderNodeRows returns the readers' container rows on their nodes' own
+// clocks, for checks against data the kubelet stamped.
+func cgreaderNodeRows(cg *cgreaderReport) []cadvisorSample {
+	var rows []cadvisorSample
+	for _, s := range cg.Samples {
+		if s.Leaf != "" || s.Gone || s.Component == "cgreader" {
+			continue
+		}
+		rows = append(rows, cadvisorSample{T: s.T, Component: s.Component, Pod: s.Pod, Container: s.Container,
+			CPUSeconds: s.CPUSeconds, CFSPeriods: s.CFSPeriods, CFSThrottled: s.CFSThrottled, WorkingSetBytes: s.WorkingSetBytes})
+	}
+	return rows
+}
+
 // cgreaderAsCadvisor turns the reader's container rows into cAdvisor-shaped
 // samples on the driver's clock, so the steady summaries can use them. It
 // adds two derived containers for each worker: atunnel, the ateom leaf, and

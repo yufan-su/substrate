@@ -587,7 +587,19 @@ func envoyLine(samples []envoySample) string {
 	if !ok {
 		return ""
 	}
-	parts := []string{fmt.Sprintf("steady: mitm_internal cx overflow +%.0f", over)}
+	steady := fmt.Sprintf("steady: mitm_internal cx overflow +%.0f", over)
+	if over > 0 {
+		// A held CONNECT is admitted once a tunnel closes, cancelled when
+		// the actor gives up, or refused when the queue is full too.
+		cancelled, _ := envoyDelta(samples, envoyRqCancelled)
+		refused, _ := envoyDelta(samples, envoyRqRefused)
+		steady += fmt.Sprintf(", CONNECTs held +%.0f (admitted later ≈%.0f, cancelled +%.0f, refused +%.0f)",
+			over, max(0, over-cancelled-refused), cancelled, refused)
+	}
+	parts := []string{steady}
+	if depth := envoyMax(samples, envoyPendingActive); depth > 0 {
+		parts = append(parts, fmt.Sprintf("whole run: pending queue depth max %.0f", depth))
+	}
 	var peaks, opened []string
 	for _, c := range envoyClusters {
 		peaks = append(peaks, fmt.Sprintf("%s %.0f", c, envoyMax(samples, "cluster."+c+".upstream_cx_active")))

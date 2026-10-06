@@ -41,12 +41,19 @@ var envoyClusters = []string{"mitm_internal", "egress_forward_proxy", "egress_fo
 // cluster.<cluster>.<stat> whatever the endpoint. The gateway's admin API
 // is loopback-only; its envoy_metrics listener forwards GET /ready and
 // GET /stats/prometheus to it and nothing else. The connection counters
-// come with the gauge that is 1 while a cluster's connection breaker is
-// open.
+// come with the pending-queue counters and the gauge that is 1 while a
+// cluster's connection breaker is open. Every CONNECT passes the pending
+// queue while its connection is set up; one past max_connections waits
+// there (cx_overflow counts the holds, pending_active is the queue depth)
+// until it is admitted, cancelled when the client gives up, or refused
+// when the queue is full too (pending_overflow).
 var envoyStats = map[string]string{
 	"envoy_cluster_upstream_cx_total":                "upstream_cx_total",
 	"envoy_cluster_upstream_cx_active":               "upstream_cx_active",
 	"envoy_cluster_upstream_cx_overflow":             "upstream_cx_overflow",
+	"envoy_cluster_upstream_rq_pending_active":       "upstream_rq_pending_active",
+	"envoy_cluster_upstream_rq_pending_overflow":     "upstream_rq_pending_overflow",
+	"envoy_cluster_upstream_rq_cancelled":            "upstream_rq_cancelled",
 	"envoy_cluster_circuit_breakers_default_cx_open": "circuit_breakers.default.cx_open",
 }
 
@@ -65,7 +72,13 @@ func envoyFilter() string {
 
 // envoyCxTotal counts the connections the gateway opened toward the actors'
 // tunnels, one per actor connection.
-const envoyCxTotal = "cluster.mitm_internal.upstream_cx_total"
+const (
+	envoyCxTotal       = "cluster.mitm_internal.upstream_cx_total"
+	envoyCxOverflow    = "cluster.mitm_internal.upstream_cx_overflow"
+	envoyRqCancelled   = "cluster.mitm_internal.upstream_rq_cancelled"
+	envoyRqRefused     = "cluster.mitm_internal.upstream_rq_pending_overflow"
+	envoyPendingActive = "cluster.mitm_internal.upstream_rq_pending_active"
+)
 
 // parseProcessMetrics reads the process CPU and RSS from Prometheus text.
 func parseProcessMetrics(body []byte) (cpuSeconds, rssBytes float64, err error) {

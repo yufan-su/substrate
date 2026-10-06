@@ -74,7 +74,8 @@ func testResourceReport() *report {
 			Envoy: []envoySample{
 				{T: t0.Add(10 * s), Label: markSteadyBegin, Pod: "gw", Counters: map[string]float64{"cluster.mitm_internal.upstream_cx_overflow": 0, "cluster.mitm_internal.upstream_cx_active": 40}},
 				{T: t0.Add(70 * s), Label: markSteadyEnd, Pod: "gw", Counters: map[string]float64{"cluster.mitm_internal.upstream_cx_overflow": 3, "cluster.mitm_internal.upstream_cx_active": 100,
-					"cluster.mitm_internal.circuit_breakers.default.cx_open": 1, "cluster.egress_forward_proxy_cleartext.upstream_cx_active": 7}},
+					"cluster.mitm_internal.circuit_breakers.default.cx_open": 1, "cluster.egress_forward_proxy_cleartext.upstream_cx_active": 7,
+					"cluster.mitm_internal.upstream_rq_pending_active": 12, "cluster.mitm_internal.upstream_rq_cancelled": 50}},
 			},
 		},
 	}
@@ -133,7 +134,7 @@ func TestSummarizeResources(t *testing.T) {
 		"gateway/ext-proc 0.400",
 		"driver 0.020",
 		"gateway 128Mi workers 128Mi",
-		"envoy      steady: mitm_internal cx overflow +3; whole run: cx active max mitm_internal 100, egress_forward_proxy 0, egress_forward_proxy_cleartext 7; connection breaker OPENED: mitm_internal",
+		"envoy      steady: mitm_internal cx overflow +3, CONNECTs held +3 (admitted later ≈0, cancelled +50, refused +0); whole run: pending queue depth max 12; whole run: cx active max mitm_internal 100, egress_forward_proxy 0, egress_forward_proxy_cleartext 7; connection breaker OPENED: mitm_internal",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("printed resources lack %q:\n%s", want, out.String())
@@ -236,27 +237,36 @@ func TestPlotFixtureMatchesReport(t *testing.T) {
 func TestCheckMetricsServer(t *testing.T) {
 	t.Parallel()
 	t0 := time.Unix(1000, 0)
-	samples := series("gateway", "gw", "envoy", 0.8, 0, 16*time.Second, 32*time.Second, 48*time.Second)
-	// sparse has no reading inside the 10 s to 40 s window at all.
-	sparse := series("gateway", "gw", "envoy", 0.8, 0, 9*time.Second, 41*time.Second, 48*time.Second)
+	s := time.Second
+	samples := series("gateway", "gw", "envoy", 0.8, 0, 16*s, 32*s, 48*s)
+	// Readings at 9 and 41 s bracket both ends of a 10–40 s window: the
+	// bounds alone give a wide range, which 0.8 cores still falls inside.
+	sparse := series("gateway", "gw", "envoy", 0.8, 0, 9*s, 41*s, 48*s)
+	everySecond := series("gateway", "gw", "envoy", 0.8, stamps(0, s, 49)...)
+	gapAt10 := series("gateway", "gw", "envoy", 0.8, append([]time.Duration{0, 8 * s}, stamps(13*s, s, 36)...)...)
+	window := podMetricsSample{T: t0.Add(40 * s), Window: 30 * s, CPUCores: 0.8}
 	for _, tc := range []struct {
 		name     string
 		ms       podMetricsSample
+		samples  []cadvisorSample
+		reader   []cadvisorSample
 		wantPass bool
 		wantInfo bool
-		samples  []cadvisorSample
+		wantGot  string
 	}{
-		{"agree", podMetricsSample{T: t0.Add(40 * time.Second), Window: 30 * time.Second, CPUCores: 0.78}, true, false, samples},
-		{"double counted", podMetricsSample{T: t0.Add(40 * time.Second), Window: 30 * time.Second, CPUCores: 1.6}, false, false, samples},
-		{"window before the readings", podMetricsSample{T: t0.Add(10 * time.Second), Window: 30 * time.Second, CPUCores: 0.8}, false, true, samples},
-		{"sparse readings around the window", podMetricsSample{T: t0.Add(40 * time.Second), Window: 30 * time.Second, CPUCores: 0.8}, true, false, sparse},
+		{"agree", podMetricsSample{T: t0.Add(40 * s), Window: 30 * s, CPUCores: 0.78}, samples, nil, true, false, "cAdvisor bounds"},
+		{"double counted", podMetricsSample{T: t0.Add(40 * s), Window: 30 * s, CPUCores: 1.6}, samples, nil, false, false, "cAdvisor bounds"},
+		{"window before the readings", podMetricsSample{T: t0.Add(10 * s), Window: 30 * s, CPUCores: 0.8}, samples, nil, false, true, ""},
+		{"sparse cAdvisor alone", window, sparse, nil, true, false, "cAdvisor bounds"},
+		{"reader rows cover the window", window, sparse, everySecond, true, false, "cgroup reader 0.800"},
+		{"reader gap at an edge", window, samples, gapAt10, true, false, "cAdvisor bounds"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			tc.ms.Component, tc.ms.Pod, tc.ms.Container = "gateway", "gw", "envoy"
-			got := checkMetricsServer([]podMetricsSample{tc.ms}, tc.samples)
-			if len(got) != 1 || got[0].Pass != tc.wantPass || got[0].Info != tc.wantInfo {
-				t.Errorf("checkMetricsServer = %+v, want pass %v info %v", got, tc.wantPass, tc.wantInfo)
+			got := checkMetricsServer([]podMetricsSample{tc.ms}, tc.samples, tc.reader)
+			if len(got) != 1 || got[0].Pass != tc.wantPass || got[0].Info != tc.wantInfo || !strings.Contains(got[0].Got, tc.wantGot) {
+				t.Errorf("checkMetricsServer = %+v, want pass %v info %v got %q", got, tc.wantPass, tc.wantInfo, tc.wantGot)
 			}
 		})
 	}
