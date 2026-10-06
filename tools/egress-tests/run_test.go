@@ -35,6 +35,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -61,7 +62,13 @@ type fakeAPI struct {
 	resumeErrs []error
 	// suspendErr, if set, is what SuspendActor returns.
 	suspendErr error
-	nextUID    int
+	// The lostAnswer counters make that many calls commit and then return
+	// DeadlineExceeded, as when the answer is lost after the server wrote.
+	createLostAnswer int
+	updateLostAnswer int
+	// resumeLostAnswer makes every ResumeActor commit and then time out.
+	resumeLostAnswer bool
+	nextUID          int
 }
 
 func newFakeAPI() *fakeAPI {
@@ -103,6 +110,10 @@ func (f *fakeAPI) CreateActor(_ context.Context, in *ateapipb.CreateActorRequest
 		return nil, status.Error(codes.AlreadyExists, "actor exists")
 	}
 	f.actors[name] = "suspended"
+	if f.createLostAnswer > 0 {
+		f.createLostAnswer--
+		return nil, status.Error(codes.DeadlineExceeded, "answer lost")
+	}
 	return in.GetActor(), nil
 }
 
@@ -116,7 +127,7 @@ func (f *fakeAPI) CreateActorEgressPolicy(_ context.Context, in *ateapipb.Create
 	}
 	f.nextUID++
 	p := &ateapipb.EgressPolicy{
-		Metadata: &ateapipb.ResourceMetadata{Atespace: in.GetActor().GetAtespace(), Name: "default", Uid: fmt.Sprint(f.nextUID)},
+		Metadata: &ateapipb.ResourceMetadata{Atespace: in.GetActor().GetAtespace(), Name: "default", Uid: fmt.Sprint(f.nextUID), Version: 1},
 		Rules:    in.GetEgressPolicy().GetRules(),
 	}
 	f.policies[name] = p
@@ -146,8 +157,17 @@ func (f *fakeAPI) UpdateActorEgressPolicy(_ context.Context, in *ateapipb.Update
 	if in.GetEgressPolicy().GetMetadata().GetUid() != cur.GetMetadata().GetUid() {
 		return nil, status.Error(codes.FailedPrecondition, "uid precondition failed")
 	}
-	f.policies[name] = in.GetEgressPolicy()
-	return in.GetEgressPolicy(), nil
+	if in.GetEgressPolicy().GetMetadata().GetVersion() != cur.GetMetadata().GetVersion() {
+		return nil, status.Error(codes.Aborted, "EgressPolicy version conflict")
+	}
+	updated := proto.Clone(in.GetEgressPolicy()).(*ateapipb.EgressPolicy)
+	updated.Metadata.Version = cur.GetMetadata().GetVersion() + 1
+	f.policies[name] = updated
+	if f.updateLostAnswer > 0 {
+		f.updateLostAnswer--
+		return nil, status.Error(codes.DeadlineExceeded, "answer lost")
+	}
+	return updated, nil
 }
 
 func (f *fakeAPI) ResumeActor(_ context.Context, in *ateapipb.ResumeActorRequest, _ ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
@@ -164,6 +184,9 @@ func (f *fakeAPI) ResumeActor(_ context.Context, in *ateapipb.ResumeActorRequest
 		return nil, status.Error(codes.NotFound, "no actor")
 	}
 	f.actors[name] = "running"
+	if f.resumeLostAnswer {
+		return nil, status.Error(codes.DeadlineExceeded, "answer lost")
+	}
 	return &ateapipb.ResumeActorResponse{Resumed: true}, nil
 }
 
@@ -902,6 +925,9 @@ func TestConfigValidate(t *testing.T) {
 		"zero duration":         func(c *runConfig) { c.Duration = 0 },
 		"negative interval":     func(c *runConfig) { c.RequestInterval = -time.Second },
 		"bad scheme":            func(c *runConfig) { c.Scheme = "ftp" },
+		"sub-ms interval":       func(c *runConfig) { c.RequestInterval = 500 * time.Microsecond },
+		"fractional interval":   func(c *runConfig) { c.RequestInterval = 1500 * time.Microsecond },
+		"sub-ms timeout":        func(c *runConfig) { c.RequestTimeout = 500 * time.Microsecond },
 	} {
 		c := testConfig()
 		mutate(&c)
@@ -926,5 +952,114 @@ func TestErrorKind(t *testing.T) {
 		if got := errorKind(tc.err); got != tc.want {
 			t.Errorf("errorKind(%v) = %q, want %q", tc.err, got, tc.want)
 		}
+	}
+}
+
+func TestOutcomeUnknown(t *testing.T) {
+	t.Parallel()
+	gaveUp := func(ctxErr, last error) error {
+		return fmt.Errorf("%w (last error: %w)", ctxErr, last)
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"FailedPrecondition", status.Error(codes.FailedPrecondition, "x"), false},
+		{"AlreadyExists", status.Error(codes.AlreadyExists, "x"), false},
+		{"NotFound", status.Error(codes.NotFound, "x"), false},
+		{"ResourceExhausted", status.Error(codes.ResourceExhausted, "x"), false},
+		{"Aborted", status.Error(codes.Aborted, "x"), false},
+		{"DeadlineExceeded code", status.Error(codes.DeadlineExceeded, "x"), true},
+		{"Canceled code", status.Error(codes.Canceled, "x"), true},
+		{"Unavailable code", status.Error(codes.Unavailable, "x"), true},
+		{"Unknown code", status.Error(codes.Unknown, "x"), true},
+		{"error with no status", fmt.Errorf("connection reset"), true},
+		{"wrapped Unavailable", fmt.Errorf("resume: %w", status.Error(codes.Unavailable, "x")), true},
+		{"wrapped context.DeadlineExceeded", fmt.Errorf("resume: %w", context.DeadlineExceeded), true},
+		{"wrapped context.Canceled", fmt.Errorf("resume: %w", context.Canceled), true},
+		{"gave up after refusal", gaveUp(context.DeadlineExceeded, status.Error(codes.ResourceExhausted, "x")), true},
+		{"canceled after refusal", gaveUp(context.Canceled, status.Error(codes.FailedPrecondition, "x")), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := outcomeUnknown(tc.err); got != tc.want {
+				t.Errorf("outcomeUnknown(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLostAnswers(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		setup func(api *fakeAPI)
+		check func(t *testing.T, r *runner, api *fakeAPI)
+	}{
+		{
+			name:  "policy update committed before its answer was lost",
+			setup: func(api *fakeAPI) { api.updateLostAnswer = 1 },
+			check: func(t *testing.T, r *runner, api *fakeAPI) {
+				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+				defer cancel()
+				if _, err := api.CreateActorEgressPolicy(ctx, &ateapipb.CreateActorEgressPolicyRequest{
+					Actor: &ateapipb.ObjectRef{Atespace: "egress-tests", Name: "egress-0"}, EgressPolicy: buildPolicy("egress-tests", 1),
+				}); err != nil {
+					t.Fatal(err)
+				}
+				want := buildPolicy("egress-tests", 3)
+				changed, err := r.ensurePolicy(ctx, "egress-0", want)
+				if err != nil || !changed {
+					t.Fatalf("ensurePolicy = %v, %v; want true, nil", changed, err)
+				}
+				if got := api.policies["egress-0"].GetRules()[0].GetHttp().GetHostnames(); !slices.Equal(got, wantHosts(3)) {
+					t.Errorf("policy hosts = %v, want %v", got, wantHosts(3))
+				}
+				if got := api.callCount("UpdateActorEgressPolicy"); got != 1 {
+					t.Errorf("UpdateActorEgressPolicy called %d times, want 1: the retry should see the policy already updated", got)
+				}
+			},
+		},
+		{
+			name:  "create committed before its answer was lost",
+			setup: func(api *fakeAPI) { api.createLostAnswer = 1 },
+			check: func(t *testing.T, r *runner, api *fakeAPI) {
+				existed, err := r.ensureActor(t.Context(), "egress-0")
+				if err != nil || existed {
+					t.Errorf("ensureActor = %v, %v; want false, nil", existed, err)
+				}
+			},
+		},
+		{
+			name:  "resume committed but every answer timed out",
+			setup: func(api *fakeAPI) { api.resumeLostAnswer = true },
+			check: func(t *testing.T, r *runner, api *fakeAPI) {
+				r.cfg.Actors, r.cfg.Parallel = 1, 1 // so the run resumes egress-0
+				r.cfg.ResumeTimeout = 50 * time.Millisecond
+				rep, err := r.run(t.Context())
+				if err != nil {
+					t.Fatalf("run: %v", err)
+				}
+				if rep.Resume.Failed != 1 {
+					t.Errorf("resume = %+v, want one failure", rep.Resume)
+				}
+				if api.isRunning("egress-0") {
+					t.Errorf("egress-0 left running after a resume whose answer was lost")
+				}
+				if got := api.callNames("SuspendActor"); !slices.Equal(got, []string{"egress-0"}) {
+					t.Errorf("suspended %v, want [egress-0]", got)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			api := newFakeAPI()
+			tc.setup(api)
+			r, _, _ := newTestRunner(t, testConfig(), api, testConfig().Endpoints)
+			tc.check(t, r, api)
+		})
 	}
 }

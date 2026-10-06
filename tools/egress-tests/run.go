@@ -68,10 +68,10 @@ func (c *runConfig) validate() error {
 		return fmt.Errorf("--duration must be positive, got %v", c.Duration)
 	case c.ConnMode != connModeKeepAlive && c.ConnMode != connModeNewConn:
 		return fmt.Errorf("--conn-mode must be %s or %s, got %q", connModeKeepAlive, connModeNewConn, c.ConnMode)
-	case c.RequestTimeout <= 0:
-		return fmt.Errorf("--request-timeout must be positive, got %v", c.RequestTimeout)
-	case c.RequestInterval < 0:
-		return fmt.Errorf("--request-interval cannot be negative, got %v", c.RequestInterval)
+	case c.RequestTimeout < time.Millisecond || c.RequestTimeout%time.Millisecond != 0:
+		return fmt.Errorf("--request-timeout must be a positive whole number of milliseconds, got %v", c.RequestTimeout)
+	case c.RequestInterval < 0 || c.RequestInterval%time.Millisecond != 0:
+		return fmt.Errorf("--request-interval must be zero or a whole number of milliseconds, got %v", c.RequestInterval)
 	case c.CreateConcurrency < 1:
 		return fmt.Errorf("--create-concurrency must be at least 1, got %d", c.CreateConcurrency)
 	case c.ResumeTimeout <= 0:
@@ -236,8 +236,11 @@ func (r *runner) createActors(ctx context.Context, rep *report) []bool {
 	return ok
 }
 
-// ensureActor creates the actor and reports whether it already existed.
+// ensureActor creates the actor and reports whether it already existed. An
+// AlreadyExists after an attempt whose outcome is unknown may be that
+// attempt's own commit, so it does not count as existing.
 func (r *runner) ensureActor(ctx context.Context, name string) (existed bool, err error) {
+	var maybeCreated bool
 	err = r.backoff.retry(ctx, func(ctx context.Context) error {
 		_, err := r.api.CreateActor(ctx, &ateapipb.CreateActorRequest{
 			Actor: &ateapipb.Actor{
@@ -246,8 +249,11 @@ func (r *runner) ensureActor(ctx context.Context, name string) (existed bool, er
 			},
 		})
 		if status.Code(err) == codes.AlreadyExists {
-			existed = true
+			existed = !maybeCreated
 			return nil
+		}
+		if outcomeUnknown(err) {
+			maybeCreated = true
 		}
 		return err
 	})
@@ -271,24 +277,28 @@ func (r *runner) ensurePolicy(ctx context.Context, name string, want *ateapipb.E
 		return false, err
 	}
 
-	var existing *ateapipb.EgressPolicy
-	if err := r.backoff.retry(ctx, func(ctx context.Context) error {
-		var err error
-		existing, err = r.api.GetActorEgressPolicy(ctx, &ateapipb.GetActorEgressPolicyRequest{Actor: ref})
-		return err
-	}); err != nil {
-		return false, err
-	}
-	if samePolicyRules(existing, want) {
-		return false, nil
-	}
-	// The update needs the current UID and version as preconditions.
-	update := &ateapipb.EgressPolicy{Metadata: existing.GetMetadata(), Rules: want.GetRules()}
+	// Each attempt reads the policy again: the update needs the current UID
+	// and version as preconditions, and a version conflict (Aborted) means
+	// another write, possibly an earlier attempt's, moved them.
 	err = r.backoff.retry(ctx, func(ctx context.Context) error {
-		_, err := r.api.UpdateActorEgressPolicy(ctx, &ateapipb.UpdateActorEgressPolicyRequest{Actor: ref, EgressPolicy: update})
+		existing, err := r.api.GetActorEgressPolicy(ctx, &ateapipb.GetActorEgressPolicyRequest{Actor: ref})
+		if err != nil {
+			return err
+		}
+		if samePolicyRules(existing, want) {
+			return nil
+		}
+		// Set before the call: an update that commits but loses its answer
+		// finds matching rules on the next attempt.
+		changed = true
+		update := &ateapipb.EgressPolicy{Metadata: existing.GetMetadata(), Rules: want.GetRules()}
+		_, err = r.api.UpdateActorEgressPolicy(ctx, &ateapipb.UpdateActorEgressPolicyRequest{Actor: ref, EgressPolicy: update})
 		return err
 	})
-	return err == nil, err
+	if err != nil {
+		return false, err
+	}
+	return changed, nil
 }
 
 // pickActors returns the names of Parallel actors chosen at random among the
@@ -321,6 +331,9 @@ type actorRun struct {
 	// readyLatency runs from the resume to the first answer through the router.
 	readyLatency time.Duration
 	resumed      bool
+	// mayBeRunning is set when a resume failed in a way that may still have
+	// committed, such as a timeout, so the actor is suspended anyway.
+	mayBeRunning bool
 	ready        bool
 	started      bool
 	err          error
@@ -344,6 +357,9 @@ func (r *runner) resumeActors(ctx context.Context, names []string, rep *report) 
 			_, err := r.api.ResumeActor(ctx, &ateapipb.ResumeActorRequest{
 				Actor: &ateapipb.ObjectRef{Atespace: r.cfg.Atespace, Name: a.name},
 			})
+			if outcomeUnknown(err) {
+				a.mayBeRunning = true
+			}
 			return err
 		})
 		if err != nil {
@@ -514,21 +530,39 @@ func (r *runner) stopLoops(ctx context.Context, ready []*actorRun, rep *report) 
 	rep.Loop = merged
 }
 
-// suspendActors suspends every actor that resumed, so the next run finds them
-// with no loop running.
+// outcomeUnknown reports whether a failed call may still have committed on the
+// server: it timed out, lost its connection, or failed with no status code,
+// rather than being refused.
+func outcomeUnknown(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	switch status.Code(err) {
+	case codes.DeadlineExceeded, codes.Canceled, codes.Unavailable, codes.Unknown:
+		return true
+	}
+	return false
+}
+
+// suspendActors suspends every actor that resumed, or may have, so the next
+// run finds them with no loop running. Suspending an actor that is already
+// suspended succeeds.
 func (r *runner) suspendActors(ctx context.Context, actors []*actorRun, rep *report) {
-	var resumed []*actorRun
+	var toSuspend []*actorRun
 	for _, a := range actors {
-		if a.resumed {
-			resumed = append(resumed, a)
+		if a.resumed || a.mayBeRunning {
+			toSuspend = append(toSuspend, a)
 		}
 	}
 	res := newPhase()
 	start := time.Now()
-	forEach(len(resumed), len(resumed), func(i int) {
+	forEach(len(toSuspend), len(toSuspend), func(i int) {
 		err := r.backoff.retry(ctx, func(ctx context.Context) error {
 			_, err := r.api.SuspendActor(ctx, &ateapipb.SuspendActorRequest{
-				Actor: &ateapipb.ObjectRef{Atespace: r.cfg.Atespace, Name: resumed[i].name},
+				Actor: &ateapipb.ObjectRef{Atespace: r.cfg.Atespace, Name: toSuspend[i].name},
 			})
 			return err
 		})
@@ -538,8 +572,8 @@ func (r *runner) suspendActors(ctx context.Context, actors []*actorRun, rep *rep
 		}
 		res.succeed()
 	})
-	rep.Suspend = res.result(len(resumed), time.Since(start))
-	r.logf("suspend: %d/%d suspended in %v", rep.Suspend.Succeeded, len(resumed), rep.Suspend.Duration.Round(time.Millisecond))
+	rep.Suspend = res.result(len(toSuspend), time.Since(start))
+	r.logf("suspend: %d/%d resumed or possibly resumed actors suspended in %v", rep.Suspend.Succeeded, len(toSuspend), rep.Suspend.Duration.Round(time.Millisecond))
 }
 
 // progress calls report every ProgressInterval until the returned stop func

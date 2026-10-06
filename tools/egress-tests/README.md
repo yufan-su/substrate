@@ -236,6 +236,11 @@ and a line naming the endpoints with the most errors.
     target. Check `upstream_failure` in the gateway's access log, and whether
     the gateway is patched.
 
+The create line's reused count is the actors whose `CreateActor` returned
+`AlreadyExists` with no earlier attempt that timed out or lost its connection.
+An actor that existed before the run, but whose first attempt timed out
+before reaching the server, counts as created, not reused.
+
 Resume and ready latency are measured by the driver. Resume latency runs
 from the first `ResumeActor` attempt until it succeeds, retries included.
 Ready latency runs from then until the actor first answers through the router.
