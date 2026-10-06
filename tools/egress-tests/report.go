@@ -47,6 +47,30 @@ type report struct {
 	Suspend     phaseResult      `json:"suspend"`
 	Loop        *egressapi.Stats `json:"loop,omitempty"`
 	Actors      []actorResult    `json:"actors,omitempty"`
+	// Phases holds when each phase ran, on the driver's clock.
+	Phases []phaseMark `json:"phases,omitempty"`
+	// LoopTimeline holds the merged loop stats of each progress poll.
+	LoopTimeline []loopPoint     `json:"loopTimeline,omitempty"`
+	Resources    *resourceReport `json:"resources,omitempty"`
+}
+
+type phaseMark struct {
+	Name  string    `json:"name"`
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+}
+
+func (rep *report) addPhase(name string, start time.Time) {
+	rep.Phases = append(rep.Phases, phaseMark{Name: name, Start: start, End: time.Now()})
+}
+
+// loopPoint is the cumulative stats of all running loops at one poll.
+type loopPoint struct {
+	T         time.Time           `json:"t"`
+	Requests  int64               `json:"requests"`
+	Successes int64               `json:"successes"`
+	NewConns  int64               `json:"newConns"`
+	Latency   egressapi.Histogram `json:"latency"`
 }
 
 type phaseResult struct {
