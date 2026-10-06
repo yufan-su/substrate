@@ -1,0 +1,1006 @@
+{
+ "config": {
+  "actors": 100,
+  "parallel": 10,
+  "endpoints": 10,
+  "duration": 60000000000,
+  "connMode": "keepalive",
+  "requestInterval": 100000000
+ },
+ "phases": [
+  {
+   "name": "create",
+   "start": "2026-10-06T15:19:48.000000Z",
+   "end": "2026-10-06T15:19:49.000000Z"
+  },
+  {
+   "name": "resume",
+   "start": "2026-10-06T15:19:49.000000Z",
+   "end": "2026-10-06T15:19:50.000000Z"
+  },
+  {
+   "name": "start",
+   "start": "2026-10-06T15:19:50.000000Z",
+   "end": "2026-10-06T15:20:00.000000Z"
+  },
+  {
+   "name": "steady",
+   "start": "2026-10-06T15:20:00.000000Z",
+   "end": "2026-10-06T15:21:00.000000Z"
+  },
+  {
+   "name": "stop",
+   "start": "2026-10-06T15:21:00.000000Z",
+   "end": "2026-10-06T15:21:01.000000Z"
+  },
+  {
+   "name": "suspend",
+   "start": "2026-10-06T15:21:01.000000Z",
+   "end": "2026-10-06T15:21:02.000000Z"
+  }
+ ],
+ "loop": {
+  "elapsed": 60000000000,
+  "requests": 60000,
+  "successes": 60000,
+  "newConns": 100,
+  "latency": {
+   "counts": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    60000
+   ],
+   "count": 60000,
+   "sumMicros": 120000000,
+   "maxMicros": 3200
+  }
+ },
+ "resources": {
+  "envoy": [
+   {
+    "t": "2026-10-06T15:19:50.000000Z",
+    "label": "start:begin",
+    "pod": "gw",
+    "counters": {
+     "cluster.mitm_internal.upstream_cx_total": 500
+    }
+   },
+   {
+    "t": "2026-10-06T15:21:01.000000Z",
+    "label": "stop:end",
+    "pod": "gw",
+    "counters": {
+     "cluster.mitm_internal.upstream_cx_total": 600
+    }
+   }
+  ],
+  "components": {
+   "gateway": {
+    "pods": 1,
+    "steady": {
+     "cpuCores": {
+      "mean": 0.9,
+      "max": 0.9
+     },
+     "coresPerKrps": 0.9,
+     "throttledRatio": 0,
+     "workingSetBytes": 134217728,
+     "coverage": 0.75
+    }
+   }
+  },
+  "series": [
+   {
+    "t": "2026-10-06T15:19:30.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cpu_cores",
+    "value": 0.03
+   },
+   {
+    "t": "2026-10-06T15:19:30.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:19:45.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cpu_cores",
+    "value": 0.03
+   },
+   {
+    "t": "2026-10-06T15:19:45.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:20:00.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cpu_cores",
+    "value": 0.03
+   },
+   {
+    "t": "2026-10-06T15:20:00.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:20:15.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cpu_cores",
+    "value": 0.6
+   },
+   {
+    "t": "2026-10-06T15:20:15.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:20:30.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cpu_cores",
+    "value": 0.6
+   },
+   {
+    "t": "2026-10-06T15:20:30.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:20:45.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cpu_cores",
+    "value": 0.6
+   },
+   {
+    "t": "2026-10-06T15:20:45.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:21:00.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cpu_cores",
+    "value": 0.6
+   },
+   {
+    "t": "2026-10-06T15:21:00.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:21:15.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cpu_cores",
+    "value": 0.03
+   },
+   {
+    "t": "2026-10-06T15:21:15.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:19:30.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "cpu_cores",
+    "value": 0.02
+   },
+   {
+    "t": "2026-10-06T15:19:30.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:19:45.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "cpu_cores",
+    "value": 0.02
+   },
+   {
+    "t": "2026-10-06T15:19:45.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:20:00.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "cpu_cores",
+    "value": 0.02
+   },
+   {
+    "t": "2026-10-06T15:20:00.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:20:15.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "cpu_cores",
+    "value": 0.3
+   },
+   {
+    "t": "2026-10-06T15:20:15.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:20:30.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "cpu_cores",
+    "value": 0.3
+   },
+   {
+    "t": "2026-10-06T15:20:30.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:20:45.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "cpu_cores",
+    "value": 0.3
+   },
+   {
+    "t": "2026-10-06T15:20:45.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:21:00.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "cpu_cores",
+    "value": 0.3
+   },
+   {
+    "t": "2026-10-06T15:21:00.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:21:15.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "cpu_cores",
+    "value": 0.02
+   },
+   {
+    "t": "2026-10-06T15:21:15.000000Z",
+    "source": "cadvisor",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "ext-proc",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:19:30.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "cpu_cores",
+    "value": 0.01
+   },
+   {
+    "t": "2026-10-06T15:19:30.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:19:45.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "cpu_cores",
+    "value": 0.01
+   },
+   {
+    "t": "2026-10-06T15:19:45.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:20:00.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "cpu_cores",
+    "value": 0.01
+   },
+   {
+    "t": "2026-10-06T15:20:00.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:20:15.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "cpu_cores",
+    "value": 0.5
+   },
+   {
+    "t": "2026-10-06T15:20:15.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:20:30.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "cpu_cores",
+    "value": 0.5
+   },
+   {
+    "t": "2026-10-06T15:20:30.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:20:45.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "cpu_cores",
+    "value": 0.5
+   },
+   {
+    "t": "2026-10-06T15:20:45.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:21:00.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "cpu_cores",
+    "value": 0.5
+   },
+   {
+    "t": "2026-10-06T15:21:00.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:21:15.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "cpu_cores",
+    "value": 0.01
+   },
+   {
+    "t": "2026-10-06T15:21:15.000000Z",
+    "source": "cadvisor",
+    "component": "workers",
+    "pod": "w1",
+    "container": "ateom",
+    "metric": "working_set_bytes",
+    "value": 67108864
+   },
+   {
+    "t": "2026-10-06T15:20:00.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_active",
+    "value": 100
+   },
+   {
+    "t": "2026-10-06T15:20:00.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_overflow",
+    "value": 0
+   },
+   {
+    "t": "2026-10-06T15:20:05.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_active",
+    "value": 100
+   },
+   {
+    "t": "2026-10-06T15:20:05.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_overflow",
+    "value": 0
+   },
+   {
+    "t": "2026-10-06T15:20:10.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_active",
+    "value": 100
+   },
+   {
+    "t": "2026-10-06T15:20:10.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_overflow",
+    "value": 0
+   },
+   {
+    "t": "2026-10-06T15:20:15.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_active",
+    "value": 100
+   },
+   {
+    "t": "2026-10-06T15:20:15.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_overflow",
+    "value": 0
+   },
+   {
+    "t": "2026-10-06T15:20:20.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_active",
+    "value": 100
+   },
+   {
+    "t": "2026-10-06T15:20:20.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_overflow",
+    "value": 0
+   },
+   {
+    "t": "2026-10-06T15:20:25.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_active",
+    "value": 100
+   },
+   {
+    "t": "2026-10-06T15:20:25.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_overflow",
+    "value": 0
+   },
+   {
+    "t": "2026-10-06T15:20:30.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_active",
+    "value": 100
+   },
+   {
+    "t": "2026-10-06T15:20:30.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_overflow",
+    "value": 2
+   },
+   {
+    "t": "2026-10-06T15:20:35.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_active",
+    "value": 100
+   },
+   {
+    "t": "2026-10-06T15:20:35.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_overflow",
+    "value": 2
+   },
+   {
+    "t": "2026-10-06T15:20:40.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_active",
+    "value": 100
+   },
+   {
+    "t": "2026-10-06T15:20:40.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_overflow",
+    "value": 2
+   },
+   {
+    "t": "2026-10-06T15:20:45.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_active",
+    "value": 100
+   },
+   {
+    "t": "2026-10-06T15:20:45.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_overflow",
+    "value": 2
+   },
+   {
+    "t": "2026-10-06T15:20:50.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_active",
+    "value": 100
+   },
+   {
+    "t": "2026-10-06T15:20:50.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_overflow",
+    "value": 2
+   },
+   {
+    "t": "2026-10-06T15:20:55.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_active",
+    "value": 100
+   },
+   {
+    "t": "2026-10-06T15:20:55.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_overflow",
+    "value": 2
+   },
+   {
+    "t": "2026-10-06T15:21:00.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_active",
+    "value": 100
+   },
+   {
+    "t": "2026-10-06T15:21:00.000000Z",
+    "source": "envoy",
+    "component": "gateway",
+    "pod": "gw",
+    "container": "envoy",
+    "metric": "cluster.mitm_internal.upstream_cx_overflow",
+    "value": 2
+   },
+   {
+    "t": "2026-10-06T15:20:05.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "req_per_s",
+    "value": 1000
+   },
+   {
+    "t": "2026-10-06T15:20:05.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "p99_ms",
+    "value": 3.2
+   },
+   {
+    "t": "2026-10-06T15:20:10.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "req_per_s",
+    "value": 1000
+   },
+   {
+    "t": "2026-10-06T15:20:10.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "p99_ms",
+    "value": 3.2
+   },
+   {
+    "t": "2026-10-06T15:20:15.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "req_per_s",
+    "value": 1000
+   },
+   {
+    "t": "2026-10-06T15:20:15.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "p99_ms",
+    "value": 3.2
+   },
+   {
+    "t": "2026-10-06T15:20:20.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "req_per_s",
+    "value": 1000
+   },
+   {
+    "t": "2026-10-06T15:20:20.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "p99_ms",
+    "value": 3.2
+   },
+   {
+    "t": "2026-10-06T15:20:25.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "req_per_s",
+    "value": 1000
+   },
+   {
+    "t": "2026-10-06T15:20:25.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "p99_ms",
+    "value": 3.2
+   },
+   {
+    "t": "2026-10-06T15:20:30.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "req_per_s",
+    "value": 1000
+   },
+   {
+    "t": "2026-10-06T15:20:30.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "p99_ms",
+    "value": 3.2
+   },
+   {
+    "t": "2026-10-06T15:20:35.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "req_per_s",
+    "value": 1000
+   },
+   {
+    "t": "2026-10-06T15:20:35.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "p99_ms",
+    "value": 3.2
+   },
+   {
+    "t": "2026-10-06T15:20:40.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "req_per_s",
+    "value": 1000
+   },
+   {
+    "t": "2026-10-06T15:20:40.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "p99_ms",
+    "value": 3.2
+   },
+   {
+    "t": "2026-10-06T15:20:45.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "req_per_s",
+    "value": 1000
+   },
+   {
+    "t": "2026-10-06T15:20:45.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "p99_ms",
+    "value": 3.2
+   },
+   {
+    "t": "2026-10-06T15:20:50.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "req_per_s",
+    "value": 1000
+   },
+   {
+    "t": "2026-10-06T15:20:50.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "p99_ms",
+    "value": 3.2
+   },
+   {
+    "t": "2026-10-06T15:20:55.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "req_per_s",
+    "value": 1000
+   },
+   {
+    "t": "2026-10-06T15:20:55.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "p99_ms",
+    "value": 3.2
+   },
+   {
+    "t": "2026-10-06T15:21:00.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "req_per_s",
+    "value": 1000
+   },
+   {
+    "t": "2026-10-06T15:21:00.000000Z",
+    "source": "loop",
+    "component": "actors",
+    "metric": "p99_ms",
+    "value": 3.2
+   }
+  ],
+  "verify": [
+   {
+    "check": "overhead",
+    "scope": "driver",
+    "want": "\u2264 0.50 core",
+    "got": "0.031 core",
+    "pass": true
+   }
+  ]
+ }
+}
