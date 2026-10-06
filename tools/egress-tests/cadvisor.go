@@ -40,7 +40,7 @@ type cadvisorTarget struct {
 
 var cadvisorTargets = []cadvisorTarget{
 	{"workers", "egress-tests", "ate.dev/worker-pool=egress-tests", []string{"ateom"}},
-	{"gateway", "ate-system", "app=atenet-egress", []string{"envoy", "ext-proc"}},
+	{"gateway", "ate-system", "app=atenet-egress", []string{"envoy", "ext-proc", "sdsmint"}},
 	{"ateapi", "ate-system", "app=ate-api-server", []string{"ate-api-server"}},
 	{"router", "ate-system", "app=atenet-router", []string{"atenet-router", "envoy"}},
 	{"targets", "egress-tests-targets", "app=egress-target", []string{"target"}},

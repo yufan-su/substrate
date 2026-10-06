@@ -132,7 +132,8 @@ func cgroupPath(p *corev1.Pod, containerID string) string {
 // container POD, and each wanted container's.
 func podTargets(p *corev1.Pod, component string, containers []string) map[string]cgTarget {
 	out := map[string]cgTarget{cgroupPath(p, ""): {component, p.Name, podContainer}}
-	for _, cs := range p.Status.ContainerStatuses {
+	// Native sidecars report their status among the init containers.
+	for _, cs := range slices.Concat(p.Status.InitContainerStatuses, p.Status.ContainerStatuses) {
 		if slices.Contains(containers, cs.Name) && cs.ContainerID != "" {
 			out[cgroupPath(p, cs.ContainerID)] = cgTarget{component, p.Name, cs.Name}
 		}

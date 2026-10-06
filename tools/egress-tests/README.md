@@ -208,6 +208,8 @@ three sources through the API server, each on its own cadence:
 
 The worker pod is the smallest unit cAdvisor sees: it holds the actors,
 gVisor, atunnel and the sandbox DNS relay together.
+The gateway pod is read as `envoy`, `ext-proc` and `sdsmint`, its native
+sidecar that mints the per-actor certificates.
 
 The report then adds `cpu` and `memory` lines: each component's mean and
 peak cores over the steady window, cores per 1000 req/s, the exact steady

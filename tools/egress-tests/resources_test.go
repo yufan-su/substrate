@@ -416,3 +416,57 @@ func TestReadProcessStampsMidpoint(t *testing.T) {
 		})
 	}
 }
+
+func TestPodContainers(t *testing.T) {
+	t.Parallel()
+	always := corev1.ContainerRestartPolicyAlways
+	for _, tc := range []struct {
+		name string
+		spec corev1.PodSpec
+		want []string
+	}{
+		{name: "containers only", spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "envoy"}, {Name: "ext-proc"}}},
+			want: []string{"envoy", "ext-proc"}},
+		{name: "native sidecar counts, plain init does not", spec: corev1.PodSpec{
+			InitContainers: []corev1.Container{{Name: "trust"}, {Name: "sdsmint", RestartPolicy: &always}},
+			Containers:     []corev1.Container{{Name: "envoy"}, {Name: "ext-proc"}},
+		}, want: []string{"sdsmint", "envoy", "ext-proc"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := podContainers(&corev1.Pod{Spec: tc.spec}); !slices.Equal(got, tc.want) {
+				t.Errorf("podContainers = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveCadvisorCompleteness(t *testing.T) {
+	t.Parallel()
+	always := corev1.ContainerRestartPolicyAlways
+	for _, tc := range []struct {
+		name         string
+		initSidecars []corev1.Container
+		want         bool
+	}{
+		{name: "sdsmint sidecar is a target", initSidecars: []corev1.Container{{Name: "sdsmint", RestartPolicy: &always}}, want: true},
+		{name: "unknown sidecar makes the pod incomplete", initSidecars: []corev1.Container{{Name: "other", RestartPolicy: &always}}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			k8s := fake.NewSimpleClientset(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "ate-system", Labels: map[string]string{"app": "atenet-egress"}},
+				Spec: corev1.PodSpec{NodeName: "node-a", InitContainers: tc.initSidecars,
+					Containers: []corev1.Container{{Name: "envoy"}, {Name: "ext-proc"}}},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			})
+			s := newResourceSampler(newFakeGetter(), k8s, time.Second)
+			if err := s.resolveCadvisor(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if got := s.cadvisorPods["ate-system/gw"].complete; got != tc.want {
+				t.Errorf("complete = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

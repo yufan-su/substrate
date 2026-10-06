@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"net/url"
 	"strings"
@@ -472,5 +473,31 @@ func TestOffsetIntervals(t *testing.T) {
 				t.Errorf("clocks = %+v, want pass %v", clocks, tc.wantPass)
 			}
 		})
+	}
+}
+
+func TestPodTargetsIncludesNativeSidecars(t *testing.T) {
+	t.Parallel()
+	p := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", UID: types.UID("u")},
+		Status: corev1.PodStatus{
+			QOSClass: corev1.PodQOSBurstable,
+			InitContainerStatuses: []corev1.ContainerStatus{
+				{Name: "trust", ContainerID: "containerd://t"},
+				{Name: "sdsmint", ContainerID: "containerd://s"},
+			},
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "envoy", ContainerID: "containerd://e"},
+				{Name: "ext-proc", ContainerID: "containerd://x"},
+			},
+		},
+	}
+	got := map[string]bool{}
+	for _, tgt := range podTargets(p, "gateway", []string{"envoy", "ext-proc", "sdsmint"}) {
+		got[tgt.container] = true
+	}
+	want := map[string]bool{podContainer: true, "envoy": true, "ext-proc": true, "sdsmint": true}
+	if !maps.Equal(got, want) {
+		t.Errorf("podTargets containers = %v, want %v", got, want)
 	}
 }

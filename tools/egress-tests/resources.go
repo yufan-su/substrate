@@ -287,6 +287,22 @@ func (s *resourceSampler) every(ctx context.Context, interval time.Duration, pol
 }
 
 // resolveCadvisor finds the pods of every cAdvisor target and their nodes.
+// podContainers names the containers that run for a pod's lifetime: its
+// containers and its native sidecars, the init containers that restart
+// always. Ordinary init containers have exited by the time it runs.
+func podContainers(p *corev1.Pod) []string {
+	var out []string
+	for _, c := range p.Spec.InitContainers {
+		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			out = append(out, c.Name)
+		}
+	}
+	for _, c := range p.Spec.Containers {
+		out = append(out, c.Name)
+	}
+	return out
+}
+
 func (s *resourceSampler) resolveCadvisor(ctx context.Context) error {
 	s.cadvisorPods = map[string]cadvisorPod{}
 	nodes := map[string]bool{}
@@ -302,8 +318,8 @@ func (s *resourceSampler) resolveCadvisor(ctx context.Context) error {
 			}
 			found = true
 			complete := true
-			for _, c := range p.Spec.Containers {
-				if !slices.Contains(t.containers, c.Name) {
+			for _, c := range podContainers(&p) {
+				if !slices.Contains(t.containers, c) {
 					complete = false
 				}
 			}
