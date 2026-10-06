@@ -42,11 +42,22 @@ type actorCertificateSource interface {
 // connection originally targeted.
 type OriginalDestination func(net.Conn) (string, error)
 
+// defaultTunnelOpenTimeout bounds how long a tunnel waits for the gateway to
+// answer its CONNECT. The gateway answers in milliseconds, or within its 5s
+// authorization timeout when the policy check is slow; a longer wait means it
+// has queued the tunnel because it carries as many as it can. The actor that
+// asked has usually given up by then, but atunnel cannot tell: a half-closed
+// actor connection may still be waiting for its answer. Closing the gateway
+// connection at the deadline withdraws the queued CONNECT, which would
+// otherwise keep its place in the gateway's queue until a tunnel closed.
+const defaultTunnelOpenTimeout = 10 * time.Second
+
 // Egress proxies actor TCP connections through an egress CONNECT dialer. It is
 // long-lived across actor activations, but only carries traffic while an actor
 // is assigned to its worker.
 type Egress struct {
 	originalDestination OriginalDestination
+	tunnelOpenTimeout   time.Duration
 
 	mu sync.Mutex
 	// Keyed by actor UID, supplied by the namespace-specific listener.
@@ -72,6 +83,7 @@ func NewEgress(originalDestination OriginalDestination) (*Egress, error) {
 	}
 	return &Egress{
 		originalDestination: originalDestination,
+		tunnelOpenTimeout:   defaultTunnelOpenTimeout,
 		active:              map[string]*egressActivation{},
 	}, nil
 }
@@ -293,7 +305,9 @@ func (e *Egress) handle(downstream net.Conn, active *egressActivation) {
 			slog.WarnContext(active.ctx, "atunnel failed to resolve original egress destination", slog.Any("err", err))
 			return
 		}
-		upstream, err := active.dialer.DialContext(active.ctx, destination)
+		dialCtx, cancelDial := context.WithTimeout(active.ctx, e.tunnelOpenTimeout)
+		upstream, err := active.dialer.DialContext(dialCtx, destination)
+		cancelDial()
 		if err != nil {
 			slog.WarnContext(active.ctx, "atunnel failed to open egress tunnel", slog.String("destination", destination), slog.Any("err", err))
 			return

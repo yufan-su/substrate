@@ -28,6 +28,7 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // TODO(liorlieberman): support/use CONNECT on Ingress as well.
@@ -127,8 +128,16 @@ func NewClient(cfg ClientConfig, opts ...ClientOption) (*Client, error) {
 	return client, nil
 }
 
+// aLongTimeAgo is a deadline already in the past: setting it fails any read or
+// write on the connection at once, including one already blocked.
+var aLongTimeAgo = time.Unix(1, 0)
+
 // DialContext opens a CONNECT tunnel to destination. destination becomes the
 // request authority, so it must include an explicit port.
+//
+// ctx bounds the whole exchange, up to the gateway's answer. If it ends first,
+// the connection is closed, which also withdraws the CONNECT from the gateway.
+// It has no hold on a tunnel DialContext returned.
 func (c *Client) DialContext(ctx context.Context, destination string) (net.Conn, error) {
 	if err := validateDestination(destination); err != nil {
 		return nil, err
@@ -137,11 +146,24 @@ func (c *Client) DialContext(ctx context.Context, destination string) (net.Conn,
 	if err != nil {
 		return nil, fmt.Errorf("atunnel: connecting to egress gateway: %w", err)
 	}
+	// The handshake watches ctx itself. Writing the CONNECT and waiting for its
+	// answer do not, so ctx ending expires the deadline under them.
+	stop := context.AfterFunc(ctx, func() { _ = rawConn.SetDeadline(aLongTimeAgo) })
+	var conn net.Conn = rawConn
+	fail := func(err error) (net.Conn, error) {
+		stop()
+		_ = conn.Close()
+		return nil, err
+	}
+
 	tlsConn := tls.Client(rawConn, c.tlsConfig.Clone())
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		_ = rawConn.Close()
-		return nil, fmt.Errorf("%w: %w", ErrGatewayHandshake, err)
+		if ctx.Err() != nil {
+			return fail(fmt.Errorf("atunnel: egress gateway TLS handshake: %w", ctx.Err()))
+		}
+		return fail(fmt.Errorf("%w: %w", ErrGatewayHandshake, err))
 	}
+	conn = tlsConn
 
 	req := &http.Request{
 		Method: http.MethodConnect,
@@ -149,28 +171,40 @@ func (c *Client) DialContext(ctx context.Context, destination string) (net.Conn,
 		Host:   destination,
 	}
 	if err := req.Write(tlsConn); err != nil {
-		_ = tlsConn.Close()
-		return nil, connectExchangeError("writing CONNECT request", err)
+		return fail(exchangeError(ctx, "writing CONNECT request", err))
 	}
 
 	reader := bufio.NewReader(tlsConn)
 	resp, err := http.ReadResponse(reader, req)
 	if err != nil {
-		_ = tlsConn.Close()
-		return nil, connectExchangeError("reading CONNECT response", err)
+		return fail(exchangeError(ctx, "reading CONNECT response", err))
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		_ = resp.Body.Close()
-		_ = tlsConn.Close()
 		message := strings.TrimSpace(string(body))
 		if message == "" {
 			message = http.StatusText(resp.StatusCode)
 		}
-		return nil, &ConnectRejectedError{StatusCode: resp.StatusCode, Status: resp.Status, Message: message}
+		return fail(&ConnectRejectedError{StatusCode: resp.StatusCode, Status: resp.Status, Message: message})
+	}
+	if !stop() {
+		// ctx ended as the answer arrived, so the deadline under the tunnel may
+		// already be expired.
+		return fail(fmt.Errorf("atunnel: reading CONNECT response: %w", ctx.Err()))
 	}
 
 	return &bufferedConn{Conn: tlsConn, reader: reader}, nil
+}
+
+// exchangeError is connectExchangeError, except that ctx ending is reported as
+// itself rather than as whatever the expired deadline made the read or write
+// return.
+func exchangeError(ctx context.Context, op string, err error) error {
+	if ctx.Err() != nil {
+		return fmt.Errorf("atunnel: %s: %w", op, ctx.Err())
+	}
+	return connectExchangeError(op, err)
 }
 
 // connectExchangeError wraps a failure that happened after the TLS handshake

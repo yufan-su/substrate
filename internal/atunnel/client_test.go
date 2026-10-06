@@ -170,6 +170,102 @@ func TestClientDialContextGatewayHangsUpBeforeResponding(t *testing.T) {
 	}
 }
 
+// TestClientDialContextWithdrawsCONNECTWhenContextEnds covers a gateway that
+// takes the CONNECT and never answers, which is what a gateway carrying all
+// the tunnels it can does: it queues the request. DialContext must give up
+// when ctx ends, name ctx rather than the front door as the cause, and close
+// the connection, since closing it is what takes the CONNECT out of the
+// gateway's queue.
+func TestClientDialContextWithdrawsCONNECTWhenContextEnds(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+		want error
+	}{
+		{
+			name: "deadline",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 100*time.Millisecond)
+			},
+			want: context.DeadlineExceeded,
+		},
+		{
+			name: "canceled",
+			ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				time.AfterFunc(100*time.Millisecond, cancel)
+				return ctx, cancel
+			},
+			want: context.Canceled,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ca := newTestCA(t)
+			withdrawn := make(chan error, 1)
+			gatewayAddress := serveTestConnectGateway(t, ca, func(conn net.Conn, _ *http.Request) {
+				// Queue the CONNECT: no answer, just wait for the client to leave.
+				_, err := conn.Read(make([]byte, 1))
+				withdrawn <- err
+			})
+			client := newTestClient(t, ca, WithDialer(dialFixedAddress(gatewayAddress)))
+			ctx, cancel := tt.ctx()
+			defer cancel()
+
+			_, err := client.DialContext(ctx, "192.0.2.10:443")
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("DialContext error = %v, want %v", err, tt.want)
+			}
+			if errors.Is(err, ErrGatewayHandshake) {
+				t.Errorf("DialContext error = %v wraps ErrGatewayHandshake, but the gateway refused nothing", err)
+			}
+			if err := receiveWithin(t, withdrawn, "the gateway to see the CONNECT withdrawn"); err == nil {
+				t.Error("the gateway read more bytes instead of seeing the connection close")
+			}
+		})
+	}
+}
+
+// The context bounds only opening the tunnel. The caller ends it as soon as
+// DialContext returns, and that must not cut the tunnel.
+func TestClientDialContextTunnelOutlivesContext(t *testing.T) {
+	ca := newTestCA(t)
+	gatewayAddress := serveTestConnectGateway(t, ca, func(conn net.Conn, _ *http.Request) {
+		if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+			t.Errorf("writing CONNECT response: %v", err)
+			return
+		}
+		payload := make([]byte, len("ping"))
+		if _, err := io.ReadFull(conn, payload); err != nil {
+			t.Errorf("reading tunneled payload: %v", err)
+			return
+		}
+		_, _ = io.WriteString(conn, "pong")
+	})
+	client := newTestClient(t, ca, WithDialer(dialFixedAddress(gatewayAddress)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	conn, err := client.DialContext(ctx, "192.0.2.10:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	cancel()
+	// A context hook still armed would run on its own goroutine; give it the
+	// chance to break the tunnel before using it.
+	time.Sleep(50 * time.Millisecond)
+
+	if _, err := io.WriteString(conn, "ping"); err != nil {
+		t.Fatalf("writing through the tunnel after the context ended: %v", err)
+	}
+	reply := make([]byte, len("pong"))
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		t.Fatalf("reading through the tunnel after the context ended: %v", err)
+	}
+	if string(reply) != "pong" {
+		t.Errorf("reply = %q, want pong", reply)
+	}
+}
+
 // TestConnectExchangeError is the other half of gatewayHungUp: a failure on
 // this side of the connection must not be reported as the door refusing, or
 // "the gateway rejected my certificate" stops meaning anything. The cases are
