@@ -38,8 +38,19 @@ type verifyResult struct {
 	Want  string `json:"want"`
 	Got   string `json:"got"`
 	Pass  bool   `json:"pass"`
-	// Info results report a fact but never fail the run.
-	Info bool `json:"info,omitempty"`
+	// Info results report what the data cannot judge, for the reason in
+	// Note, and never fail the run.
+	Info bool   `json:"info,omitempty"`
+	Note string `json:"note,omitempty"`
+}
+
+// info marks res informational for reason.
+func (res verifyResult) info(reason string) verifyResult {
+	res.Info, res.Note = true, reason
+	if res.Got == "" {
+		res.Got = reason
+	}
+	return res
 }
 
 // Thresholds of the self-checks.
@@ -106,11 +117,14 @@ func checkDriverOverhead(d driverUsage) verifyResult {
 	}
 }
 
-// checkLiveGaps reports, per process, the longest gap between reads. Labeled
-// reads count too: they are reads like any other.
-func checkLiveGaps(samples []liveSample, interval time.Duration) []verifyResult {
+// checkLiveGaps reports, per process, the longest gap between reads within
+// the run. Labeled reads count too: they are reads like any other.
+func checkLiveGaps(samples []liveSample, interval time.Duration, run phaseMark) []verifyResult {
 	byPod := map[string][]time.Time{}
 	for _, s := range samples {
+		if s.T.Before(run.Start) || s.T.After(run.End) {
+			continue
+		}
 		key := s.Component + "/" + s.Container + "@" + s.Pod
 		byPod[key] = append(byPod[key], s.T)
 	}
@@ -143,6 +157,8 @@ const (
 	processTolerance = 0.03
 	// cpuSlack is the absolute slack, in CPU seconds, of both checks.
 	cpuSlack = 0.05
+	// pauseCores allows for the idle pause container in the pod cgroup.
+	pauseCores = 0.005
 )
 
 // point is one counter reading.
@@ -182,18 +198,46 @@ func commonSpan(series ...[]point) (from, to time.Time, ok bool) {
 	return from, to, to.After(from)
 }
 
-// deltaOver is each series' increase over their common span.
-func deltaOver(series ...[]point) (deltas []float64, span time.Duration, ok bool) {
-	from, to, ok := commonSpan(series...)
-	if !ok {
-		return nil, 0, false
+// counterBounds is the range a counter can hold at t: exact at a reading,
+// otherwise anywhere between the readings around t, since the rate between
+// them is unknown.
+func counterBounds(ps []point, t time.Time) (lo, hi float64, ok bool) {
+	if len(ps) == 0 || t.Before(ps[0].t) || t.After(ps[len(ps)-1].t) {
+		return 0, 0, false
 	}
-	for _, ps := range series {
-		a, _ := counterAt(ps, from)
-		b, _ := counterAt(ps, to)
-		deltas = append(deltas, b-a)
+	i, _ := slices.BinarySearchFunc(ps, t, func(p point, t time.Time) int { return p.t.Compare(t) })
+	if ps[i].t.Equal(t) {
+		return ps[i].v, ps[i].v, true
 	}
-	return deltas, to.Sub(from), true
+	return ps[i-1].v, ps[i].v, true
+}
+
+// bounds is the range a sum of counter increases can take.
+type bounds struct{ lo, hi float64 }
+
+func (b bounds) mid() float64   { return (b.lo + b.hi) / 2 }
+func (b bounds) width() float64 { return b.hi - b.lo }
+
+// deltaBounds is the range of the counter's increase from from to to.
+func deltaBounds(ps []point, from, to time.Time) (bounds, bool) {
+	flo, fhi, ok1 := counterBounds(ps, from)
+	tlo, thi, ok2 := counterBounds(ps, to)
+	return bounds{tlo - fhi, thi - flo}, ok1 && ok2
+}
+
+// maxEdgeShare is how much of a delta its unknown edges may make up before a
+// conservation check cannot judge it; a longer run narrows the edges.
+const maxEdgeShare = 0.25
+
+// compareBounds passes when the two ranges overlap once widened by slack. It
+// is informational when either range is too wide to judge.
+func compareBounds(res verifyResult, a, b bounds, slack float64) verifyResult {
+	res.Got = fmt.Sprintf("%.2f..%.2fs vs %.2f..%.2fs", a.lo, a.hi, b.lo, b.hi)
+	if a.width() > maxEdgeShare*math.Abs(a.mid()) || b.width() > maxEdgeShare*math.Abs(b.mid()) {
+		return res.info("edges dominate, run longer")
+	}
+	res.Pass = a.lo-slack <= b.hi && b.lo-slack <= a.hi
+	return res
 }
 
 // cpuSeries groups the cAdvisor CPU counters by component/container@pod.
@@ -225,19 +269,19 @@ func checkPodRollups(samples []cadvisorSample, pods map[string]cadvisorPod) []ve
 		}
 		res := verifyResult{Check: "conservation", Scope: "pod rollup " + p.component + "@" + pod,
 			Want: fmt.Sprintf("pod = Σ containers ±%.0f%%", 100*rollupTolerance)}
-		deltas, span, ok := deltaOver(parts...)
+		from, to, ok := commonSpan(parts...)
 		if !ok {
-			res.Got, res.Info = "too few readings", true
-			out = append(out, res)
+			out = append(out, res.info("too few readings"))
 			continue
 		}
-		var sum float64
-		for _, d := range deltas[1:] {
-			sum += d
+		podDelta, _ := deltaBounds(parts[0], from, to)
+		var sum bounds
+		for _, ps := range parts[1:] {
+			d, _ := deltaBounds(ps, from, to)
+			sum.lo, sum.hi = sum.lo+d.lo, sum.hi+d.hi
 		}
-		res.Got = fmt.Sprintf("pod %.2fs Σ %.2fs over %v", deltas[0], sum, span.Round(time.Second))
-		res.Pass = within(sum, deltas[0], rollupTolerance, cpuSlack)
-		out = append(out, res)
+		slack := rollupTolerance*podDelta.mid() + cpuSlack + pauseCores*to.Sub(from).Seconds()
+		out = append(out, compareBounds(res, podDelta, sum, slack))
 	}
 	return out
 }
@@ -257,15 +301,14 @@ func checkProcessVsCgroup(live []liveSample, samples []cadvisorSample) []verifyR
 		slices.SortFunc(ps, func(a, b point) int { return a.t.Compare(b.t) })
 		res := verifyResult{Check: "conservation", Scope: "process vs cgroup " + k,
 			Want: fmt.Sprintf("equal ±%.0f%%", 100*processTolerance)}
-		deltas, span, ok := deltaOver(ps, cg[k])
+		from, to, ok := commonSpan(ps, cg[k])
 		if !ok {
-			res.Got, res.Info = "too few readings", true
-			out = append(out, res)
+			out = append(out, res.info("too few readings"))
 			continue
 		}
-		res.Got = fmt.Sprintf("process %.2fs cgroup %.2fs over %v", deltas[0], deltas[1], span.Round(time.Second))
-		res.Pass = within(deltas[0], deltas[1], processTolerance, cpuSlack)
-		out = append(out, res)
+		proc, _ := deltaBounds(ps, from, to)
+		cgroup, _ := deltaBounds(cg[k], from, to)
+		out = append(out, compareBounds(res, proc, cgroup, processTolerance*cgroup.mid()+cpuSlack))
 	}
 	return out
 }
@@ -276,7 +319,10 @@ func checkProcessVsCgroup(live []liveSample, samples []cadvisorSample) []verifyR
 func checkCadvisorCoverage(samples []cadvisorSample, steady phaseMark) []verifyResult {
 	byKey := map[string][]time.Time{}
 	for _, s := range samples {
-		byKey[s.key()] = append(byKey[s.key()], s.T)
+		// Pod rows feed only the rollup check.
+		if s.Container != podContainer {
+			byKey[s.key()] = append(byKey[s.key()], s.T)
+		}
 	}
 	var out []verifyResult
 	for _, k := range slices.Sorted(maps.Keys(byKey)) {
@@ -296,7 +342,7 @@ func checkCadvisorCoverage(samples []cadvisorSample, steady phaseMark) []verifyR
 			Got:  fmt.Sprintf("n=%d max gap %v, %d in steady", len(ts), gap.Round(time.Millisecond), inSteady),
 			Pass: inSteady >= 2}
 		if !res.Pass {
-			res.Info, res.Got = true, res.Got+": insufficient"
+			res = res.info("insufficient: fewer than 2 readings in steady")
 		}
 		out = append(out, res)
 	}
@@ -322,6 +368,152 @@ func checkComponentsFound(missing []string, samples []cadvisorSample) []verifyRe
 			res.Got, res.Pass = "ok", true
 		}
 		out = append(out, res)
+	}
+	return out
+}
+
+// Thresholds of the cross-checks.
+const (
+	// metrics-server averages a 17 to 37 s window against cAdvisor's 12 to
+	// 20 s readings, so only gross errors (wrong container, a doubled pod
+	// row, unit mix-ups) should exceed 15%.
+	metricsServerTolerance = 0.15
+	metricsServerSlack     = 0.02
+	// A phase with no egress traffic should stay within this of idle.
+	idleSlack = 0.05
+)
+
+// checkMetricsServer compares each metrics-server reading with the cAdvisor
+// counters over the same window.
+func checkMetricsServer(ms []podMetricsSample, samples []cadvisorSample) []verifyResult {
+	series := cpuSeries(samples)
+	var out []verifyResult
+	for _, m := range ms {
+		key := m.Component + "/" + m.Container + "@" + m.Pod
+		res := verifyResult{Check: "sanity", Scope: key, Want: fmt.Sprintf("metrics-server %.3f ±%.0f%%", m.CPUCores, 100*metricsServerTolerance)}
+		// metrics-server's window runs between two kubelet readings, which
+		// are cAdvisor readings of the same container; the samples must hold
+		// both ends.
+		d, ok := deltaBounds(series[key], m.T.Add(-m.Window), m.T)
+		if !ok || m.Window <= 0 {
+			out = append(out, res.info("window starts before the first cAdvisor reading"))
+			continue
+		}
+		cores := d.mid() / m.Window.Seconds()
+		res.Got = fmt.Sprintf("sampler %.3f", cores)
+		res.Pass = within(cores, m.CPUCores, metricsServerTolerance, metricsServerSlack)
+		out = append(out, res)
+	}
+	return out
+}
+
+// liveRates is each Go process's CPU rate between consecutive reads.
+func liveRates(live []liveSample) map[string][]segment {
+	byKey := map[string][]liveSample{}
+	for _, l := range live {
+		k := l.Component + "/" + l.Container + "@" + l.Pod
+		byKey[k] = append(byKey[k], l)
+	}
+	out := map[string][]segment{}
+	for k, ls := range byKey {
+		slices.SortFunc(ls, func(a, b liveSample) int { return a.T.Compare(b.T) })
+		for i := 1; i < len(ls); i++ {
+			if dt := ls[i].T.Sub(ls[i-1].T).Seconds(); dt > 0 {
+				out[k] = append(out[k], segment{from: ls[i-1].T, to: ls[i].T, cores: (ls[i].ProcessCPUSeconds - ls[i-1].ProcessCPUSeconds) / dt})
+			}
+		}
+	}
+	return out
+}
+
+// checkSteadyAttribution checks that each process's steady mean, from the
+// reads forced at the marks, lies within the rates of the periodic reads
+// inside steady; a mean outside them is a window or units error.
+func checkSteadyAttribution(live []liveSample, steady phaseMark) []verifyResult {
+	means := map[string]float64{}
+	byKey := map[string][]liveSample{}
+	for _, l := range live {
+		k := l.Component + "/" + l.Container + "@" + l.Pod
+		byKey[k] = append(byKey[k], l)
+	}
+	for k, ls := range byKey {
+		if m, ok := liveSteadyCores(ls); ok {
+			means[k] = m
+		}
+	}
+	var periodic []liveSample
+	for _, l := range live {
+		if l.Label == "" {
+			periodic = append(periodic, l)
+		}
+	}
+	rates := liveRates(periodic)
+	var out []verifyResult
+	for _, k := range slices.Sorted(maps.Keys(means)) {
+		segs := inside(rates[k], steady)
+		res := verifyResult{Check: "phases", Scope: "steady mean " + k, Want: "within the per-interval min and max"}
+		if len(segs) == 0 {
+			out = append(out, res.info("no interval inside steady"))
+			continue
+		}
+		lo, hi := segs[0].cores, segs[0].cores
+		for _, s := range segs {
+			lo, hi = min(lo, s.cores), max(hi, s.cores)
+		}
+		m := means[k]
+		res.Got = fmt.Sprintf("mean %.3f in [%.3f, %.3f]", m, lo, hi)
+		res.Pass = m >= lo-1e-9 && m <= hi+1e-9
+		out = append(out, res)
+	}
+	return out
+}
+
+// checkIdlePhases checks, on a run that created no actors, that ext-proc's
+// CPU over the create and suspend phases stays near its idle rate, the
+// lowest rate over any 5 s of the run: no egress traffic flows then.
+func checkIdlePhases(live []liveSample, rep *report) []verifyResult {
+	if rep.Create.ActorsReused != rep.Config.Actors {
+		return nil
+	}
+	var out []verifyResult
+	rates := liveRates(live)
+	for _, k := range slices.Sorted(maps.Keys(rates)) {
+		segs := rates[k]
+		if !strings.HasPrefix(k, "gateway/ext-proc@") {
+			continue
+		}
+		idle := -1.0
+		for i := range segs {
+			var cpu, dt float64
+			for j := i; j < len(segs) && dt < 5; j++ {
+				d := segs[j].to.Sub(segs[j].from).Seconds()
+				cpu, dt = cpu+segs[j].cores*d, dt+d
+			}
+			if dt >= 5 && (idle < 0 || cpu/dt < idle) {
+				idle = cpu / dt
+			}
+		}
+		if idle < 0 {
+			continue
+		}
+		for _, name := range []string{"create", "suspend"} {
+			ph := rep.phase(name)
+			var cpu, dt float64
+			for _, s := range segs {
+				if !s.from.Before(ph.Start) && !s.to.After(ph.End) {
+					d := s.to.Sub(s.from).Seconds()
+					cpu, dt = cpu+s.cores*d, dt+d
+				}
+			}
+			res := verifyResult{Check: "phases", Scope: name + " " + k, Want: fmt.Sprintf("≤ idle %.3f + %.2f", idle, idleSlack)}
+			if dt == 0 {
+				res = res.info("phase shorter than one poll")
+			} else {
+				res.Got = fmt.Sprintf("%.3f", cpu/dt)
+				res.Pass = cpu/dt <= idle+idleSlack
+			}
+			out = append(out, res)
+		}
 	}
 	return out
 }

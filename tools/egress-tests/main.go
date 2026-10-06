@@ -133,6 +133,7 @@ func runCmd(ctx context.Context, args []string) error {
 	routerURL := fs.String("router-url", "", "atenet router base URL. Empty port-forwards to the atenet-router Service.")
 	output := fs.String("output", "", "If set, write the report as JSON to this file.")
 	resources := fs.Bool("resources", false, "Sample the CPU and memory of the components on the egress path during the run.")
+	resourcesVerify := fs.Bool("resources-verify", false, "With --resources, print the resource self-checks and fail the run if one fails.")
 	resourcesInterval := fs.Duration("resources-interval", time.Second, "How often --resources reads the live sources (Go process counters, Envoy stats).")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -143,6 +144,9 @@ func runCmd(ctx context.Context, args []string) error {
 	}
 	if *resources && *resourcesInterval <= 0 {
 		return fmt.Errorf("--resources-interval must be positive, got %v", *resourcesInterval)
+	}
+	if *resourcesVerify && !*resources {
+		return errors.New("--resources-verify needs --resources")
 	}
 
 	conn, err := cf.connect(ctx)
@@ -167,11 +171,19 @@ func runCmd(ctx context.Context, args []string) error {
 
 	r := newRunner(cfg, conn.api, conn.k8s, newRouterClient(*routerURL, cfg.Atespace, cfg.Parallel), os.Stdout)
 	if *resources {
-		r.res = newResourceSampler(restRawGetter{conn.k8s.CoreV1().RESTClient()}, conn.k8s, *resourcesInterval)
+		get, err := newSamplerGetter(cf.kubeconfig, cf.kubeContext)
+		if err != nil {
+			return err
+		}
+		r.res = newResourceSampler(get, conn.k8s, *resourcesInterval)
+		r.settleResources = *resourcesVerify
 	}
 	rep, runErr := r.run(ctx)
 	if rep != nil {
 		rep.print(os.Stdout)
+		if *resourcesVerify && !rep.printVerify(os.Stdout) {
+			runErr = errors.Join(runErr, errors.New("resource self-checks failed"))
+		}
 		if *output != "" {
 			if err := writeReport(*output, rep); err != nil {
 				return errors.Join(runErr, err)

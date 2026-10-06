@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/url"
@@ -28,6 +29,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
+
+	"github.com/agent-substrate/substrate/internal/ateclient"
 )
 
 // rawGetter fetches a raw API server path, such as a pod or node proxy URL.
@@ -37,6 +41,29 @@ type rawGetter interface {
 }
 
 type restRawGetter struct{ c rest.Interface }
+
+// Sampler client rate limits. One poll round reads a few pods every second
+// and every node every 5s; client-go's default of 5 requests per second
+// would space the one-second reads two seconds apart.
+const (
+	samplerQPS   = 50
+	samplerBurst = 100
+)
+
+// newSamplerGetter builds a rawGetter with its own client and rate limit, so
+// sampling neither waits behind the run's own API calls nor delays them.
+func newSamplerGetter(kubeconfig, kubeContext string) (rawGetter, error) {
+	cfg, err := ateclient.LoadKubeConfig(kubeconfig, kubeContext)
+	if err != nil {
+		return nil, fmt.Errorf("loading kubeconfig: %w", err)
+	}
+	cfg.QPS, cfg.Burst = samplerQPS, samplerBurst
+	cs, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("creating the sampler's Kubernetes client: %w", err)
+	}
+	return restRawGetter{cs.CoreV1().RESTClient()}, nil
+}
 
 func (g restRawGetter) GetRaw(ctx context.Context, path string, params url.Values) ([]byte, error) {
 	req := g.c.Get().AbsPath(path)
@@ -77,9 +104,16 @@ type resourceReport struct {
 	// Samples holds the cAdvisor readings, one per container per new
 	// cAdvisor timestamp.
 	Samples []cadvisorSample `json:"samples,omitempty"`
-	Driver  driverUsage      `json:"driver"`
-	Errors  map[string]int   `json:"errors,omitempty"`
-	Verify  []verifyResult   `json:"verify,omitempty"`
+	// MetricsServer holds metrics.k8s.io pod usage read at the end of steady,
+	// an independent view to check the samples against.
+	MetricsServer []podMetricsSample `json:"metricsServer,omitempty"`
+	// Components summarizes each component over the steady window.
+	Components map[string]*componentSummary `json:"components,omitempty"`
+	// Series holds per-interval rates and gauges in long format for plots.
+	Series []seriesPoint  `json:"series,omitempty"`
+	Driver driverUsage    `json:"driver"`
+	Errors map[string]int `json:"errors,omitempty"`
+	Verify []verifyResult `json:"verify,omitempty"`
 }
 
 // sourceInfo says how often a source is read and whose clock stamps it.
@@ -299,16 +333,99 @@ func (s *resourceSampler) pollCadvisor(ctx context.Context) {
 }
 
 // mark records a phase boundary: it reads every source once, labeled, and
-// notes the driver's CPU time.
+// notes the driver's CPU time. At the end of steady it also reads
+// metrics-server.
 func (s *resourceSampler) mark(ctx context.Context, label string) {
 	s.markRusage(label)
-	s.pollLive(context.WithoutCancel(ctx), label)
+	ctx = context.WithoutCancel(ctx)
+	s.pollLive(ctx, label)
+	if label == markSteadyEnd {
+		s.readMetricsServer(ctx)
+	}
+}
+
+// podMetricsSample is one container's metrics-server usage: the mean over
+// Window, ending at T.
+type podMetricsSample struct {
+	T           time.Time     `json:"t"`
+	Window      time.Duration `json:"window"`
+	Component   string        `json:"component"`
+	Pod         string        `json:"pod"`
+	Container   string        `json:"container"`
+	CPUCores    float64       `json:"cpuCores"`
+	MemoryBytes float64       `json:"memoryBytes"`
+}
+
+func (s *resourceSampler) readMetricsServer(ctx context.Context) {
+	namespaces := map[string]bool{}
+	for _, t := range cadvisorTargets {
+		namespaces[t.namespace] = true
+	}
+	for _, ns := range slices.Sorted(maps.Keys(namespaces)) {
+		body, err := s.get.GetRaw(ctx, "/apis/metrics.k8s.io/v1beta1/namespaces/"+ns+"/pods", nil)
+		if err != nil {
+			s.fail("metrics-server")
+			continue
+		}
+		var list metricsv1beta1.PodMetricsList
+		if err := json.Unmarshal(body, &list); err != nil {
+			s.fail("metrics-server")
+			continue
+		}
+		s.mu.Lock()
+		for _, pm := range list.Items {
+			p, ok := s.cadvisorPods[pm.Namespace+"/"+pm.Name]
+			if !ok {
+				continue
+			}
+			for _, c := range pm.Containers {
+				if !slices.Contains(p.containers, c.Name) {
+					continue
+				}
+				s.rep.MetricsServer = append(s.rep.MetricsServer, podMetricsSample{
+					T: pm.Timestamp.Time, Window: pm.Window.Duration, Component: p.component, Pod: pm.Name, Container: c.Name,
+					CPUCores: c.Usage.Cpu().AsApproximateFloat64(), MemoryBytes: c.Usage.Memory().AsApproximateFloat64(),
+				})
+			}
+		}
+		s.mu.Unlock()
+	}
 }
 
 func (s *resourceSampler) markRusage(label string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rusage[label] = rusageMark{at: s.now(), cpu: selfCPU()}
+}
+
+// settleTimeout bounds the wait for cAdvisor readings after the run; the
+// kubelet refreshes each container within 20 s.
+const settleTimeout = 35 * time.Second
+
+// settle waits until every cAdvisor series has a reading stamped after
+// after, or until settleTimeout. Readings taken once the run is idle again
+// let whole-run checks interpolate counters where the rate is flat.
+func (s *resourceSampler) settle(ctx context.Context, after time.Time) {
+	deadline := s.now().Add(settleTimeout)
+	for s.now().Before(deadline) {
+		s.mu.Lock()
+		done := len(s.lastTS) > 0
+		for _, t := range s.lastTS {
+			if !t.After(after) {
+				done = false
+				break
+			}
+		}
+		s.mu.Unlock()
+		if done {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // stop ends polling and returns the collected section. It is safe to call

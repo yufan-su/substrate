@@ -63,6 +63,11 @@ func (g *fakeGetter) GetRaw(_ context.Context, path string, params url.Values) (
 		return fmt.Appendf(nil, `container_cpu_usage_seconds_total{container="envoy",cpu="total",image="envoy",namespace="ate-system",pod="atenet-egress-a"} %v %d
 container_memory_working_set_bytes{container="envoy",image="envoy",namespace="ate-system",pod="atenet-egress-a"} 6e+07 %d
 `, cpu, ts, ts), nil
+	case path == "/apis/metrics.k8s.io/v1beta1/namespaces/ate-system/pods":
+		return []byte(`{"items":[{"metadata":{"name":"atenet-egress-a","namespace":"ate-system"},"timestamp":"2023-11-14T22:13:20Z","window":"30s",
+"containers":[{"name":"envoy","usage":{"cpu":"812m","memory":"64Mi"}},{"name":"other","usage":{"cpu":"1"}}]}]}`), nil
+	case strings.HasPrefix(path, "/apis/metrics.k8s.io/"):
+		return []byte(`{"items":[]}`), nil
 	case strings.HasSuffix(path, ":15000/proxy/stats"):
 		if params.Get("filter") != envoyStatsFilter {
 			return nil, fmt.Errorf("unexpected filter %q", params.Get("filter"))
@@ -188,7 +193,7 @@ func TestCheckLiveGaps(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := checkLiveGaps(tc.samples, time.Second)
+			got := checkLiveGaps(tc.samples, time.Second, phaseMark{Start: t0, End: t0.Add(time.Minute)})
 			if len(got) != 1 || got[0].Pass != tc.want {
 				t.Errorf("checkLiveGaps = %+v, want one result with pass %v", got, tc.want)
 			}
@@ -255,6 +260,9 @@ func TestResourceSampler(t *testing.T) {
 	if want := (cadvisorReads + 2) / 3; len(rep.Samples) != want || cadvisorReads < 6 {
 		t.Errorf("%d cAdvisor samples after %d reads, want one per new timestamp (%d)", len(rep.Samples), cadvisorReads, want)
 	}
+	if len(rep.MetricsServer) != 1 || rep.MetricsServer[0].CPUCores != 0.812 || rep.MetricsServer[0].Window != 30*time.Second {
+		t.Errorf("metrics-server readings = %+v, want envoy at 0.812 cores over 30s", rep.MetricsServer)
+	}
 	if !slices.Equal(s.missing, []string{"workers", "router", "targets", "dns"}) {
 		t.Errorf("missing components = %v, want the four with no pods in the fake", s.missing)
 	}
@@ -312,5 +320,26 @@ func TestRunWithResources(t *testing.T) {
 	}
 	if len(rep.LoopTimeline) == 0 || rep.LoopTimeline[len(rep.LoopTimeline)-1].Requests == 0 {
 		t.Errorf("loop timeline = %+v, want the progress polls", rep.LoopTimeline)
+	}
+}
+
+func TestSettle(t *testing.T) {
+	t.Parallel()
+	s := newResourceSampler(newFakeGetter(), fake.NewSimpleClientset(), time.Second)
+	t0 := time.Unix(1000, 0)
+	clock := t0
+	var mu sync.Mutex
+	s.now = func() time.Time { mu.Lock(); defer mu.Unlock(); clock = clock.Add(10 * time.Second); return clock }
+	s.lastTS = map[string]time.Time{"a": t0.Add(time.Hour), "b": t0}
+	start := time.Now()
+	s.settle(t.Context(), t0.Add(time.Minute))
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("settle ran %v, want it bounded by settleTimeout on the sampler clock", elapsed)
+	}
+	s.lastTS["b"] = t0.Add(2 * time.Hour)
+	start = time.Now()
+	s.settle(t.Context(), t0.Add(time.Minute))
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("settle waited %v with every series already past the mark", elapsed)
 	}
 }

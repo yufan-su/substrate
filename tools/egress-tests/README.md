@@ -108,6 +108,7 @@ go run ./tools/egress-tests run --actors 1000 --parallel 10 --endpoints 10 --dur
 | `--resume-timeout` | 5m | Per actor: how long to keep resuming, then waiting for it to answer. |
 | `--progress-interval` | 30s | How often to print progress. 0 turns it off. |
 | `--resources` | off | Sample the CPU and memory of the components on the egress path. See [Resource sampling](#resource-sampling). |
+| `--resources-verify` | off | With `--resources`, print the self-checks and fail the run if one fails. |
 | `--resources-interval` | 1s | How often `--resources` reads the Go process counters and Envoy's stats. |
 | `--output` | | Write the full report, including per-actor stats, as JSON to this file. Durations are in nanoseconds. |
 | `--kubeconfig`, `--context` | | Which cluster to use. |
@@ -192,6 +193,56 @@ actor, which has no egress policy, so every request would fail. Those failures
 would then be frozen into every actor's snapshot. Starting on request keeps the
 snapshot idle. It also lets the driver start all B loops together and change
 C or the connection mode without rebuilding the template.
+
+## Resource sampling
+
+`--resources` measures what the egress path spends during a run. It reads
+three sources through the API server, each on its own cadence:
+
+| Source | What | Cadence | Path |
+|---|---|---|---|
+| live | `process_cpu_seconds_total` and RSS of `ext-proc` and `ate-api-server` | `--resources-interval` (1s) and at each phase boundary | `pods/<pod>:9090/proxy/metrics` |
+| envoy | the gateway's `mitm_internal` and `egress_forward_proxy_cleartext` connection counters | same | `pods/<pod>:15000/proxy/stats` |
+| cadvisor | container CPU, CFS throttling and working set of the workers, gateway, ateapi, router, targets and kube-dns | polled every 5s; the kubelet refreshes each container every 12 to 20s | `nodes/<node>/proxy/metrics/cadvisor` |
+
+The worker pod is the smallest unit cAdvisor sees: it holds the actors,
+gVisor, atunnel and the sandbox DNS relay together.
+
+The report then adds `cpu` and `memory` lines: each component's mean and
+peak cores over the steady window, cores per 1000 req/s, the exact steady
+CPU of the Go processes and the driver, and the gateway's connection
+overflow. `--output` adds a `resources` section with the raw readings, a
+long-format `series` for plots, per-component summaries, and the
+self-checks. `phases` and `loopTimeline` hold the phase boundaries and the
+progress polls; use `--progress-interval 5s` for a finer timeline.
+
+**Run at least 45s.** A cAdvisor series needs two readings inside the
+steady window. A shorter run marks cAdvisor-only components
+`insufficient`; the live sources still resolve one second.
+
+**Permissions.** The driver uses your kubeconfig identity. It needs `get`
+on `nodes/proxy`, `list` on pods in `egress-tests`, `egress-tests-targets`,
+`ate-system` and `kube-system`, `get` on `pods/proxy` in `ate-system`, and
+`list` on `pods.metrics.k8s.io` in those namespaces. `nodes/proxy` also
+reaches the kubelet's exec and attach endpoints, so grant it only to
+people who could exec into pods anyway.
+
+**Self-checks.** `--resources-verify` prints the checks and fails the run
+when one fails: the gateway's new connections match the actors' own count,
+each pod cgroup equals its containers' sum, each Go process counter matches
+its container's cgroup, metrics-server agrees with cAdvisor within 15%,
+every series has its readings, and the driver stays under half a core.
+`INFO` lines report what a short run cannot resolve.
+
+Before a real measurement, run a short smoke test:
+
+```bash
+go run ./tools/egress-tests run --actors 10 --parallel 1 --endpoints 10 \
+  --duration 30s --resources --resources-verify --progress-interval 5s
+```
+
+It should end with `verify     PASS`. At 30s the cAdvisor-only components
+are `insufficient`, as expected.
 
 ## Reading the report
 
