@@ -109,6 +109,7 @@ go run ./tools/egress-tests run --actors 1000 --parallel 10 --endpoints 10 --dur
 | `--progress-interval` | 30s | How often to print progress. 0 turns it off. |
 | `--usage` | off | Sample the CPU and memory of the components on the egress path. See [Usage sampling](#usage-sampling). |
 | `--usage-verify` | off | With `--usage`, print the self-checks and fail the run if one fails. |
+| `--usage-cgroup-reader` | off | With `--usage`, also pull one-second cgroup readings from the cgroup reader DaemonSet. |
 | `--usage-live-interval` | 1s | How often `--usage` reads the Go process counters and Envoy's stats. |
 | `--output` | | Write the full report, including per-actor stats, as JSON to this file. Durations are in nanoseconds. |
 | `--kubeconfig`, `--context` | | Which cluster to use. |
@@ -222,8 +223,9 @@ steady window. A shorter run marks cAdvisor-only components
 
 **Permissions.** The driver uses your kubeconfig identity. It needs `get`
 on `nodes/proxy`, `list` on pods in `egress-tests`, `egress-tests-targets`,
-`ate-system` and `kube-system`, `get` on `pods/proxy` in `ate-system`, and
-`list` on `pods.metrics.k8s.io` in those namespaces. `nodes/proxy` also
+`ate-system` and `kube-system`, `get` on `pods/proxy` in `ate-system` and,
+with `--usage-cgroup-reader`, in `egress-tests`, and `list` on
+`pods.metrics.k8s.io` in those namespaces. `nodes/proxy` also
 reaches the kubelet's exec and attach endpoints, so grant it only to
 people who could exec into pods anyway.
 
@@ -242,7 +244,31 @@ round trip costs a point of a cumulative counter, not CPU:
 | Source | Fails when | INFO when |
 |---|---|---|
 | live (1s) | a gap over 5s or three intervals, whichever is longer, or over 5% of intervals over two intervals | a few intervals over two intervals |
+| cgroup reader (1s) | a gap over 10s, or over 5% of intervals over 3s | a few intervals over 3s |
 | cAdvisor (12 to 20s) | never | fewer than two readings in steady |
+
+**One-second cgroup readings.** cAdvisor cannot show behavior shorter than
+its refresh, and it cannot split a worker's CPU between its actors and
+atunnel. `deploy.sh --deploy --cgreader` adds the `egress-tests-cgreader`
+DaemonSet: one pod per node reads the cgroup v2 files of the cgroups the
+driver names, every second, from the host's cgroup tree mounted read-only,
+with no Kubernetes API access. Run with `--usage-cgroup-reader` and the
+driver pulls the rows every 5s through `pods/proxy` in `egress-tests`. The
+summaries then use these readings for every container they cover, the
+workers gain `actors` (the actors' `_pause` and `actor` cgroups) and `atunnel` (the
+`ateom` cgroup) parts. An actor's cgroups vanish when it suspends, before
+its last second of checkpoint work can be read; when one actor vanishes in
+a round, the driver credits it what the container used beyond its other
+cgroups, as `inferredCpuSeconds` on the gone row. `--usage-verify` adds
+checks: no rows lost, every requested container cgroup answered, node
+clocks steady, the leaves summing to their container, the readings
+agreeing with cAdvisor within 2%, and each reader under 0.02 core.
+`deploy.sh --delete` removes the DaemonSet.
+
+The reader answers on its pod IP without authentication, so while it runs
+any pod in the cluster can read every node's per-second cgroup counters
+under `kubepods.slice`. It is for development clusters only, and a
+namespace at the `baseline` Pod Security level rejects its host mount.
 
 Before a real measurement, run a short smoke test:
 
