@@ -105,6 +105,9 @@ type resourceReport struct {
 	Sources []sourceInfo  `json:"sources"`
 	Live    []liveSample  `json:"live,omitempty"`
 	Envoy   []envoySample `json:"envoy,omitempty"`
+	// EnvoyMemory holds each gateway Envoy's heap gauges, one per envoy
+	// read.
+	EnvoyMemory []envoyMemorySample `json:"envoyMemory,omitempty"`
 	// Samples holds the cAdvisor readings, one per container per new
 	// cAdvisor timestamp.
 	Samples []cadvisorSample `json:"samples,omitempty"`
@@ -150,6 +153,17 @@ type liveSample struct {
 	RSSBytes          float64   `json:"rssBytes"`
 	// RTT is the read's round trip; T is its midpoint.
 	RTT time.Duration `json:"rttNs,omitempty"`
+}
+
+// envoyMemorySample is one read of a gateway Envoy's server memory gauges:
+// the allocator's view of the heap, which the cgroup's working set mixes
+// with page cache and freed pages.
+type envoyMemorySample struct {
+	T              time.Time `json:"t"`
+	Pod            string    `json:"pod"`
+	AllocatedBytes float64   `json:"allocatedBytes"`
+	HeapSizeBytes  float64   `json:"heapSizeBytes"`
+	PhysicalBytes  float64   `json:"physicalBytes"`
 }
 
 type envoySample struct {
@@ -564,8 +578,8 @@ func (s *resourceSampler) readEnvoy(ctx context.Context, pod, label string) {
 	// Envoy serves every stat of a cluster from the start, zeros included, so
 	// a body missing one means a renamed metric or cluster, not an idle
 	// gateway. Such a read is a failure, or the gaps would pass unnoticed.
-	if err == nil && len(counters) < len(envoyClusters)*len(envoyStats) {
-		err = fmt.Errorf("%d of %d stats in the body", len(counters), len(envoyClusters)*len(envoyStats))
+	if err == nil && len(counters) < envoyStatCount {
+		err = fmt.Errorf("%d of %d stats in the body", len(counters), envoyStatCount)
 	}
 	if err != nil {
 		s.fail(err, "envoy", pod)
@@ -574,6 +588,9 @@ func (s *resourceSampler) readEnvoy(ctx context.Context, pod, label string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rep.Envoy = append(s.rep.Envoy, envoySample{T: at, Label: label, Pod: pod, Counters: counters})
+	s.rep.EnvoyMemory = append(s.rep.EnvoyMemory, envoyMemorySample{T: at, Pod: pod,
+		AllocatedBytes: counters["server.memory_allocated"], HeapSizeBytes: counters["server.memory_heap_size"],
+		PhysicalBytes: counters["server.memory_physical_size"]})
 	s.rep.Reads[sourceKey("envoy", pod)]++
 }
 

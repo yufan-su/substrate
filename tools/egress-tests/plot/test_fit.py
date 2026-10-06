@@ -19,6 +19,7 @@ Run from this directory: python3 -m unittest test_fit
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
@@ -39,6 +40,7 @@ TRUTH = {
     "envoy_cores": {"1": 0.006, "B": 0.0057, "T": 1.3e-5, "C": 8.0e-5},
     "extproc_cores": {"1": 0.007, "B": 0.0032},
     "gateway_ws_mib": {"1": 5.0, "T": 0.1, "C": 0.5},
+    "envoy_heap_mib": {"1": 10.0, "T": 0.078},
     "worker_cores": {"1": 0.02, "B": 0.023, "T": 1.0e-5},
     "atunnel_cores": {"B": 0.0015, "T": 5.0e-6},
     "worker_ws_mib": {"B": 41.0, "T": 0.2, "C": 1.5},
@@ -118,6 +120,30 @@ class FitTest(unittest.TestCase):
             with self.subTest(holdout=(h["B"], h["C"]), case="perturbed"):
                 missed = {s[0] for s in fit.score(self.fits, h) if not s[4]}
                 self.assertEqual(missed, {"envoy_cores", "gateway_ws_mib", "p99_settled_ms"})
+
+
+class PinnedWorkingSetTest(unittest.TestCase):
+    def test_gateway_ws_is_informational_above_500_mib(self):
+        rows = synthetic(GRID + REPLICATES, seed=1)
+        for r in rows:
+            r["gateway_ws_base_mib"] = 1100.0 if r["T"] >= 5000 else 50.0
+        fits = fit.fit_all(rows)
+        out = io.StringIO()
+        fit.print_fits(fits, out=out, rows=rows)
+        pinned = sum(r["T"] >= 5000 for r in rows)
+        self.assertIn(f"  informational: {pinned} of {len(rows)} runs started above 500 MiB", out.getvalue())
+        # The pinned rows stay out of the gateway_ws_mib fit itself, so
+        # they cannot drag its T coefficient toward zero.
+        self.assertEqual(fits["gateway_ws_mib"].n, len(rows) - pinned)
+        self.assertEqual(fits["envoy_heap_mib"].n, len(rows))
+        self.assertEqual(out.getvalue().count("informational"), 1)
+        for name, base, want_judged in [("pinned", 1100.0, False), ("fresh", 50.0, True), ("no baseline", None, True)]:
+            with self.subTest(name):
+                h = synthetic([(40, 200)], seed=3, noise=0.0)[0] | {"gateway_ws_base_mib": base}
+                h["gateway_ws_mib"] = 0.0  # what a pinned pod reads
+                judged = {s[0]: s[4] for s in fit.score(fits, h)}
+                self.assertEqual("gateway_ws_mib" in judged, want_judged)
+                self.assertTrue(judged["envoy_heap_mib"])
 
 
 class ProvisionalTest(unittest.TestCase):
@@ -245,6 +271,36 @@ class ExtractTest(unittest.TestCase):
             p = Path(d) / "r.json"
             p.write_text(json.dumps(report))
             self.assertIsNone(fit.extract(p)["gateway_ws_mib"])
+
+    def test_envoy_heap(self):
+        # Envoy's allocated heap per gateway pod: the settled max minus the
+        # pre-idle max, summed over pods.
+        report = json.loads(FIXTURE.read_text())
+        steady = next(p for p in report["phases"] if p["name"] == "steady")
+        t0 = steady["start"]
+        pre_start, pre_end = "2020-01-01T00:00:00Z", "2020-01-01T00:00:30Z"
+        report["phases"].insert(0, {"name": "pre-idle", "start": pre_start, "end": pre_end})
+
+        def mem(t, pod, mib):
+            return {"t": t, "pod": pod, "allocatedBytes": mib * 2**20, "heapSizeBytes": 0, "physicalBytes": 0}
+        for name, samples, want in [
+            ("one pod", [mem(pre_start, "gw-a", 10), mem(pre_end, "gw-a", 12), mem(t0, "gw-a", 100),
+                         mem(steady["end"], "gw-a", 112)], 100),
+            ("two pods", [mem(pre_end, "gw-a", 12), mem(t0, "gw-a", 112),
+                          mem(pre_end, "gw-b", 20), mem(steady["end"], "gw-b", 70)], 150),
+            ("one pod has steady samples but no baseline", [mem(pre_end, "gw-a", 12), mem(t0, "gw-a", 112),
+                                                           mem(steady["end"], "gw-b", 70)], None),
+            ("no heap samples", [], None),
+        ]:
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                report["resources"]["envoyMemory"] = samples
+                p = Path(d) / "r.json"
+                p.write_text(json.dumps(report))
+                got = fit.extract(p)["envoy_heap_mib"]
+                if want is None:
+                    self.assertIsNone(got)
+                else:
+                    self.assertAlmostEqual(got, want)
 
     def test_resume_p50_counts_own_snapshots_only(self):
         report = json.loads(FIXTURE.read_text())

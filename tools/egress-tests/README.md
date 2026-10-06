@@ -203,7 +203,7 @@ three sources through the API server, each on its own cadence:
 | Source | What | Cadence | Path |
 |---|---|---|---|
 | live | `process_cpu_seconds_total` and RSS of `ext-proc` and `ate-api-server` | `--usage-live-interval` (1s) and at each phase boundary | `pods/<pod>:9090/proxy/metrics` |
-| envoy | the gateway's `mitm_internal` and `egress_forward_proxy_cleartext` connection counters | same | `pods/<pod>:15090/proxy/stats/prometheus`, the `envoy_metrics` listener; the admin API itself is loopback-only |
+| envoy | the gateway's `mitm_internal` and `egress_forward_proxy_cleartext` connection counters, and Envoy's heap: `server.memory_allocated`, `heap_size`, `physical_size` | same | `pods/<pod>:15090/proxy/stats/prometheus`, the `envoy_metrics` listener; the admin API itself is loopback-only |
 | cadvisor | container CPU, CFS throttling and working set of the workers, gateway, ateapi, router, targets and kube-dns | polled every 5s; the kubelet refreshes each container every 12 to 20s | `nodes/<node>/proxy/metrics/cadvisor` |
 
 The worker pod is the smallest unit cAdvisor sees: it holds the actors,

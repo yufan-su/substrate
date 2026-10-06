@@ -57,6 +57,10 @@ func envoyBody(counters map[string]float64) []byte {
 			fmt.Fprintf(&b, "%s{envoy_cluster_name=%q} %g\n", metric, c, counters["cluster."+c+"."+envoyStats[metric]])
 		}
 	}
+	server := map[string]float64{"server.memory_allocated": 11492288, "server.memory_heap_size": 16777216, "server.memory_physical_size": 19852094}
+	for _, metric := range slices.Sorted(maps.Keys(envoyServerStats)) {
+		fmt.Fprintf(&b, "# TYPE %s gauge\n%s{} %g\n", metric, metric, server[envoyServerStats[metric]])
+	}
 	return []byte(b.String())
 }
 
@@ -250,8 +254,13 @@ func TestEnvoyStatsNamesAreReal(t *testing.T) {
 			}
 		}
 	}
-	if len(got) != len(envoyClusters)*len(envoyStats) {
-		t.Errorf("parsed %d stats from the dump, want %d", len(got), len(envoyClusters)*len(envoyStats))
+	for _, stat := range envoyServerStats {
+		if got[stat] == 0 {
+			t.Errorf("the gateway dump has no %s, or it is 0", stat)
+		}
+	}
+	if len(got) != envoyStatCount {
+		t.Errorf("parsed %d stats from the dump, want %d", len(got), envoyStatCount)
 	}
 	if got[envoyCxTotal] == 0 {
 		t.Errorf("the dump's %s is 0; it was captured during a run and should carry real values", envoyCxTotal)
@@ -546,6 +555,9 @@ func TestResourceSampler(t *testing.T) {
 	}
 	if len(rep.Envoy) < 3 || len(rep.Sources) != 4 {
 		t.Errorf("%d envoy reads and sources %+v, want at least 3 reads and 4 sources: live, envoy, cadvisor and metrics-server", len(rep.Envoy), rep.Sources)
+	}
+	if len(rep.EnvoyMemory) != len(rep.Envoy) || rep.EnvoyMemory[0].AllocatedBytes != 11492288 || rep.EnvoyMemory[0].HeapSizeBytes != 16777216 {
+		t.Errorf("envoy memory reads = %+v, want one per envoy read with allocated 11492288 and heap 16777216", rep.EnvoyMemory)
 	}
 	cadvisorReads := get.readsOf("/api/v1/nodes/node-a/proxy/metrics/cadvisor")
 	if want := (cadvisorReads + 2) / 3; len(rep.Samples) != want || cadvisorReads < 6 {

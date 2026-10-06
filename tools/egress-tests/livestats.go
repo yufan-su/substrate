@@ -63,18 +63,35 @@ var envoyStats = map[string]string{
 	"envoy_cluster_circuit_breakers_default_rq_open": "circuit_breakers.default.rq_open",
 }
 
+// envoyServerStats maps the server-wide gauges the sampler reads to their
+// admin names: the allocator's view of Envoy's heap, which the cgroup's
+// working set mixes with page cache and freed pages. They ride on the same
+// read as the cluster stats.
+var envoyServerStats = map[string]string{
+	"envoy_server_memory_allocated":     "server.memory_allocated",
+	"envoy_server_memory_heap_size":     "server.memory_heap_size",
+	"envoy_server_memory_physical_size": "server.memory_physical_size",
+}
+
 // envoyStatsFilter selects the sampler's stats on /stats/prometheus, which
 // filters on the admin stat name.
 var envoyStatsFilter = envoyFilter()
 
 func envoyFilter() string {
-	stats := make([]string, 0, len(envoyStats))
-	for _, stat := range envoyStats {
-		stats = append(stats, regexp.QuoteMeta(stat))
+	quoted := func(m map[string]string) []string {
+		out := make([]string, 0, len(m))
+		for _, stat := range m {
+			out = append(out, regexp.QuoteMeta(stat))
+		}
+		slices.Sort(out)
+		return out
 	}
-	slices.Sort(stats)
-	return `^cluster\.(` + strings.Join(envoyClusters, "|") + `)\.(` + strings.Join(stats, "|") + `)$`
+	return `^(cluster\.(` + strings.Join(envoyClusters, "|") + `)\.(` + strings.Join(quoted(envoyStats), "|") + `)|` +
+		strings.Join(quoted(envoyServerStats), "|") + `)$`
 }
+
+// envoyStatCount is how many stats a complete read of one gateway yields.
+var envoyStatCount = len(envoyClusters)*len(envoyStats) + len(envoyServerStats)
 
 // envoyCxTotal counts the connections the gateway opened toward the actors'
 // tunnels, one per actor connection.
@@ -124,8 +141,9 @@ func sampleValue(m *dto.Metric) (float64, bool) {
 }
 
 // parseEnvoyStats decodes the gateway's /stats/prometheus text and returns
-// the stats in envoyStats for the clusters in envoyClusters, keyed by their
-// admin names. Other families and clusters are dropped. A body that is not
+// the stats in envoyStats for the clusters in envoyClusters, and the server
+// gauges in envoyServerStats, keyed by their admin names. Other families
+// and clusters are dropped. A body that is not
 // Prometheus text yields nothing, which readEnvoy counts as a failed read.
 func parseEnvoyStats(body []byte) map[string]float64 {
 	out := map[string]float64{}
@@ -142,6 +160,13 @@ func parseEnvoyStats(body []byte) map[string]float64 {
 			}
 			if v, ok := sampleValue(m); ok {
 				out["cluster."+cluster+"."+stat] = v
+			}
+		}
+	}
+	for metric, stat := range envoyServerStats {
+		for _, m := range families[metric].GetMetric() {
+			if v, ok := sampleValue(m); ok {
+				out[stat] = v
 			}
 		}
 	}
