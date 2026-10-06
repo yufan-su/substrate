@@ -77,21 +77,38 @@ func within(got, want, rel, abs float64) bool {
 	return d <= abs || d <= rel*math.Abs(want)
 }
 
-// checkEnvoyConnections compares the connections the gateway opened toward
-// the actors' tunnels, from the start of the loops to the end of the stop,
-// with the new connections the actors counted.
+// checkEnvoyConnections compares what the actors tried with what the
+// gateway did, from the start of the loops to the end of the stop. Every
+// CONNECT an actor sent either opened a mitm_internal connection, including
+// one the breaker held and later admitted, was cancelled while it waited,
+// was refused when the queue was full too, or is still waiting at the end.
+// So opened must equal attempts less cancelled, refused and still queued.
 func checkEnvoyConnections(samples []envoySample, actorNewConns int64) verifyResult {
-	res := verifyResult{Check: "envoy-connections", Scope: envoyCxTotal,
-		Want: fmt.Sprintf("%d (actor new connections) ±%.0f%%", actorNewConns, 100*cxTolerance)}
-	begin, okB := sumLabeled(samples, markStartBegin, envoyCxTotal)
-	end, okE := sumLabeled(samples, markStopEnd, envoyCxTotal)
-	if !okB || !okE {
+	res := verifyResult{Check: "envoy-connections", Scope: envoyCxTotal}
+	delta := func(counter string) (float64, bool) {
+		a, okA := sumLabeled(samples, markStartBegin, counter)
+		b, okB := sumLabeled(samples, markStopEnd, counter)
+		return b - a, okA && okB
+	}
+	opened, ok := delta(envoyCxTotal)
+	if !ok {
+		res.Want = fmt.Sprintf("%d (actor new connections) ±%.0f%%", actorNewConns, 100*cxTolerance)
 		res.Got = "no reading at " + markStartBegin + " and " + markStopEnd
 		return res
 	}
-	delta := end - begin
-	res.Got = fmt.Sprintf("%.0f", delta)
-	res.Pass = within(delta, float64(actorNewConns), cxTolerance, cxSlack)
+	cancelled, okC := delta(envoyRqCancelled)
+	refused, okR := delta(envoyRqRefused)
+	queued, okQ := delta(envoyPendingActive)
+	over, _ := delta(envoyCxOverflow)
+	res.Got = fmt.Sprintf("%.0f opened, overflow +%.0f", opened, over)
+	if !okC || !okR || !okQ {
+		res.Want = fmt.Sprintf("%d (actor new connections) ±%.0f%%", actorNewConns, 100*cxTolerance)
+		return res.info("no pending-queue counters at the marks")
+	}
+	want := float64(actorNewConns) - cancelled - refused - queued
+	res.Want = fmt.Sprintf("%d attempts − %.0f cancelled − %.0f refused − %.0f still queued = %.0f ±%.0f%%",
+		actorNewConns, cancelled, refused, queued, want, 100*cxTolerance)
+	res.Pass = within(opened, want, cxTolerance, cxSlack)
 	return res
 }
 
@@ -232,6 +249,16 @@ func counterBounds(ps []point, t time.Time) (lo, hi float64, ok bool) {
 		return ps[i].v, ps[i].v, true
 	}
 	return ps[i-1].v, ps[i].v, true
+}
+
+// tight reports whether readings within readerEdgeGap of each other
+// bracket t.
+func tight(ps []point, t time.Time) bool {
+	if len(ps) == 0 || t.Before(ps[0].t) || t.After(ps[len(ps)-1].t) {
+		return false
+	}
+	i, _ := slices.BinarySearchFunc(ps, t, func(p point, t time.Time) int { return p.t.Compare(t) })
+	return ps[i].t.Equal(t) || ps[i].t.Sub(ps[i-1].t) <= readerEdgeGap
 }
 
 // bounds is the range a sum of counter increases can take.
@@ -405,18 +432,29 @@ const (
 	idleSlack = 0.05
 )
 
-// checkMetricsServer compares each metrics-server reading with the cAdvisor
-// counters over the same window.
-func checkMetricsServer(ms []podMetricsSample, samples []cadvisorSample) []verifyResult {
-	series := cpuSeries(samples)
+// readerEdgeGap is the widest spacing of cgroup reader rows around each
+// end of a metrics-server window that still counts as covering it.
+const readerEdgeGap = 3 * time.Second
+
+// checkMetricsServer compares each metrics-server reading with the cgroup
+// reader's rows over the same window when they cover it, else with the
+// cAdvisor counters' bounds.
+func checkMetricsServer(ms []podMetricsSample, samples, reader []cadvisorSample) []verifyResult {
+	series, rows := cpuSeries(samples), cpuSeries(reader)
 	var out []verifyResult
 	for _, m := range ms {
 		key := m.Component + "/" + m.Container + "@" + m.Pod
 		res := verifyResult{Check: "sanity", Scope: key, Want: fmt.Sprintf("metrics-server %.3f ±%.0f%%", m.CPUCores, 100*metricsServerTolerance)}
-		// metrics-server's window runs between two kubelet readings, which
-		// are cAdvisor readings of the same container; the samples must hold
-		// both ends.
-		d, ok := deltaBounds(series[key], m.T.Add(-m.Window), m.T)
+		from := m.T.Add(-m.Window)
+		source := "cgroup reader"
+		d, ok := deltaBounds(rows[key], from, m.T)
+		if !ok || !tight(rows[key], from) || !tight(rows[key], m.T) {
+			// metrics-server's window runs between two kubelet readings,
+			// which are cAdvisor readings of the same container; the
+			// samples must hold both ends.
+			source = "cAdvisor bounds"
+			d, ok = deltaBounds(series[key], from, m.T)
+		}
 		if !ok || m.Window <= 0 {
 			out = append(out, res.info("window starts before the first cAdvisor reading"))
 			continue
@@ -427,9 +465,9 @@ func checkMetricsServer(ms []podMetricsSample, samples []cadvisorSample) []verif
 		// counter cannot judge anything.
 		w := m.Window.Seconds()
 		lo, hi := max(d.lo, 0)/w, d.hi/w
-		res.Got = fmt.Sprintf("sampler %.3f..%.3f", lo, hi)
+		res.Got = fmt.Sprintf("%s %.3f..%.3f", source, lo, hi)
 		if hi >= 2*max(lo, m.CPUCores) {
-			out = append(out, res.info("cAdvisor readings too sparse around the window to catch a doubled counter"))
+			out = append(out, res.info("readings too sparse around the window to catch a doubled counter"))
 			continue
 		}
 		res.Pass = m.CPUCores >= lo*(1-metricsServerTolerance)-metricsServerSlack &&

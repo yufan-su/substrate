@@ -165,6 +165,9 @@ envoy_cluster_upstream_cx_total{envoy_cluster_name="egress_forward_proxy_clearte
 envoy_cluster_upstream_cx_total{envoy_cluster_name="ext_proc"} 9
 envoy_cluster_upstream_cx_active{envoy_cluster_name="mitm_internal"} 3
 envoy_cluster_circuit_breakers_default_cx_open{envoy_cluster_name="mitm_internal"} 1
+envoy_cluster_upstream_rq_pending_active{envoy_cluster_name="mitm_internal"} 11
+envoy_cluster_upstream_rq_pending_overflow{envoy_cluster_name="mitm_internal"} 0
+envoy_cluster_upstream_rq_cancelled{envoy_cluster_name="mitm_internal"} 76
 envoy_cluster_circuit_breakers_high_cx_open{envoy_cluster_name="mitm_internal"} 1
 envoy_cluster_upstream_cx_total_x{envoy_cluster_name="mitm_internal"} 1
 envoy_cluster_upstream_cx_length_ms_bucket{envoy_cluster_name="mitm_internal",le="0.5"} 0
@@ -177,6 +180,9 @@ not a metric
 		"cluster.egress_forward_proxy_cleartext.upstream_cx_total": 7,
 		"cluster.mitm_internal.upstream_cx_active":                 3,
 		"cluster.mitm_internal.circuit_breakers.default.cx_open":   1,
+		"cluster.mitm_internal.upstream_rq_pending_active":         11,
+		"cluster.mitm_internal.upstream_rq_pending_overflow":       0,
+		"cluster.mitm_internal.upstream_rq_cancelled":              76,
 	}
 	if !maps.Equal(got, want) {
 		t.Errorf("parseEnvoyStats = %v, want %v", got, want)
@@ -244,29 +250,46 @@ func TestEnvoyStatsNamesAreReal(t *testing.T) {
 
 func TestCheckEnvoyConnections(t *testing.T) {
 	t.Parallel()
-	at := func(label string, cx ...float64) []envoySample {
+	// at builds one Envoy pod's read at a mark, with the pending-queue
+	// counters at zero unless set.
+	type counters struct{ cx, over, cancelled, refused, queued float64 }
+	at := func(label string, pods ...counters) []envoySample {
 		var out []envoySample
-		for i, v := range cx {
-			out = append(out, envoySample{Label: label, Pod: fmt.Sprint(i), Counters: map[string]float64{envoyCxTotal: v}})
+		for i, c := range pods {
+			out = append(out, envoySample{Label: label, Pod: fmt.Sprint(i), Counters: map[string]float64{
+				envoyCxTotal: c.cx, envoyCxOverflow: c.over, envoyRqCancelled: c.cancelled, envoyRqRefused: c.refused, envoyPendingActive: c.queued}})
 		}
 		return out
+	}
+	noQueue := func(label string, cx float64) []envoySample {
+		return []envoySample{{Label: label, Pod: "0", Counters: map[string]float64{envoyCxTotal: cx}}}
 	}
 	for _, tc := range []struct {
 		name     string
 		samples  []envoySample
 		newConns int64
 		want     bool
+		wantInfo bool
 	}{
-		{name: "equal", samples: append(at(markStartBegin, 10), at(markStopEnd, 110)...), newConns: 100, want: true},
-		{name: "summed over pods", samples: append(at(markStartBegin, 5, 5), at(markStopEnd, 55, 65)...), newConns: 110, want: true},
-		{name: "within slack", samples: append(at(markStartBegin, 0), at(markStopEnd, 4)...), newConns: 2, want: true},
-		{name: "off by more than 2%", samples: append(at(markStartBegin, 0), at(markStopEnd, 1100)...), newConns: 1000, want: false},
-		{name: "no begin read", samples: at(markStopEnd, 10), newConns: 10, want: false},
+		{name: "equal", samples: append(at(markStartBegin, counters{cx: 10}), at(markStopEnd, counters{cx: 110})...), newConns: 100, want: true},
+		{name: "summed over pods", samples: append(at(markStartBegin, counters{cx: 5}, counters{cx: 5}), at(markStopEnd, counters{cx: 55}, counters{cx: 65})...), newConns: 110, want: true},
+		{name: "within slack", samples: append(at(markStartBegin, counters{}), at(markStopEnd, counters{cx: 4})...), newConns: 2, want: true},
+		{name: "off by more than 2%", samples: append(at(markStartBegin, counters{}), at(markStopEnd, counters{cx: 1100})...), newConns: 1000, want: false},
+		{name: "held, then cancelled or refused, explains the gap", samples: append(at(markStartBegin, counters{over: 1}), at(markStopEnd, counters{cx: 1044, over: 176, cancelled: 140, refused: 4})...), newConns: 1188, want: true},
+		{name: "still queued at the end explains the gap", samples: append(at(markStartBegin, counters{}), at(markStopEnd, counters{cx: 990, over: 10, queued: 10})...), newConns: 1000, want: true},
+		{name: "over-count under overflow fails", samples: append(at(markStartBegin, counters{}), at(markStopEnd, counters{cx: 1300, over: 176, cancelled: 140})...), newConns: 1188, want: false},
+		{name: "gap the queue does not explain fails", samples: append(at(markStartBegin, counters{}), at(markStopEnd, counters{cx: 1000, over: 176, cancelled: 50})...), newConns: 1188, want: false},
+		{name: "no pending counters is informational", samples: append(noQueue(markStartBegin, 0), noQueue(markStopEnd, 100)...), newConns: 100, wantInfo: true},
+		{name: "no begin read", samples: at(markStopEnd, counters{cx: 10}), newConns: 10, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := checkEnvoyConnections(tc.samples, tc.newConns); got.Pass != tc.want {
-				t.Errorf("checkEnvoyConnections = %+v, want pass %v", got, tc.want)
+			got := checkEnvoyConnections(tc.samples, tc.newConns)
+			if got.Pass != tc.want || got.Info != tc.wantInfo {
+				t.Errorf("checkEnvoyConnections = %+v, want pass %v info %v", got, tc.want, tc.wantInfo)
+			}
+			if !strings.HasPrefix(got.Got, "no reading") && !strings.Contains(got.Got, "opened") {
+				t.Errorf("got %q, want the opened count kept", got.Got)
 			}
 		})
 	}
