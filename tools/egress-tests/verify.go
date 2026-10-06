@@ -90,6 +90,14 @@ func checkEnvoyConnections(samples []envoySample, actorNewConns int64) verifyRes
 	}
 	delta := end - begin
 	res.Got = fmt.Sprintf("%.0f", delta)
+	ob, _ := sumLabeled(samples, markStartBegin, envoyCxOverflow)
+	oe, _ := sumLabeled(samples, markStopEnd, envoyCxOverflow)
+	if over := oe - ob; over > 0 {
+		// Actors count every attempt; Envoy opens no connection for a
+		// CONNECT the breaker holds back.
+		res.Got = fmt.Sprintf("%.0f, overflow +%.0f", delta, over)
+		return res.info("the breaker held CONNECTs back, so Envoy opened fewer connections than actors tried")
+	}
 	res.Pass = within(delta, float64(actorNewConns), cxTolerance, cxSlack)
 	return res
 }
@@ -231,6 +239,16 @@ func counterBounds(ps []point, t time.Time) (lo, hi float64, ok bool) {
 		return ps[i].v, ps[i].v, true
 	}
 	return ps[i-1].v, ps[i].v, true
+}
+
+// tight reports whether readings within readerEdgeGap of each other
+// bracket t.
+func tight(ps []point, t time.Time) bool {
+	if len(ps) == 0 || t.Before(ps[0].t) || t.After(ps[len(ps)-1].t) {
+		return false
+	}
+	i, _ := slices.BinarySearchFunc(ps, t, func(p point, t time.Time) int { return p.t.Compare(t) })
+	return ps[i].t.Equal(t) || ps[i].t.Sub(ps[i-1].t) <= readerEdgeGap
 }
 
 // bounds is the range a sum of counter increases can take.
@@ -404,24 +422,35 @@ const (
 	idleSlack = 0.05
 )
 
-// checkMetricsServer compares each metrics-server reading with the cAdvisor
-// counters over the same window.
-func checkMetricsServer(ms []podMetricsSample, samples []cadvisorSample) []verifyResult {
-	series := cpuSeries(samples)
+// readerEdgeGap is the widest spacing of cgroup reader rows around each
+// end of a metrics-server window that still counts as covering it.
+const readerEdgeGap = 3 * time.Second
+
+// checkMetricsServer compares each metrics-server reading with the cgroup
+// reader's rows over the same window when they cover it, else with the
+// cAdvisor counters' bounds.
+func checkMetricsServer(ms []podMetricsSample, samples, reader []cadvisorSample) []verifyResult {
+	series, rows := cpuSeries(samples), cpuSeries(reader)
 	var out []verifyResult
 	for _, m := range ms {
 		key := m.Component + "/" + m.Container + "@" + m.Pod
 		res := verifyResult{Check: "sanity", Scope: key, Want: fmt.Sprintf("metrics-server %.3f ±%.0f%%", m.CPUCores, 100*metricsServerTolerance)}
-		// metrics-server's window runs between two kubelet readings, which
-		// are cAdvisor readings of the same container; the samples must hold
-		// both ends.
-		d, ok := deltaBounds(series[key], m.T.Add(-m.Window), m.T)
+		from := m.T.Add(-m.Window)
+		source := "cgroup reader"
+		d, ok := deltaBounds(rows[key], from, m.T)
+		if !ok || !tight(rows[key], from) || !tight(rows[key], m.T) {
+			// metrics-server's window runs between two kubelet readings,
+			// which are cAdvisor readings of the same container; the
+			// samples must hold both ends.
+			source = "cAdvisor bounds"
+			d, ok = deltaBounds(series[key], from, m.T)
+		}
 		if !ok || m.Window <= 0 {
 			out = append(out, res.info("window starts before the first cAdvisor reading"))
 			continue
 		}
 		cores := d.mid() / m.Window.Seconds()
-		res.Got = fmt.Sprintf("sampler %.3f", cores)
+		res.Got = fmt.Sprintf("%s %.3f", source, cores)
 		res.Pass = within(cores, m.CPUCores, metricsServerTolerance, metricsServerSlack)
 		out = append(out, res)
 	}

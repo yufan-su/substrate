@@ -29,16 +29,22 @@ const (
 	metricProcessRSS = "process_resident_memory_bytes"
 )
 
-// envoyStatsFilter selects the gateway's connection counters, and the gauge
-// that is 1 while a cluster's connection breaker is open, from /stats.
-const envoyStatsFilter = `^cluster\.(mitm_internal|egress_forward_proxy_cleartext)\.(upstream_cx_(total|active|overflow)|circuit_breakers\.default\.cx_open)$`
+// envoyStatsFilter selects the gateway's connection and pending-queue
+// counters, and the gauge that is 1 while a cluster's connection breaker is
+// open, from /stats. A CONNECT past max_connections waits in the pending
+// queue (pending_total, then cancelled if the client gives up) and is
+// refused only when that queue is full too (pending_overflow).
+const envoyStatsFilter = `^cluster\.(mitm_internal|egress_forward_proxy_cleartext)\.(upstream_cx_(total|active|overflow)|upstream_rq_(pending_total|pending_overflow|cancelled)|circuit_breakers\.default\.cx_open)$`
 
 // envoyClusters are the gateway clusters the sampler reads.
 var envoyClusters = []string{"mitm_internal", "egress_forward_proxy_cleartext"}
 
 // envoyCxTotal counts the connections the gateway opened toward the actors'
 // tunnels, one per actor connection.
-const envoyCxTotal = "cluster.mitm_internal.upstream_cx_total"
+const (
+	envoyCxTotal    = "cluster.mitm_internal.upstream_cx_total"
+	envoyCxOverflow = "cluster.mitm_internal.upstream_cx_overflow"
+)
 
 // parseProcessMetrics reads the process CPU and RSS from Prometheus text.
 func parseProcessMetrics(body []byte) (cpuSeconds, rssBytes float64, err error) {

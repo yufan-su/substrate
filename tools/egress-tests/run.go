@@ -541,7 +541,11 @@ func (r *runner) finishResources(rep *report) {
 	res.Verify = append(res.Verify, checkCadvisorCoverage(res.Samples, rep.phase("steady"))...)
 	res.Verify = append(res.Verify, checkPodRollups(res.Samples, r.res.cadvisorPods)...)
 	res.Verify = append(res.Verify, checkProcessVsCgroup(res.Live, res.Samples)...)
-	res.Verify = append(res.Verify, checkMetricsServer(res.MetricsServer, res.Samples)...)
+	var readerRows []cadvisorSample
+	if res.Cgreader != nil {
+		readerRows, _ = cgreaderAsCadvisor(res.Cgreader)
+	}
+	res.Verify = append(res.Verify, checkMetricsServer(res.MetricsServer, res.Samples, readerRows)...)
 	res.Verify = append(res.Verify, checkSteadyAttribution(res.Live, rep.phase("steady"))...)
 	res.Verify = append(res.Verify, checkIdlePhases(res.Live, rep)...)
 	if res.Cgreader != nil {

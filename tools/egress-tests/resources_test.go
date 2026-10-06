@@ -144,7 +144,8 @@ func TestParseEnvoyStats(t *testing.T) {
 	}
 	filter := regexp.MustCompile(envoyStatsFilter)
 	for _, c := range envoyClusters {
-		for _, stat := range []string{"upstream_cx_total", "upstream_cx_active", "upstream_cx_overflow", "circuit_breakers.default.cx_open"} {
+		for _, stat := range []string{"upstream_cx_total", "upstream_cx_active", "upstream_cx_overflow", "upstream_rq_pending_total",
+			"upstream_rq_pending_overflow", "upstream_rq_cancelled", "circuit_breakers.default.cx_open"} {
 			if name := "cluster." + c + "." + stat; !filter.MatchString(name) {
 				t.Errorf("envoyStatsFilter does not select %s", name)
 			}
@@ -164,12 +165,18 @@ func TestCheckEnvoyConnections(t *testing.T) {
 		}
 		return out
 	}
+	overflow := func(label string, cx, over float64) []envoySample {
+		return []envoySample{{Label: label, Pod: "0", Counters: map[string]float64{envoyCxTotal: cx, envoyCxOverflow: over}}}
+	}
 	for _, tc := range []struct {
 		name     string
 		samples  []envoySample
 		newConns int64
 		want     bool
+		wantInfo bool
 	}{
+		{name: "breaker held connections back", samples: append(overflow(markStartBegin, 0, 1), overflow(markStopEnd, 1044, 176)...), newConns: 1188, wantInfo: true},
+		{name: "overflow counter flat", samples: append(overflow(markStartBegin, 0, 5), overflow(markStopEnd, 1000, 5)...), newConns: 1000, want: true},
 		{name: "equal", samples: append(at(markStartBegin, 10), at(markStopEnd, 110)...), newConns: 100, want: true},
 		{name: "summed over pods", samples: append(at(markStartBegin, 5, 5), at(markStopEnd, 55, 65)...), newConns: 110, want: true},
 		{name: "within slack", samples: append(at(markStartBegin, 0), at(markStopEnd, 4)...), newConns: 2, want: true},
@@ -178,8 +185,12 @@ func TestCheckEnvoyConnections(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := checkEnvoyConnections(tc.samples, tc.newConns); got.Pass != tc.want {
-				t.Errorf("checkEnvoyConnections = %+v, want pass %v", got, tc.want)
+			got := checkEnvoyConnections(tc.samples, tc.newConns)
+			if got.Pass != tc.want || got.Info != tc.wantInfo {
+				t.Errorf("checkEnvoyConnections = %+v, want pass %v info %v", got, tc.want, tc.wantInfo)
+			}
+			if tc.wantInfo && !strings.Contains(got.Got, "overflow +175") {
+				t.Errorf("checkEnvoyConnections got %q, want the overflow count +175", got.Got)
 			}
 		})
 	}

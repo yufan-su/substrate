@@ -580,6 +580,12 @@ func (rep *report) printResources(w io.Writer) {
 				cx += "; " + c + " connection breaker OPENED"
 			}
 		}
+		if over > 0 {
+			queued, _ := envoyDelta(res.Envoy, "cluster.mitm_internal.upstream_rq_pending_total")
+			cancelled, _ := envoyDelta(res.Envoy, "cluster.mitm_internal.upstream_rq_cancelled")
+			refused, _ := envoyDelta(res.Envoy, "cluster.mitm_internal.upstream_rq_pending_overflow")
+			cx += fmt.Sprintf("; mitm_internal CONNECTs queued +%.0f, cancelled +%.0f, refused +%.0f", queued, cancelled, refused)
+		}
 	}
 	if len(mem) > 0 || cx != "" {
 		fmt.Fprintf(w, "%-10s steady max working set: %s%s\n", "memory", strings.Join(mem, " "), cx)
