@@ -104,7 +104,8 @@ substitute() {
   if [[ -n "${WORKER_MEMORY}" ]]; then
     worker_template="template: {resources: {requests: {memory: \"${WORKER_MEMORY}\"}, limits: {memory: \"${WORKER_MEMORY}\"}}}"
   fi
-  sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME}|g" \
+  # --delete runs without BUCKET_NAME; only the actor template uses it.
+  sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME:-}|g" \
       -e "s|\${WORKER_COUNT}|${WORKER_COUNT}|g" \
       -e "s|\${ACTOR_MEMORY}|${ACTOR_MEMORY}|g" \
       -e "s|\${WORKER_TEMPLATE}|${worker_template}|g" \
