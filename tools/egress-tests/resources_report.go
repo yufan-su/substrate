@@ -30,8 +30,10 @@ var componentOrder = []string{"gateway", "workers", "ateapi", "targets", "dns", 
 
 // componentSummary is what one component used over the steady window.
 type componentSummary struct {
-	Pods       int                       `json:"pods"`
-	Steady     steadySummary             `json:"steady"`
+	Pods   int           `json:"pods"`
+	Steady steadySummary `json:"steady"`
+	// Settled is the same summary over the settled window.
+	Settled    *steadySummary            `json:"settled,omitempty"`
 	Containers map[string]*steadySummary `json:"containers,omitempty"`
 }
 
@@ -70,6 +72,83 @@ type segment struct {
 	periods, throttle float64
 }
 
+// Rules that can start the settled window.
+const (
+	settledByPlateau = "new-connection plateau"
+	settledByRounds  = "1.5 rounds"
+)
+
+// settledWindow is steady minus the first full round over the endpoints,
+// whose connection setup and DNS lookups inflate per-request cost.
+type settledWindow struct {
+	Start time.Time `json:"start"`
+	// Rule says which rule started the window.
+	Rule    string  `json:"rule"`
+	ReqPerS float64 `json:"reqPerS"`
+}
+
+// settledPlateauTolerance is the growth in new connections, as a fraction
+// of those already open, that still counts as a plateau; reconnects after
+// a timeout add a few.
+const settledPlateauTolerance = 0.01
+
+// settledOf finds the settled window. It starts one progress poll after
+// the first poll after which new connections stop growing. When polls come
+// further apart than one round over the endpoints, or no plateau shows,
+// it starts 1.5 rounds into steady instead.
+func settledOf(cfg runConfig, steady phaseMark, timeline []loopPoint) (settledWindow, bool) {
+	var polls []loopPoint
+	for _, p := range timeline {
+		if !p.T.Before(steady.Start) && !p.T.After(steady.End) {
+			polls = append(polls, p)
+		}
+	}
+	round := time.Duration(cfg.Endpoints) * cfg.RequestInterval
+	var w settledWindow
+	if cfg.ProgressInterval <= round {
+		for i := 0; i+1 < len(polls); i++ {
+			grew := polls[i+1].NewConns - polls[i].NewConns
+			if polls[i].NewConns > 0 && float64(grew) <= settledPlateauTolerance*float64(polls[i].NewConns) {
+				w = settledWindow{Start: polls[i+1].T, Rule: settledByPlateau}
+				break
+			}
+		}
+	}
+	if w.Rule == "" {
+		if round <= 0 {
+			return w, false
+		}
+		w = settledWindow{Start: steady.Start.Add(round * 3 / 2), Rule: settledByRounds}
+	}
+	if len(polls) == 0 {
+		return w, false
+	}
+	last := polls[len(polls)-1]
+	if !last.T.After(w.Start) {
+		return w, false
+	}
+	w.ReqPerS = (float64(last.Requests) - requestsAt(polls, steady.Start, w.Start)) / last.T.Sub(w.Start).Seconds()
+	return w, true
+}
+
+// requestsAt interpolates the cumulative request count at t, counting from
+// zero at the steady start.
+func requestsAt(polls []loopPoint, start, t time.Time) float64 {
+	prev := loopPoint{T: start}
+	for _, p := range polls {
+		if !p.T.Before(t) {
+			span := p.T.Sub(prev.T).Seconds()
+			if span <= 0 {
+				return float64(p.Requests)
+			}
+			f := t.Sub(prev.T).Seconds() / span
+			return float64(prev.Requests) + f*float64(p.Requests-prev.Requests)
+		}
+		prev = p
+	}
+	return float64(prev.Requests)
+}
+
 // steadyRequestRate is the loops' merged request rate.
 func steadyRequestRate(rep *report) float64 {
 	if rep.Loop == nil || rep.Loop.Elapsed <= 0 {
@@ -83,6 +162,13 @@ func summarizeResources(rep *report) {
 	res := rep.Resources
 	steady := rep.phase("steady")
 	res.Components = map[string]*componentSummary{}
+	var settled phaseMark
+	if !steady.End.IsZero() {
+		if w, ok := settledOf(rep.Config, steady, rep.LoopTimeline); ok {
+			res.Settled = &w
+			settled = phaseMark{Name: "settled", Start: w.Start, End: steady.End}
+		}
+	}
 	// The cgroup readers, when present, replace cAdvisor for the containers
 	// they read: same counters, one-second resolution.
 	samples, split := res.Samples, []cadvisorSample(nil)
@@ -105,7 +191,7 @@ func summarizeResources(rep *report) {
 		bySeries[s.key()] = append(bySeries[s.key()], s)
 	}
 	type compAcc struct {
-		segs              [][]segment
+		segs, settledSegs [][]segment
 		pods              map[string]bool
 		periods, throttle float64
 	}
@@ -152,6 +238,13 @@ func summarizeResources(rep *report) {
 		a.periods += sum.periods
 		a.throttle += sum.throttle
 		addTo(&cs.Steady, sum.steadySummary)
+		if res.Settled != nil {
+			if cs.Settled == nil {
+				cs.Settled = &steadySummary{Coverage: 1}
+			}
+			a.settledSegs = append(a.settledSegs, inside(segs, settled))
+			addTo(cs.Settled, steadyOf(ss, segs, settled).steadySummary)
+		}
 		if cs.Containers[ctr] == nil {
 			cs.Containers[ctr] = &steadySummary{Coverage: 1}
 		}
@@ -165,6 +258,9 @@ func summarizeResources(rep *report) {
 		}
 		cs.Pods = len(a.pods)
 		cs.Steady.CPUCores.Max = maxSum(a.segs, steady)
+		if cs.Settled != nil {
+			cs.Settled.CPUCores.Max = maxSum(a.settledSegs, settled)
+		}
 		if a.periods > 0 {
 			cs.Steady.ThrottledRatio = a.throttle / a.periods
 		}
@@ -174,6 +270,13 @@ func summarizeResources(rep *report) {
 		for _, cs := range res.Components {
 			if !cs.Steady.Insufficient {
 				cs.Steady.CoresPerKrps = cs.Steady.CPUCores.Mean / (rps / 1000)
+			}
+		}
+	}
+	if res.Settled != nil && res.Settled.ReqPerS > 0 {
+		for _, cs := range res.Components {
+			if cs.Settled != nil && !cs.Settled.Insufficient {
+				cs.Settled.CoresPerKrps = cs.Settled.CPUCores.Mean / (res.Settled.ReqPerS / 1000)
 			}
 		}
 	}
@@ -415,7 +518,7 @@ func (rep *report) printResources(w io.Writer) {
 	if res == nil || len(res.Components) == 0 {
 		return
 	}
-	var cpu, perK, mem, insufficient []string
+	var cpu, perK, settledK, mem, insufficient []string
 	minCov := 1.0
 	for _, name := range componentOrder {
 		cs, ok := res.Components[name]
@@ -431,6 +534,9 @@ func (rep *report) printResources(w io.Writer) {
 		if cs.Steady.CoresPerKrps > 0 {
 			perK = append(perK, fmt.Sprintf("%s %.2f", name, cs.Steady.CoresPerKrps))
 		}
+		if cs.Settled != nil && cs.Settled.CoresPerKrps > 0 {
+			settledK = append(settledK, fmt.Sprintf("%s %.2f", name, cs.Settled.CoresPerKrps))
+		}
 		if cs.Steady.WorkingSetBytes > 0 {
 			mem = append(mem, fmt.Sprintf("%s %s", name, bytesIEC(cs.Steady.WorkingSetBytes)))
 		}
@@ -442,6 +548,10 @@ func (rep *report) printResources(w io.Writer) {
 	fmt.Fprintf(w, "%-10s steady cores mean/max: %s\n", "cpu", line)
 	if len(perK) > 0 {
 		fmt.Fprintf(w, "%-10s cores per 1000 req/s: %s (cAdvisor coverage %.0f%%)\n", "", strings.Join(perK, " "), 100*minCov)
+	}
+	if st := res.Settled; st != nil && len(settledK) > 0 {
+		fmt.Fprintf(w, "%-10s cores per 1000 req/s, settled: %s (from steady +%.1fs by %s, %.1f req/s)\n", "",
+			strings.Join(settledK, " "), st.Start.Sub(rep.phase("steady").Start).Seconds(), st.Rule, st.ReqPerS)
 	}
 	var live []string
 	for _, name := range append(slices.Clone(componentOrder), "driver") {

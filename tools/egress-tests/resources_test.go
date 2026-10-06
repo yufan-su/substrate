@@ -457,3 +457,38 @@ func TestSettle(t *testing.T) {
 		t.Errorf("settle waited %v with every series already past the mark", elapsed)
 	}
 }
+
+// TestReadProcessStampsMidpoint checks that a live read is stamped halfway
+// through its round trip and keeps the round trip.
+func TestReadProcessStampsMidpoint(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		rtt  time.Duration
+	}{
+		{name: "fast", rtt: 20 * time.Millisecond},
+		{name: "slow", rtt: 2400 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newResourceSampler(newFakeGetter(), fake.NewSimpleClientset(), time.Second)
+			calls := 0
+			s.now = func() time.Time {
+				calls++
+				if calls == 1 {
+					return start
+				}
+				return start.Add(tc.rtt)
+			}
+			s.readProcess(t.Context(), liveTargets[0], "atenet-egress-a", "")
+			if len(s.rep.Live) != 1 {
+				t.Fatalf("%d live samples, want 1", len(s.rep.Live))
+			}
+			got := s.rep.Live[0]
+			if want := start.Add(tc.rtt / 2); !got.T.Equal(want) || got.RTT != tc.rtt {
+				t.Errorf("sample at %v with RTT %v, want %v with RTT %v", got.T, got.RTT, want, tc.rtt)
+			}
+		})
+	}
+}
