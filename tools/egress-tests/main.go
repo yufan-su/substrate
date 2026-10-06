@@ -135,6 +135,7 @@ func runCmd(ctx context.Context, args []string) error {
 	resources := fs.Bool("usage", false, "Sample the CPU and memory of the components on the egress path during the run.")
 	resourcesVerify := fs.Bool("usage-verify", false, "With --usage, print the resource self-checks and fail the run if one fails.")
 	resourcesCgreader := fs.Bool("usage-cgroup-reader", false, "With --usage, also pull one-second cgroup readings from the cgroup reader DaemonSet (deploy.sh --deploy --cgreader).")
+	preIdle := fs.Duration("pre-idle", 0, "With --usage, sample this long before create, with none of the run's actors running; the summary reports it as the baseline.")
 	resourcesInterval := fs.Duration("usage-live-interval", time.Second, "How often --usage reads the live sources (Go process counters, Envoy stats).")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -146,8 +147,11 @@ func runCmd(ctx context.Context, args []string) error {
 	if *resources && *resourcesInterval <= 0 {
 		return fmt.Errorf("--usage-live-interval must be positive, got %v", *resourcesInterval)
 	}
-	if (*resourcesVerify || *resourcesCgreader) && !*resources {
-		return errors.New("--usage-verify and --usage-cgroup-reader need --usage")
+	if (*resourcesVerify || *resourcesCgreader || *preIdle != 0) && !*resources {
+		return errors.New("--usage-verify, --usage-cgroup-reader and --pre-idle need --usage")
+	}
+	if *preIdle < 0 {
+		return fmt.Errorf("--pre-idle must not be negative, got %v", *preIdle)
 	}
 
 	conn, err := cf.connect(ctx)
@@ -178,6 +182,7 @@ func runCmd(ctx context.Context, args []string) error {
 		}
 		r.res = newResourceSampler(get, conn.k8s, *resourcesInterval)
 		r.settleResources = *resourcesVerify
+		r.preIdle = *preIdle
 		r.res.cgreaderOn = *resourcesCgreader
 	}
 	rep, runErr := r.run(ctx)

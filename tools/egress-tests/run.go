@@ -115,6 +115,9 @@ type runner struct {
 	// settleResources keeps sampling after the run until cAdvisor has read
 	// every container idle again, for the whole-run self-checks.
 	settleResources bool
+	// preIdle samples this long before create, with no actor of the run
+	// running, for the summary's baseline.
+	preIdle time.Duration
 }
 
 func newRunner(cfg runConfig, api ateapipb.ControlClient, k8s kubernetes.Interface, router *routerClient, out io.Writer) *runner {
@@ -152,6 +155,21 @@ func (r *runner) run(ctx context.Context) (*report, error) {
 			return nil, fmt.Errorf("starting resource sampling: %w", err)
 		}
 		defer r.finishResources(rep)
+		if r.preIdle > 0 {
+			phaseStart := time.Now()
+			r.mark(ctx, markPreIdleBegin)
+			r.logf("pre-idle: sampling %v before create", r.preIdle)
+			select {
+			case <-ctx.Done():
+			case <-time.After(r.preIdle):
+			}
+			r.mark(ctx, markPreIdleEnd)
+			rep.addPhase("pre-idle", phaseStart)
+			if ctx.Err() != nil {
+				rep.Interrupted = true
+				return rep, ctx.Err()
+			}
+		}
 	}
 
 	phaseStart := time.Now()

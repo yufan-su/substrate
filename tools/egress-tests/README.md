@@ -230,6 +230,16 @@ At B=10 and C=100, a round takes 10s and opens 1,000 tunnels. Steady
 charges the workers 4.39 cores per 1000 req/s and the gateway 1.20. Settled
 gives about 2.5 and 1.0.
 
+**Baseline.** `--pre-idle 30s` samples for that long before create, with
+none of the run's actors running. `resources.baseline` holds each
+component's and container's use over that phase, and the `cpu` lines add a
+`pre-idle baseline cores` line. Subtract it to get a run's own cost. For
+memory, subtract like from like: a component's `podWorkingSetBytes` from
+the pod cgroup's steady maximum, or its `workingSetBytes` from the sum of
+its containers' maxima. Thirty seconds is enough with the cgroup reader;
+on cAdvisor alone a component needs about 45s for two readings, and the
+line names the ones that got fewer.
+
 **Run at least 45s.** A cAdvisor series needs two readings inside the
 steady window. A shorter run marks cAdvisor-only components
 `insufficient`; the live sources still resolve one second.

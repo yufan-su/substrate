@@ -25,10 +25,12 @@ import (
 
 // Phase marks that force a read of every resource source.
 const (
-	markStartBegin  = "start:begin"
-	markSteadyBegin = "steady:begin"
-	markSteadyEnd   = "steady:end"
-	markStopEnd     = "stop:end"
+	markPreIdleBegin = "pre-idle:begin"
+	markPreIdleEnd   = "pre-idle:end"
+	markStartBegin   = "start:begin"
+	markSteadyBegin  = "steady:begin"
+	markSteadyEnd    = "steady:end"
+	markStopEnd      = "stop:end"
 )
 
 // verifyResult is one self-check of the resource data.
