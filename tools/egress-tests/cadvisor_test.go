@@ -111,6 +111,15 @@ func series(component, pod, container string, cores float64, at ...time.Duration
 	return out
 }
 
+// stamps returns n times step apart, starting at offset.
+func stamps(offset, step time.Duration, n int) []time.Duration {
+	var out []time.Duration
+	for i := range n {
+		out = append(out, offset+time.Duration(i)*step)
+	}
+	return out
+}
+
 func TestCheckPodRollups(t *testing.T) {
 	t.Parallel()
 	s := time.Second
@@ -122,12 +131,15 @@ func TestCheckPodRollups(t *testing.T) {
 		wantPass bool
 		wantInfo bool
 	}{
-		{name: "sum matches, stamped apart",
-			samples: [][]cadvisorSample{series("gateway", "gw", "POD", 1.5, 0, 16*s, 32*s, 48*s), series("gateway", "gw", "envoy", 1, 3*s, 19*s, 35*s, 51*s), series("gateway", "gw", "ext-proc", 0.5, 0, 14*s, 30*s, 50*s)},
+		{name: "sum matches over 10 minutes, stamped apart",
+			samples: [][]cadvisorSample{series("gateway", "gw", "POD", 1.5, stamps(0, 16*s, 38)...), series("gateway", "gw", "envoy", 1, stamps(3*s, 16*s, 38)...), series("gateway", "gw", "ext-proc", 0.5, stamps(7*s, 15*s, 40)...)},
 			pods:    pods, wantPass: true},
 		{name: "a container missing from the sum",
-			samples: [][]cadvisorSample{series("gateway", "gw", "POD", 2, 0, 16*s, 32*s), series("gateway", "gw", "envoy", 1, 0, 16*s, 32*s), series("gateway", "gw", "ext-proc", 0.5, 0, 16*s, 32*s)},
+			samples: [][]cadvisorSample{series("gateway", "gw", "POD", 2, stamps(0, 16*s, 38)...), series("gateway", "gw", "envoy", 1, stamps(3*s, 16*s, 38)...), series("gateway", "gw", "ext-proc", 0.5, stamps(7*s, 15*s, 40)...)},
 			pods:    pods, wantPass: false},
+		{name: "a 30 s window is too short to judge",
+			samples: [][]cadvisorSample{series("gateway", "gw", "POD", 1.5, 0, 16*s, 32*s), series("gateway", "gw", "envoy", 1, 3*s, 19*s, 35*s), series("gateway", "gw", "ext-proc", 0.5, 0, 14*s, 30*s)},
+			pods:    pods, wantInfo: true},
 		{name: "too few readings",
 			samples: [][]cadvisorSample{series("gateway", "gw", "POD", 1, 0), series("gateway", "gw", "envoy", 1, 0)},
 			pods:    pods, wantInfo: true},
@@ -155,13 +167,13 @@ func TestCheckProcessVsCgroup(t *testing.T) {
 	t0 := time.Unix(1000, 0)
 	live := func(cores float64) []liveSample {
 		var out []liveSample
-		for i := range 61 {
+		for i := range 601 {
 			d := time.Duration(i) * time.Second
 			out = append(out, liveSample{T: t0.Add(d), Component: "gateway", Container: "ext-proc", Pod: "gw", ProcessCPUSeconds: cores * d.Seconds()})
 		}
 		return out
 	}
-	cg := series("gateway", "gw", "ext-proc", 0.4, 0, 16*time.Second, 33*time.Second, 49*time.Second)
+	cg := series("gateway", "gw", "ext-proc", 0.4, stamps(5*time.Second, 16*time.Second, 37)...)
 	for _, tc := range []struct {
 		name string
 		live []liveSample

@@ -288,6 +288,7 @@ func (rep *report) print(w io.Writer) {
 	} else {
 		fmt.Fprintf(w, "%-10s no requests measured\n", "loop")
 	}
+	rep.printResources(w)
 	printPhase(w, "stop", rep.Stop, "")
 	printPhase(w, "suspend", rep.Suspend, "")
 }
