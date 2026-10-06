@@ -220,8 +220,8 @@ func formatCounts[V int | int64](counts map[string]V) string {
 // print writes the human-readable summary of the run.
 func (rep *report) print(w io.Writer) {
 	c := rep.Config
-	fmt.Fprintf(w, "\n== egress-tests: actors=%d parallel=%d endpoints=%d conn-mode=%s request-interval=%v duration=%v\n",
-		c.Actors, c.Parallel, c.Endpoints, c.ConnMode, c.RequestInterval, c.Duration)
+	fmt.Fprintf(w, "\n== egress-tests: actors=%d parallel=%d endpoints=%d scheme=%s conn-mode=%s request-interval=%v duration=%v\n",
+		c.Actors, c.Parallel, c.Endpoints, c.Scheme, c.ConnMode, c.RequestInterval, c.Duration)
 	if rep.Interrupted {
 		fmt.Fprintln(w, "!! interrupted: the numbers below cover only part of the run")
 	}
@@ -241,6 +241,10 @@ func (rep *report) print(w io.Writer) {
 		if s.DNS.Count > 0 {
 			fmt.Fprintf(w, "%-10s %d lookups, p50 %v p99 %v max %v\n", "dns",
 				s.DNS.Count, round(s.DNS.Quantile(0.5)), round(s.DNS.Quantile(0.99)), round(s.DNS.Max()))
+		}
+		if s.TLS.Count > 0 {
+			fmt.Fprintf(w, "%-10s %d handshakes, p50 %v p99 %v max %v\n", "tls",
+				s.TLS.Count, round(s.TLS.Quantile(0.5)), round(s.TLS.Quantile(0.99)), round(s.TLS.Max()))
 		}
 		if len(s.Errors) > 0 {
 			fmt.Fprintf(w, "%-10s %s\n", "errors", formatCounts(s.Errors))

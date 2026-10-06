@@ -1,0 +1,70 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Strategic merge patch deploy.sh --patch-gateway applies to the atenet-egress
+# Deployment, so the egress gateway trusts the egress-tests target when it
+# re-originates TLS. Test clusters only.
+#
+# Envoy verifies every upstream certificate against the public roots in its
+# image's /etc/ssl/certs/ca-certificates.crt, and nothing in the install adds a
+# CA. The init container copies that file with the target's CA appended into
+# an emptyDir, which is mounted over the original in the envoy container. The
+# CA can vouch only for the endpoint names: it is name-constrained to their
+# domain and its key was discarded (see internal/targetcert).
+#
+# The annotation is the CA's hash, so patching for a new CA rolls the gateway.
+# Keep the names in sync with gateway.go and gateway-trust-unpatch.yaml.
+spec:
+  template:
+    metadata:
+      annotations:
+        egress-tests.ate.dev/target-ca-sha256: "${TARGET_CA_SHA256}"
+    spec:
+      initContainers:
+      - name: egress-tests-trust
+        image: ${ENVOY_IMAGE}
+        command:
+        - sh
+        - -ec
+        - "{ cat /etc/ssl/certs/ca-certificates.crt; echo; cat /egress-tests/target-ca/ca.crt; } > /egress-tests/bundle/ca-certificates.crt"
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: egress-tests-target-ca
+          mountPath: /egress-tests/target-ca
+          readOnly: true
+        - name: egress-tests-ca-bundle
+          mountPath: /egress-tests/bundle
+      containers:
+      - name: envoy
+        volumeMounts:
+        - name: egress-tests-ca-bundle
+          mountPath: /etc/ssl/certs/ca-certificates.crt
+          subPath: ca-certificates.crt
+          readOnly: true
+      volumes:
+      - name: egress-tests-target-ca
+        configMap:
+          name: egress-tests-target-ca
+      - name: egress-tests-ca-bundle
+        emptyDir: {}

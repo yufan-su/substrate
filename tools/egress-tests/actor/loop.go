@@ -16,11 +16,14 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,9 +36,12 @@ const maxBodyBytes = 1 << 20
 
 // server serves the egressapi routes. At most one loop runs at a time.
 type server struct {
-	// endpointURL maps an endpoint number to the URL the loop requests.
-	// Tests point it at local servers.
-	endpointURL func(i int) string
+	// endpointURL maps an endpoint number and scheme to the URL the loop
+	// requests. Tests point it at local servers.
+	endpointURL func(i int, scheme string) string
+	// rootCAs verifies HTTPS endpoints; nil uses the system roots, which
+	// SSL_CERT_FILE extends with the gateway's MITM CA. Tests set their own.
+	rootCAs *x509.CertPool
 
 	mu  sync.Mutex
 	run *loopRun // nil when no loop is running
@@ -75,9 +81,9 @@ func (s *server) handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	urls := make([]string, req.Endpoints)
 	for i := range urls {
-		urls[i] = s.endpointURL(i)
+		urls[i] = s.endpointURL(i, req.URLScheme())
 	}
-	s.run = startLoop(req, urls)
+	s.run = startLoop(req, urls, s.rootCAs)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -121,7 +127,7 @@ type loopRun struct {
 	stats egressapi.Stats
 }
 
-func startLoop(req egressapi.StartRequest, urls []string) *loopRun {
+func startLoop(req egressapi.StartRequest, urls []string, roots *x509.CertPool) *loopRun {
 	timeoutMs := req.RequestTimeoutMs
 	if timeoutMs == 0 {
 		timeoutMs = egressapi.DefaultRequestTimeoutMs
@@ -131,8 +137,9 @@ func startLoop(req egressapi.StartRequest, urls []string) *loopRun {
 		cancel:    cancel,
 		done:      make(chan struct{}),
 		started:   time.Now(),
-		transport: newTransport(req.NewConnPerRequest),
+		transport: newTransport(req.NewConnPerRequest, roots),
 	}
+	r.stats.Scheme = req.URLScheme()
 	r.stats.Endpoints = make([]egressapi.Endpoint, len(urls))
 	client := &http.Client{
 		Transport: r.transport,
@@ -145,15 +152,20 @@ func startLoop(req egressapi.StartRequest, urls []string) *loopRun {
 }
 
 // newTransport keeps one connection alive per endpoint, or none at all when
-// newConnPerRequest is set. It ignores proxy environment variables: the
-// sandbox's egress capture is the only proxy under test.
-func newTransport(newConnPerRequest bool) *http.Transport {
+// newConnPerRequest is set, and verifies HTTPS endpoints against roots. It
+// ignores proxy environment variables: the sandbox's egress capture is the
+// only proxy under test.
+func newTransport(newConnPerRequest bool, roots *x509.CertPool) *http.Transport {
 	return &http.Transport{
 		DialContext:         (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		MaxIdleConns:        0, // no total cap, so C endpoints keep C connections
-		MaxIdleConnsPerHost: 1, // requests are sequential, so one per endpoint is enough
+		TLSClientConfig:     &tls.Config{RootCAs: roots},
+		ForceAttemptHTTP2:   false, // HTTP/1.1 over either scheme: one request per connection at a time
+		MaxIdleConns:        0,     // no total cap, so C endpoints keep C connections
+		MaxIdleConnsPerHost: 1,     // requests are sequential, so one per endpoint is enough
 		IdleConnTimeout:     5 * time.Minute,
 		DisableKeepAlives:   newConnPerRequest,
+		// No TLSHandshakeTimeout: the request's own timeout bounds the
+		// handshake, so a stalled one is counted as a timeout like any other.
 	}
 }
 
@@ -181,12 +193,16 @@ func (r *loopRun) loop(ctx context.Context, client *http.Client, urls []string, 
 // and with it the DNS callbacks, can still be running on another goroutine
 // after a timed-out request returns, hence the lock.
 type requestTrace struct {
-	mu       sync.Mutex
-	gotConn  bool
-	newConn  bool
-	dnsStart time.Time
-	dns      time.Duration
-	didDNS   bool
+	mu         sync.Mutex
+	gotConn    bool
+	newConn    bool
+	dnsStart   time.Time
+	dns        time.Duration
+	didDNS     bool
+	tlsStart   time.Time
+	tls        time.Duration
+	tlsStarted bool
+	didTLS     bool
 }
 
 func (t *requestTrace) clientTrace() *httptrace.ClientTrace {
@@ -205,6 +221,18 @@ func (t *requestTrace) clientTrace() *httptrace.ClientTrace {
 			t.mu.Lock()
 			defer t.mu.Unlock()
 			t.dns, t.didDNS = time.Since(t.dnsStart), true
+		},
+		TLSHandshakeStart: func() {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			t.tlsStart, t.tlsStarted = time.Now(), true
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			if err == nil {
+				t.tls, t.didTLS = time.Since(t.tlsStart), true
+			}
 		},
 	}
 }
@@ -239,6 +267,7 @@ func (r *loopRun) record(i int, latency time.Duration, status int, err error, tr
 	trace.mu.Lock()
 	newConn := trace.gotConn && trace.newConn
 	didDNS, dns := trace.didDNS, trace.dns
+	tlsStarted, didTLS, tlsTime := trace.tlsStarted, trace.didTLS, trace.tls
 	trace.mu.Unlock()
 
 	r.mu.Lock()
@@ -252,7 +281,16 @@ func (r *loopRun) record(i int, latency time.Duration, status int, err error, tr
 	if didDNS {
 		s.DNS.Record(dns)
 	}
+	if didTLS {
+		s.TLS.Record(tlsTime)
+	}
 	class := egressapi.Classify(err, status)
+	if class != "" && tlsStarted && !didTLS && !strings.HasPrefix(class, "tls: ") {
+		// A failure inside the handshake, such as the gateway closing a
+		// connection whose SNI no rule allows, is told apart from the same
+		// error in an HTTP exchange.
+		class = "tls handshake: " + class
+	}
 	if class == "" {
 		s.Successes++
 		s.Latency.Record(latency)
