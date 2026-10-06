@@ -134,6 +134,7 @@ func runCmd(ctx context.Context, args []string) error {
 	output := fs.String("output", "", "If set, write the report as JSON to this file.")
 	resources := fs.Bool("usage", false, "Sample the CPU and memory of the components on the egress path during the run.")
 	resourcesVerify := fs.Bool("usage-verify", false, "With --usage, print the resource self-checks and fail the run if one fails.")
+	resourcesCgreader := fs.Bool("usage-cgroup-reader", false, "With --usage, also pull one-second cgroup readings from the cgroup reader DaemonSet (deploy.sh --deploy --cgreader).")
 	resourcesInterval := fs.Duration("usage-live-interval", time.Second, "How often --usage reads the live sources (Go process counters, Envoy stats).")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -145,8 +146,8 @@ func runCmd(ctx context.Context, args []string) error {
 	if *resources && *resourcesInterval <= 0 {
 		return fmt.Errorf("--usage-live-interval must be positive, got %v", *resourcesInterval)
 	}
-	if *resourcesVerify && !*resources {
-		return errors.New("--usage-verify needs --usage")
+	if (*resourcesVerify || *resourcesCgreader) && !*resources {
+		return errors.New("--usage-verify and --usage-cgroup-reader need --usage")
 	}
 
 	conn, err := cf.connect(ctx)
@@ -177,6 +178,7 @@ func runCmd(ctx context.Context, args []string) error {
 		}
 		r.res = newResourceSampler(get, conn.k8s, *resourcesInterval)
 		r.settleResources = *resourcesVerify
+		r.res.cgreaderOn = *resourcesCgreader
 	}
 	rep, runErr := r.run(ctx)
 	if rep != nil {

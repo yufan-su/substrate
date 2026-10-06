@@ -544,6 +544,15 @@ func (r *runner) finishResources(rep *report) {
 	res.Verify = append(res.Verify, checkMetricsServer(res.MetricsServer, res.Samples)...)
 	res.Verify = append(res.Verify, checkSteadyAttribution(res.Live, rep.phase("steady"))...)
 	res.Verify = append(res.Verify, checkIdlePhases(res.Live, rep)...)
+	if res.Cgreader != nil {
+		inferRemovedLeaves(res.Cgreader.Samples)
+		res.Verify = append(res.Verify, checkCgreaderNodes(res.Cgreader)...)
+		res.Verify = append(res.Verify, checkCgreaderTargets(res.Cgreader)...)
+		res.Verify = append(res.Verify, checkCgreaderGaps(res.Cgreader.Samples)...)
+		res.Verify = append(res.Verify, checkLeafSums(res.Cgreader.Samples)...)
+		res.Verify = append(res.Verify, checkCgreaderVsCadvisor(res.Cgreader.Samples, res.Samples)...)
+		res.Verify = append(res.Verify, checkReaderOverhead(res.Cgreader)...)
+	}
 	rep.Resources = res
 	summarizeResources(rep)
 }

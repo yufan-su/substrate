@@ -112,6 +112,8 @@ type resourceReport struct {
 	MetricsServer []podMetricsSample `json:"metricsServer,omitempty"`
 	// Components summarizes each component over the steady window.
 	Components map[string]*componentSummary `json:"components,omitempty"`
+	// Cgreader holds the cgroup readers' one-second rows, when enabled.
+	Cgreader *cgreaderReport `json:"cgreader,omitempty"`
 	// Series holds per-interval rates and gauges in long format for plots.
 	Series []seriesPoint  `json:"series,omitempty"`
 	Driver driverUsage    `json:"driver"`
@@ -201,10 +203,13 @@ type resourceSampler struct {
 	lastTS       map[string]time.Time // series key -> newest cAdvisor timestamp kept
 	// missing lists every cAdvisor component that matched no Running pod.
 	missing []string
-	rusage  map[string]rusageMark
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	stopped bool
+	// cgreaderOn reads the cgroup reader DaemonSet; cg is its state.
+	cgreaderOn bool
+	cg         *cgreaderState
+	rusage     map[string]rusageMark
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	stopped    bool
 }
 
 func newResourceSampler(get rawGetter, k8s kubernetes.Interface, interval time.Duration) *resourceSampler {
@@ -244,6 +249,12 @@ func (s *resourceSampler) start(ctx context.Context) error {
 		sourceInfo{Name: "live", Interval: s.interval, Clock: "driver"},
 		sourceInfo{Name: "envoy", Interval: s.interval, Clock: "driver"},
 		sourceInfo{Name: "cadvisor", Interval: s.cadvisorInterval, Clock: "kubelet"})
+	if s.cgreaderOn {
+		if err := s.resolveCgreader(ctx); err != nil {
+			return err
+		}
+		s.rep.Sources = append(s.rep.Sources, sourceInfo{Name: "cgreader", Interval: time.Second, Clock: "node"})
+	}
 	s.markRusage("run:begin")
 
 	// Each source polls on its own goroutine, so a slow cAdvisor fetch never
@@ -252,6 +263,9 @@ func (s *resourceSampler) start(ctx context.Context) error {
 	s.cancel = cancel
 	s.every(pollCtx, s.interval, func(ctx context.Context) { s.pollLive(ctx, "") })
 	s.every(pollCtx, s.cadvisorInterval, s.pollCadvisor)
+	if s.cg != nil {
+		s.every(pollCtx, cgreaderPullInterval, s.pollCgreader)
+	}
 	return nil
 }
 
@@ -443,6 +457,12 @@ func (s *resourceSampler) stop() *resourceReport {
 			s.cancel()
 		}
 		s.wg.Wait()
+		if s.cg != nil {
+			// Pull what the readers sampled since the last pull.
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			s.pollCgreader(ctx)
+			cancel()
+		}
 		s.markRusage("run:end")
 	}
 	s.mu.Lock()

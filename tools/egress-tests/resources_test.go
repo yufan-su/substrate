@@ -74,6 +74,8 @@ func (g *fakeGetter) GetRaw(_ context.Context, path string, params url.Values) (
 	switch {
 	case strings.HasSuffix(path, ":9090/proxy/metrics"):
 		return fmt.Appendf(nil, "# TYPE process_cpu_seconds_total counter\nprocess_cpu_seconds_total %.2f\nprocess_resident_memory_bytes 5e+07\n", 100+0.01*float64(n)), nil
+	case strings.HasSuffix(path, ":8080/proxy/healthz"):
+		return []byte("ok\n"), nil
 	case strings.HasSuffix(path, "/proxy/metrics/cadvisor"):
 		// cAdvisor refreshes every third read, 15 s apart.
 		ts := 1_700_000_000_000 + int64((n-1)/3)*15_000

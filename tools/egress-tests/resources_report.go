@@ -83,8 +83,25 @@ func summarizeResources(rep *report) {
 	res := rep.Resources
 	steady := rep.phase("steady")
 	res.Components = map[string]*componentSummary{}
+	// The cgroup readers, when present, replace cAdvisor for the containers
+	// they read: same counters, one-second resolution.
+	samples, split := res.Samples, []cadvisorSample(nil)
+	fromReader := map[string]bool{}
+	if res.Cgreader != nil {
+		var containers []cadvisorSample
+		containers, split = cgreaderAsCadvisor(res.Cgreader)
+		for _, c := range containers {
+			fromReader[c.key()] = true
+		}
+		samples = containers
+		for _, c := range res.Samples {
+			if !fromReader[c.key()] {
+				samples = append(samples, c)
+			}
+		}
+	}
 	bySeries := map[string][]cadvisorSample{}
-	for _, s := range res.Samples {
+	for _, s := range samples {
 		bySeries[s.key()] = append(bySeries[s.key()], s)
 	}
 	type compAcc struct {
@@ -97,20 +114,27 @@ func summarizeResources(rep *report) {
 		ss := bySeries[key]
 		slices.SortFunc(ss, func(a, b cadvisorSample) int { return a.T.Compare(b.T) })
 		comp, ctr := ss[0].Component, ss[0].Container
+		source := "cadvisor"
+		if fromReader[key] {
+			source = "cgreader"
+		}
 		var segs []segment
 		for i := 1; i < len(ss); i++ {
 			a, b := ss[i-1], ss[i]
 			dt := b.T.Sub(a.T).Seconds()
+			if dt <= 0 {
+				continue
+			}
 			seg := segment{from: a.T, to: b.T, cores: (b.CPUSeconds - a.CPUSeconds) / dt,
 				periods: b.CFSPeriods - a.CFSPeriods, throttle: b.CFSThrottled - a.CFSThrottled}
 			segs = append(segs, seg)
-			res.Series = append(res.Series, seriesPoint{T: b.T, Source: "cadvisor", Component: comp, Pod: b.Pod, Container: ctr, Metric: "cpu_cores", Value: seg.cores})
+			res.Series = append(res.Series, seriesPoint{T: b.T, Source: source, Component: comp, Pod: b.Pod, Container: ctr, Metric: "cpu_cores", Value: seg.cores})
 			if seg.periods > 0 {
-				res.Series = append(res.Series, seriesPoint{T: b.T, Source: "cadvisor", Component: comp, Pod: b.Pod, Container: ctr, Metric: "throttled_ratio", Value: seg.throttle / seg.periods})
+				res.Series = append(res.Series, seriesPoint{T: b.T, Source: source, Component: comp, Pod: b.Pod, Container: ctr, Metric: "throttled_ratio", Value: seg.throttle / seg.periods})
 			}
 		}
 		for _, s := range ss {
-			res.Series = append(res.Series, seriesPoint{T: s.T, Source: "cadvisor", Component: comp, Pod: s.Pod, Container: ctr, Metric: "working_set_bytes", Value: s.WorkingSetBytes})
+			res.Series = append(res.Series, seriesPoint{T: s.T, Source: source, Component: comp, Pod: s.Pod, Container: ctr, Metric: "working_set_bytes", Value: s.WorkingSetBytes})
 		}
 		if ctr == podContainer || steady.End.IsZero() {
 			continue
@@ -133,8 +157,12 @@ func summarizeResources(rep *report) {
 		}
 		addTo(cs.Containers[ctr], sum.steadySummary)
 	}
+	addSplit(res, split, steady)
 	for comp, cs := range res.Components {
 		a := acc[comp]
+		if a == nil {
+			continue
+		}
 		cs.Pods = len(a.pods)
 		cs.Steady.CPUCores.Max = maxSum(a.segs, steady)
 		if a.periods > 0 {
@@ -151,6 +179,38 @@ func summarizeResources(rep *report) {
 	}
 	res.Series = append(res.Series, envoySeries(res.Envoy)...)
 	res.Series = append(res.Series, loopSeries(rep.LoopTimeline)...)
+}
+
+// addSplit adds the workers' actors and atunnel parts, from the cgroup
+// readers' leaves, as containers of the workers component. They are parts
+// of ateom, so they do not add to the component's total.
+func addSplit(res *resourceReport, split []cadvisorSample, steady phaseMark) {
+	bySeries := map[string][]cadvisorSample{}
+	for _, s := range split {
+		bySeries[s.key()] = append(bySeries[s.key()], s)
+	}
+	for _, key := range slices.Sorted(maps.Keys(bySeries)) {
+		ss := bySeries[key]
+		slices.SortFunc(ss, func(a, b cadvisorSample) int { return a.T.Compare(b.T) })
+		var segs []segment
+		for i := 1; i < len(ss); i++ {
+			a, b := ss[i-1], ss[i]
+			if !b.T.After(a.T) {
+				continue
+			}
+			seg := segment{from: a.T, to: b.T, cores: (b.CPUSeconds - a.CPUSeconds) / b.T.Sub(a.T).Seconds()}
+			segs = append(segs, seg)
+			res.Series = append(res.Series, seriesPoint{T: b.T, Source: "cgreader", Component: b.Component, Pod: b.Pod, Container: b.Container, Metric: "cpu_cores", Value: seg.cores})
+		}
+		cs := res.Components[ss[0].Component]
+		if cs == nil || steady.End.IsZero() {
+			continue
+		}
+		if cs.Containers[ss[0].Container] == nil {
+			cs.Containers[ss[0].Container] = &steadySummary{Coverage: 1}
+		}
+		addTo(cs.Containers[ss[0].Container], steadyOf(ss, segs, steady).steadySummary)
+	}
 }
 
 type seriesSteady struct {
@@ -176,6 +236,10 @@ func steadyOf(ss []cadvisorSample, segs []segment, steady phaseMark) seriesStead
 	}
 	first, last := in[0], in[len(in)-1]
 	span := last.T.Sub(first.T)
+	if span <= 0 {
+		out.Insufficient = true
+		return out
+	}
 	out.CPUCores.Mean = (last.CPUSeconds - first.CPUSeconds) / span.Seconds()
 	out.Coverage = span.Seconds() / steady.End.Sub(steady.Start).Seconds()
 	out.periods, out.throttle = last.CFSPeriods-first.CFSPeriods, last.CFSThrottled-first.CFSThrottled
