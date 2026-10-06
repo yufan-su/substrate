@@ -536,6 +536,9 @@ func TestRun(t *testing.T) {
 			if rep.Loop.Requests != 300 || rep.Loop.Successes != 297 || rep.Loop.Errors["timeout"] != 3 {
 				t.Errorf("merged loop stats = %+v, want 3 actors x 100 requests", rep.Loop)
 			}
+			if want := float64(rep.Loop.Requests) / rep.Loop.Elapsed.Seconds(); rep.LoopReqPerS != want {
+				t.Errorf("loopReqPerS = %v, want requests over elapsed %v", rep.LoopReqPerS, want)
+			}
 			if len(rep.Actors) != 3 || rep.Resume.ResumeLatency.Count != 3 {
 				t.Errorf("report has %d actors and %d resume samples, want 3 each", len(rep.Actors), rep.Resume.ResumeLatency.Count)
 			}

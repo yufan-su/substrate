@@ -46,7 +46,11 @@ type report struct {
 	Stop        phaseResult      `json:"stop"`
 	Suspend     phaseResult      `json:"suspend"`
 	Loop        *egressapi.Stats `json:"loop,omitempty"`
-	Actors      []actorResult    `json:"actors,omitempty"`
+	// LoopReqPerS is the loops' measured request rate: Loop's requests over
+	// its elapsed time. With a request interval it falls short of
+	// actors / interval by each request's own latency.
+	LoopReqPerS float64       `json:"loopReqPerS,omitempty"`
+	Actors      []actorResult `json:"actors,omitempty"`
 	// Phases holds when each phase ran, on the driver's clock.
 	Phases []phaseMark `json:"phases,omitempty"`
 	// LoopTimeline holds the merged loop stats of each progress poll.

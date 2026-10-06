@@ -225,7 +225,9 @@ connection and resolves every name, so the steady mean carries that setup
 cost. The `settled` line drops it. The settled window starts one progress
 poll after new connections stop growing. When the polls come further apart
 than one round, it starts 1.5 rounds (1.5 x C x `--request-interval`) into
-steady instead. `resources.settledWindow` records the start, the rule, the
+steady instead. It never starts earlier than 5s into steady
+(`floored` in the JSON): at small C the rounds rule would land among the
+actors' first connection setups. `resources.settledWindow` records the start, the rule, the
 request rate and the settled p50 and p99, from the progress polls'
 latency histograms; each component carries `settled` beside `steady`.
 Whole-run p99 at low B is the first round's DNS lookups and connects;

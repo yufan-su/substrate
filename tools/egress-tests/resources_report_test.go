@@ -341,13 +341,14 @@ func TestSettledOf(t *testing.T) {
 	}
 	full := []int64{400, 800, 1000, 1000, 1001, 1001, 1001, 1001, 1001, 1001, 1001, 1001}
 	for _, tc := range []struct {
-		name      string
-		cfg       runConfig
-		timeline  []loopPoint
-		wantOK    bool
-		wantStart time.Duration
-		wantRule  string
-		wantRate  float64
+		name        string
+		cfg         runConfig
+		timeline    []loopPoint
+		wantOK      bool
+		wantStart   time.Duration
+		wantRule    string
+		wantRate    float64
+		wantFloored bool
 	}{
 		{
 			name:      "plateau, one poll after it",
@@ -359,11 +360,21 @@ func TestSettledOf(t *testing.T) {
 			wantRate:  100,
 		},
 		{
-			name:      "polls coarser than a round",
-			cfg:       runConfig{Endpoints: 10, RequestInterval: 100 * time.Millisecond, ProgressInterval: 5 * s},
+			name:        "polls coarser than a round, floored at 5 s",
+			cfg:         runConfig{Endpoints: 10, RequestInterval: 100 * time.Millisecond, ProgressInterval: 5 * s},
+			timeline:    polls(full),
+			wantOK:      true,
+			wantStart:   5 * s,
+			wantRule:    settledByRounds,
+			wantRate:    100,
+			wantFloored: true,
+		},
+		{
+			name:      "rounds rule past the floor",
+			cfg:       runConfig{Endpoints: 40, RequestInterval: 100 * time.Millisecond, ProgressInterval: 5 * s},
 			timeline:  polls(full),
 			wantOK:    true,
-			wantStart: 1500 * time.Millisecond,
+			wantStart: 6 * s,
 			wantRule:  settledByRounds,
 			wantRate:  100,
 		},
@@ -395,6 +406,9 @@ func TestSettledOf(t *testing.T) {
 			}
 			if !ok {
 				return
+			}
+			if w.Floored != tc.wantFloored {
+				t.Errorf("floored = %v, want %v", w.Floored, tc.wantFloored)
 			}
 			if got := w.Start.Sub(t0); got != tc.wantStart || w.Rule != tc.wantRule || !near(w.ReqPerS, tc.wantRate) {
 				t.Errorf("settled from +%v by %q at %.3f req/s, want +%v by %q at %.3f req/s",

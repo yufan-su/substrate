@@ -90,7 +90,16 @@ type settledWindow struct {
 	// histograms' buckets.
 	P50 time.Duration `json:"p50,omitempty"`
 	P99 time.Duration `json:"p99,omitempty"`
+	// Floored is set when the rule's start fell before settledFloor and the
+	// window starts at the floor instead.
+	Floored bool `json:"floored,omitempty"`
 }
+
+// settledFloor is the earliest the settled window starts. At small C the
+// rounds rule lands inside the first seconds of steady, where B actors are
+// still opening connections at once: B=100 C=10 drew 12 cores at 1 s and
+// 2.3 by 4 s.
+const settledFloor = 5 * time.Second
 
 // settledPlateauTolerance is the growth in new connections, as a fraction
 // of those already open, that still counts as a plateau; reconnects after
@@ -124,6 +133,9 @@ func settledOf(cfg runConfig, steady phaseMark, timeline []loopPoint) (settledWi
 			return w, false
 		}
 		w = settledWindow{Start: steady.Start.Add(round * 3 / 2), Rule: settledByRounds}
+	}
+	if floor := steady.Start.Add(settledFloor); w.Start.Before(floor) {
+		w.Start, w.Floored = floor, true
 	}
 	if len(polls) == 0 {
 		return w, false
@@ -577,8 +589,12 @@ func (rep *report) printResources(w io.Writer) {
 		fmt.Fprintf(w, "%-10s cores per 1000 req/s: %s (cAdvisor coverage %.0f%%)\n", "", strings.Join(perK, " "), 100*minCov)
 	}
 	if st := res.Settled; st != nil && len(settledK) > 0 {
+		rule := st.Rule
+		if st.Floored {
+			rule += ", floored"
+		}
 		fmt.Fprintf(w, "%-10s cores per 1000 req/s, settled: %s (from steady +%.1fs by %s, %.1f req/s, p50 %v p99 %v)\n", "",
-			strings.Join(settledK, " "), st.Start.Sub(rep.phase("steady").Start).Seconds(), st.Rule, st.ReqPerS, st.P50, st.P99)
+			strings.Join(settledK, " "), st.Start.Sub(rep.phase("steady").Start).Seconds(), rule, st.ReqPerS, st.P50, st.P99)
 	}
 	if len(res.Baseline) > 0 {
 		var base []string

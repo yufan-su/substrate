@@ -673,6 +673,9 @@ func (r *runner) stopLoops(ctx context.Context, ready []*actorRun, rep *report) 
 		rep.Actors = append(rep.Actors, a.result())
 	}
 	rep.Loop = merged
+	if merged.Elapsed > 0 {
+		rep.LoopReqPerS = float64(merged.Requests) / merged.Elapsed.Seconds()
+	}
 }
 
 // outcomeUnknown reports whether a failed call may still have committed on the

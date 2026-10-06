@@ -180,7 +180,7 @@ def extract(path: str | Path, base: str = "") -> dict:
     elapsed = loop.get("elapsed", 0) / 1e9
     row = {
         "run": Path(path).name, "B": B, "C": C, "T": B * C,
-        "R_measured": loop.get("requests", 0) / elapsed if elapsed else 0.0,
+        "R_measured": rep.get("loopReqPerS") or (loop.get("requests", 0) / elapsed if elapsed else 0.0),
         "interval_ms": cfg.get("requestInterval", 0) / 1e6,
         "base": base or rep.get("base", ""),
         "breakers": rep.get("breakers", ""),
@@ -201,7 +201,10 @@ def extract(path: str | Path, base: str = "") -> dict:
                                   if gw_base.get("workingSetBytes") and not gw_base.get("insufficient") else None)
     row["envoy_heap_mib"] = heap_delta_mib(run, lo, s1)
     row["worker_ws_mib"] = ws_delta_mib(run, "workers", s0, s1)
-    row["first_round_s"] = lo - s0 if settled and settled.get("rule") != "1.5 rounds" else None
+    # Only the plateau rule measures the first round; the fallback and the
+    # floor set the start by rule.
+    row["first_round_s"] = (lo - s0 if settled and settled.get("rule") != "1.5 rounds"
+                            and not settled.get("floored") else None)
     # Own-snapshot resumes only, when the driver reports the source; a first
     # resume from the golden snapshot is a different population.
     actors = [a for a in rep.get("actors") or [] if a.get("resumeLatency")]
