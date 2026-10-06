@@ -219,11 +219,16 @@ def extract(path: str | Path, base: str = "") -> dict:
     row["atunnel_cores"] = summed_mean(cpu_points(run, "workers", {"atunnel"}), lo, s1)
     row["gateway_ws_mib"] = ws_delta_mib(run, "gateway", s0, s1)
     gw_base = (res.get("baseline") or {}).get("gateway") or {}
-    row["gateway_ws_base_mib"] = (gw_base["workingSetBytes"] / 2**20
-                                  if gw_base.get("workingSetBytes") and not gw_base.get("insufficient") else None)
+    # The pod cgroup's pre-idle maximum: the high-water mark that pins a
+    # reused gateway pod is the pod's, not its containers' sum.
+    row["gateway_ws_base_mib"] = (gw_base["podWorkingSetBytes"] / 2**20
+                                  if gw_base.get("podWorkingSetBytes") and not gw_base.get("insufficient") else None)
     row["envoy_heap_mib"] = heap_delta_mib(run, lo, s1)
     row["worker_ws_mib"] = ws_delta_mib(run, "workers", s0, s1)
-    row["first_round_s"] = lo - s0 if settled and settled.get("rule") != "1.5 rounds" else None
+    # Only the plateau rule measures the first round; the fallback and the
+    # floor set the start by rule.
+    row["first_round_s"] = (lo - s0 if settled and settled.get("rule") != "1.5 rounds"
+                            and not settled.get("floored") else None)
     # Own-snapshot resumes only, when the driver reports the source; a first
     # resume from the golden snapshot is a different population.
     actors = [a for a in rep.get("actors") or [] if a.get("resumeLatency")]

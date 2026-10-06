@@ -22,6 +22,7 @@ from __future__ import annotations
 import io
 import json
 import tempfile
+from datetime import datetime, timezone
 import unittest
 from pathlib import Path
 
@@ -313,6 +314,28 @@ class ExtractTest(unittest.TestCase):
             p = Path(d) / "r.json"
             p.write_text(json.dumps(report))
             self.assertAlmostEqual(fit.extract(p)["resume_p50_ms"], 410)
+
+    def test_first_round_only_from_a_measured_start(self):
+        # The plateau rule measures the first round; a floored or rule-set
+        # start says nothing about it.
+        report = json.loads(FIXTURE.read_text())
+        steady = next(p for p in report["phases"] if p["name"] == "steady")
+        start = fit.rr.parse_time(steady["start"])
+        later = datetime.fromtimestamp(start + 12, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for name, window, want in [
+            ("plateau", {"start": later, "rule": "new-connection plateau"}, 12.0),
+            ("plateau, floored", {"start": later, "rule": "new-connection plateau", "floored": True}, None),
+            ("1.5 rounds", {"start": later, "rule": "1.5 rounds"}, None),
+        ]:
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                report["resources"]["settledWindow"] = window
+                p = Path(d) / "r.json"
+                p.write_text(json.dumps(report))
+                got = fit.extract(p)["first_round_s"]
+                if want is None:
+                    self.assertIsNone(got)
+                else:
+                    self.assertAlmostEqual(got, want)
 
     def test_no_settled_p99_without_the_driver_field(self):
         self.assertIsNone(fit.extract(FIXTURE)["p99_settled_ms"])
