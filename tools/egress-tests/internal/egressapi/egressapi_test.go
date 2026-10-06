@@ -16,6 +16,8 @@ package egressapi
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -120,6 +122,7 @@ func TestStatsMergeAndJSON(t *testing.T) {
 	}
 	a.Latency.Record(time.Millisecond)
 	b := &Stats{
+		Scheme:    SchemeHTTPS,
 		Elapsed:   2 * time.Minute,
 		Requests:  6,
 		Successes: 4,
@@ -127,6 +130,7 @@ func TestStatsMergeAndJSON(t *testing.T) {
 		Endpoints: []Endpoint{{Requests: 2}, {Requests: 2}, {Requests: 2, Errors: 2}},
 	}
 	b.DNS.Record(time.Millisecond)
+	b.TLS.Record(3 * time.Millisecond)
 
 	var got Stats
 	got.Merge(a)
@@ -141,8 +145,11 @@ func TestStatsMergeAndJSON(t *testing.T) {
 	if fmt.Sprint(got.Endpoints) != fmt.Sprint(wantEndpoints) {
 		t.Errorf("merged endpoints = %v, want %v", got.Endpoints, wantEndpoints)
 	}
-	if got.Latency.Count != 1 || got.DNS.Count != 1 {
-		t.Errorf("merged histograms: latency %d, dns %d samples; want 1 each", got.Latency.Count, got.DNS.Count)
+	if got.Latency.Count != 1 || got.DNS.Count != 1 || got.TLS.Count != 1 {
+		t.Errorf("merged histograms: latency %d, dns %d, tls %d samples; want 1 each", got.Latency.Count, got.DNS.Count, got.TLS.Count)
+	}
+	if got.Scheme != SchemeHTTPS {
+		t.Errorf("merged scheme = %q, want %q from the stats that set one", got.Scheme, SchemeHTTPS)
 	}
 
 	raw, err := json.Marshal(&got)
@@ -153,7 +160,8 @@ func TestStatsMergeAndJSON(t *testing.T) {
 	if err := json.Unmarshal(raw, &back); err != nil {
 		t.Fatal(err)
 	}
-	if back.Latency.Quantile(0.5) != got.Latency.Quantile(0.5) || back.Requests != got.Requests || back.Errors["HTTP 503"] != 1 {
+	if back.Latency.Quantile(0.5) != got.Latency.Quantile(0.5) || back.TLS.Count != 1 || back.Scheme != SchemeHTTPS ||
+		back.Requests != got.Requests || back.Errors["HTTP 503"] != 1 {
 		t.Errorf("JSON round trip lost data: %s", raw)
 	}
 }
@@ -161,11 +169,13 @@ func TestStatsMergeAndJSON(t *testing.T) {
 func TestStatsCloneIsDeep(t *testing.T) {
 	s := &Stats{Errors: map[string]int64{"EOF": 1}, Endpoints: []Endpoint{{Requests: 1}}}
 	s.Latency.Record(time.Millisecond)
+	s.TLS.Record(time.Millisecond)
 	c := s.Clone()
 	c.Errors["EOF"]++
 	c.Endpoints[0].Requests++
 	c.Latency.Record(time.Millisecond)
-	if s.Errors["EOF"] != 1 || s.Endpoints[0].Requests != 1 || s.Latency.Count != 1 {
+	c.TLS.Record(time.Millisecond)
+	if s.Errors["EOF"] != 1 || s.Endpoints[0].Requests != 1 || s.Latency.Count != 1 || s.TLS.Count != 1 {
 		t.Errorf("mutating the clone changed the original: %+v", s)
 	}
 	var sum int64
@@ -202,6 +212,12 @@ func TestClassify(t *testing.T) {
 		{"dns not found", wrap(&net.DNSError{Err: "no such host", Name: "x", IsNotFound: true}), 0, "dns: not found"},
 		{"dns other", wrap(&net.DNSError{Err: "server misbehaving", Name: "x"}), 0, "dns: error"},
 		{"other strips url", wrap(errors.New("boom")), 0, "other: boom"},
+		{"unknown authority", wrap(&tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}), 0, "tls: unknown authority"},
+		{"hostname mismatch", wrap(&tls.CertificateVerificationError{Err: x509.HostnameError{Host: "x"}}), 0, "tls: hostname mismatch"},
+		{"expired", wrap(&tls.CertificateVerificationError{Err: x509.CertificateInvalidError{Reason: x509.Expired}}), 0, "tls: invalid certificate"},
+		{"not tls", wrap(tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}), 0, "tls: not a TLS server"},
+		{"plain http answer", wrap(errors.New("http: server gave HTTP response to HTTPS client")), 0, "tls: not a TLS server"},
+		{"peer alert", wrap(&net.OpError{Op: "remote error", Err: errors.New("tls: handshake failure")}), 0, "tls: peer alert: handshake failure"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := Classify(tc.err, tc.status); got != tc.want {
@@ -223,6 +239,9 @@ func TestStartRequestValidate(t *testing.T) {
 		wantErr bool
 	}{
 		{"ok", StartRequest{Endpoints: 10}, false},
+		{"http", StartRequest{Endpoints: 10, Scheme: SchemeHTTP}, false},
+		{"https", StartRequest{Endpoints: 10, Scheme: SchemeHTTPS}, false},
+		{"bad scheme", StartRequest{Endpoints: 10, Scheme: "ftp"}, true},
 		{"most endpoints", StartRequest{Endpoints: MaxEndpoints}, false},
 		{"no endpoints", StartRequest{}, true},
 		{"too many endpoints", StartRequest{Endpoints: MaxEndpoints + 1}, true},
@@ -244,7 +263,16 @@ func TestEndpointNames(t *testing.T) {
 	if got, want := EndpointHost(7), "egress-target-7.egress-tests-targets.svc.cluster.local"; got != want {
 		t.Errorf("EndpointHost(7) = %q, want %q", got, want)
 	}
-	if got, want := EndpointURL(7), "http://egress-target-7.egress-tests-targets.svc.cluster.local/"; got != want {
-		t.Errorf("EndpointURL(7) = %q, want %q", got, want)
+	if got, want := EndpointURL(7, SchemeHTTP), "http://egress-target-7.egress-tests-targets.svc.cluster.local/"; got != want {
+		t.Errorf("EndpointURL(7, http) = %q, want %q", got, want)
+	}
+	if got, want := EndpointURL(7, SchemeHTTPS), "https://egress-target-7.egress-tests-targets.svc.cluster.local/"; got != want {
+		t.Errorf("EndpointURL(7, https) = %q, want %q", got, want)
+	}
+	if got, want := EndpointHostPattern, "*.egress-tests-targets.svc.cluster.local"; got != want {
+		t.Errorf("EndpointHostPattern = %q, want %q", got, want)
+	}
+	if got := (&StartRequest{}).URLScheme(); got != SchemeHTTP {
+		t.Errorf("URLScheme() with no scheme = %q, want %q", got, SchemeHTTP)
 	}
 }

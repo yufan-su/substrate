@@ -43,10 +43,22 @@ spec:
       containers:
       - name: target
         image: ko://github.com/agent-substrate/substrate/tools/egress-tests/target
-        args: ["--listen=:8080"]
+        args:
+        - --listen=:8080
+        - --tls-listen=:8443
+        - --tls-cert-file=/etc/egress-target-tls/tls.crt
+        - --tls-key-file=/etc/egress-target-tls/tls.key
         ports:
         - name: http
           containerPort: 8080
+        - name: https
+          containerPort: 8443
+        volumeMounts:
+        # deploy.sh creates the Secret: a certificate for every endpoint name,
+        # from a CA that the egress gateway is patched to trust.
+        - name: tls
+          mountPath: /etc/egress-target-tls
+          readOnly: true
         readinessProbe:
           httpGet:
             path: /healthz
@@ -66,3 +78,7 @@ spec:
           runAsGroup: 65532
           capabilities:
             drop: ["ALL"]
+      volumes:
+      - name: tls
+        secret:
+          secretName: egress-target-tls

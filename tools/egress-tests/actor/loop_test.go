@@ -16,7 +16,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +31,7 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/tools/egress-tests/internal/egressapi"
+	"github.com/agent-substrate/substrate/tools/egress-tests/internal/targetcert"
 )
 
 // target is an endpoint that counts the TCP connections opened to it.
@@ -55,12 +60,47 @@ func newTarget(t *testing.T, h http.HandlerFunc) *target {
 
 func okHandler(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) }
 
-// serve returns the actor's handler with endpoint i mapped to urls[i], in
-// place of the in-cluster Service names.
-func serve(urls ...string) http.Handler {
+// quietLog discards a test server's own error log.
+var quietLog = log.New(io.Discard, "", 0)
+
+// host is the target's host:port.
+func (tg *target) host() string { return tg.Listener.Addr().String() }
+
+// serve returns the actor's handler with endpoint i mapped to hosts[i], a
+// host:port, in place of the in-cluster Service names. The URL keeps the
+// scheme the loop asks for.
+func serve(hosts ...string) http.Handler {
+	return serveTLS(nil, hosts...)
+}
+
+// serveTLS is serve, verifying HTTPS endpoints against roots.
+func serveTLS(roots *x509.CertPool, hosts ...string) http.Handler {
 	s := newServer()
-	s.endpointURL = func(i int) string { return urls[i] }
+	s.rootCAs = roots
+	s.endpointURL = func(i int, scheme string) string { return scheme + "://" + hosts[i] + "/" }
 	return s.handler()
+}
+
+// newTLSTarget is newTarget serving HTTPS with httptest's certificate, which
+// the returned pool trusts.
+func newTLSTarget(t *testing.T, h http.HandlerFunc) (*target, *x509.CertPool) {
+	t.Helper()
+	tg := &target{}
+	tg.Server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tg.requests.Add(1)
+		h(w, r)
+	}))
+	tg.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			tg.conns.Add(1)
+		}
+	}
+	tg.Config.ErrorLog = quietLog // failed handshakes are what some tests expect
+	tg.StartTLS()
+	t.Cleanup(tg.Close)
+	roots := x509.NewCertPool()
+	roots.AddCert(tg.Certificate())
+	return tg, roots
 }
 
 func post(t *testing.T, h http.Handler, path string, body any) *httptest.ResponseRecorder {
@@ -124,13 +164,16 @@ func atLeast(n int64) func(*egressapi.Stats) bool {
 
 func TestKeepAliveReusesOneConnectionPerEndpoint(t *testing.T) {
 	targets := []*target{newTarget(t, okHandler), newTarget(t, okHandler), newTarget(t, okHandler)}
-	var urls []string
+	var hosts []string
 	for _, tg := range targets {
-		urls = append(urls, tg.URL+"/")
+		hosts = append(hosts, tg.host())
 	}
-	h := serve(urls...)
+	h := serve(hosts...)
 
-	s := runLoop(t, h, egressapi.StartRequest{Endpoints: len(urls)}, atLeast(30))
+	s := runLoop(t, h, egressapi.StartRequest{Endpoints: len(hosts)}, atLeast(30))
+	if s.Scheme != egressapi.SchemeHTTP || s.TLS.Count != 0 {
+		t.Errorf("a start with no scheme ran over %q with %d TLS handshakes, want http with none", s.Scheme, s.TLS.Count)
+	}
 
 	if s.Successes != s.Requests || len(s.Errors) != 0 {
 		t.Errorf("successes %d of %d requests, errors %v", s.Successes, s.Requests, s.Errors)
@@ -155,7 +198,7 @@ func TestKeepAliveReusesOneConnectionPerEndpoint(t *testing.T) {
 
 func TestNewConnPerRequest(t *testing.T) {
 	tg := newTarget(t, okHandler)
-	h := serve(tg.URL + "/")
+	h := serve(tg.host())
 
 	s := runLoop(t, h, egressapi.StartRequest{Endpoints: 1, NewConnPerRequest: true}, atLeast(10))
 
@@ -176,7 +219,7 @@ func TestRequestTimeoutIsClassified(t *testing.T) {
 		}
 	})
 	t.Cleanup(func() { close(release) })
-	h := serve(slow.URL + "/")
+	h := serve(slow.host())
 
 	s := runLoop(t, h, egressapi.StartRequest{Endpoints: 1, RequestTimeoutMs: 20}, atLeast(2))
 
@@ -196,7 +239,7 @@ func TestNon200IsAnError(t *testing.T) {
 	failing := newTarget(t, func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "egress denied", http.StatusServiceUnavailable)
 	})
-	h := serve(ok.URL+"/", failing.URL+"/")
+	h := serve(ok.host(), failing.host())
 
 	s := runLoop(t, h, egressapi.StartRequest{Endpoints: 2}, atLeast(10))
 
@@ -210,7 +253,7 @@ func TestNon200IsAnError(t *testing.T) {
 
 func TestIntervalPacesRequests(t *testing.T) {
 	tg := newTarget(t, okHandler)
-	h := serve(tg.URL + "/")
+	h := serve(tg.host())
 
 	start := time.Now()
 	s := runLoop(t, h, egressapi.StartRequest{Endpoints: 1, IntervalMs: 20}, atLeast(5))
@@ -228,12 +271,12 @@ func TestDNSRecordedOnlyForHostnames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	byIP := runLoop(t, serve(tg.URL+"/"), egressapi.StartRequest{Endpoints: 1}, atLeast(3))
+	byIP := runLoop(t, serve(tg.host()), egressapi.StartRequest{Endpoints: 1}, atLeast(3))
 	if byIP.DNS.Count != 0 {
 		t.Errorf("an IP target recorded %d DNS lookups, want 0", byIP.DNS.Count)
 	}
 
-	byName := serve("http://localhost:" + u.Port() + "/")
+	byName := serve("localhost:" + u.Port())
 	s := runLoop(t, byName, egressapi.StartRequest{Endpoints: 1, NewConnPerRequest: true}, atLeast(3))
 	if s.DNS.Count == 0 {
 		t.Errorf("a hostname target with a new connection per request recorded no DNS lookups (stats %+v)", s)
@@ -242,7 +285,7 @@ func TestDNSRecordedOnlyForHostnames(t *testing.T) {
 
 func TestStartStopLifecycle(t *testing.T) {
 	tg := newTarget(t, okHandler)
-	h := serve(tg.URL + "/")
+	h := serve(tg.host())
 	req := egressapi.StartRequest{Endpoints: 1}
 
 	if rec := get(h, egressapi.StatsRoute); rec.Code != http.StatusNotFound {
@@ -280,7 +323,7 @@ func TestStartStopLifecycle(t *testing.T) {
 
 func TestStartRejectsBadRequests(t *testing.T) {
 	h := newServer().handler()
-	for _, body := range []string{`not json`, `{}`, `{"endpoints":0}`, `{"endpoints":257}`} {
+	for _, body := range []string{`not json`, `{}`, `{"endpoints":0}`, `{"endpoints":257}`, `{"endpoints":1,"scheme":"ftp"}`} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, egressapi.StartRoute, strings.NewReader(body)))
 		if rec.Code != http.StatusBadRequest {
@@ -295,8 +338,117 @@ func TestStartRejectsBadRequests(t *testing.T) {
 func TestDefaultURLsAreTheEndpointServices(t *testing.T) {
 	s := newServer()
 	for _, i := range []int{0, 9, 255} {
-		if got, want := s.endpointURL(i), egressapi.EndpointURL(i); got != want {
-			t.Errorf("endpoint %d = %q, want %q", i, got, want)
+		for _, scheme := range []string{egressapi.SchemeHTTP, egressapi.SchemeHTTPS} {
+			if got, want := s.endpointURL(i, scheme), egressapi.EndpointURL(i, scheme); got != want {
+				t.Errorf("endpoint %d over %s = %q, want %q", i, scheme, got, want)
+			}
 		}
+	}
+	if s.rootCAs != nil {
+		t.Error("the actor's roots are set by default; they must stay nil so SSL_CERT_FILE applies")
+	}
+}
+
+func TestHTTPSKeepAliveHandshakesOncePerEndpoint(t *testing.T) {
+	a, _ := newTLSTarget(t, okHandler)
+	b, _ := newTLSTarget(t, okHandler)
+	roots := x509.NewCertPool()
+	roots.AddCert(a.Certificate())
+	roots.AddCert(b.Certificate())
+	h := serveTLS(roots, a.host(), b.host())
+
+	s := runLoop(t, h, egressapi.StartRequest{Endpoints: 2, Scheme: egressapi.SchemeHTTPS}, atLeast(20))
+
+	if s.Successes != s.Requests || len(s.Errors) != 0 {
+		t.Errorf("successes %d of %d requests, errors %v", s.Successes, s.Requests, s.Errors)
+	}
+	if s.Scheme != egressapi.SchemeHTTPS {
+		t.Errorf("Scheme = %q, want https", s.Scheme)
+	}
+	if s.TLS.Count != 2 || s.NewConns != 2 {
+		t.Errorf("%d TLS handshakes and %d new connections, want one of each per endpoint (2)", s.TLS.Count, s.NewConns)
+	}
+	for i, tg := range []*target{a, b} {
+		if got := tg.conns.Load(); got != 1 {
+			t.Errorf("target %d saw %d connections, want 1 kept alive", i, got)
+		}
+	}
+}
+
+func TestHTTPSNewConnHandshakesEveryRequest(t *testing.T) {
+	tg, roots := newTLSTarget(t, okHandler)
+	h := serveTLS(roots, tg.host())
+
+	s := runLoop(t, h, egressapi.StartRequest{Endpoints: 1, Scheme: egressapi.SchemeHTTPS, NewConnPerRequest: true}, atLeast(10))
+
+	if s.Successes != s.Requests || s.TLS.Count != s.Requests {
+		t.Errorf("%d successes and %d TLS handshakes for %d requests, want one handshake per successful request", s.Successes, s.TLS.Count, s.Requests)
+	}
+}
+
+func TestHTTPSFailuresAreClassified(t *testing.T) {
+	bundle, err := targetcert.Generate(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpointCert, err := tls.X509KeyPair(bundle.Cert, bundle.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpointRoots := x509.NewCertPool()
+	endpointRoots.AppendCertsFromPEM(bundle.CA)
+	// Serves the endpoints' certificate, which names no IP address.
+	wrongName := &target{Server: httptest.NewUnstartedServer(http.HandlerFunc(okHandler))}
+	wrongName.TLS = &tls.Config{Certificates: []tls.Certificate{endpointCert}}
+	wrongName.Config.ErrorLog = quietLog
+	wrongName.StartTLS()
+	t.Cleanup(wrongName.Close)
+
+	untrusted, _ := newTLSTarget(t, okHandler)
+	plain := newTarget(t, okHandler)
+
+	// Accepts, reads the ClientHello so closing sends a FIN rather than a
+	// reset, and closes: a peer that refuses the handshake, as the gateway
+	// does for an SNI no rule allows.
+	closer, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closer.Close() })
+	go func() {
+		for {
+			conn, err := closer.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = conn.Read(make([]byte, 4096))
+			conn.Close()
+		}
+	}()
+
+	for _, tc := range []struct {
+		name  string
+		roots *x509.CertPool
+		host  string
+		want  string
+	}{
+		{"untrusted CA", x509.NewCertPool(), untrusted.host(), "tls: unknown authority"},
+		{"hostname mismatch", endpointRoots, wrongName.host(), "tls: hostname mismatch"},
+		{"plain HTTP server", x509.NewCertPool(), plain.host(), "tls: not a TLS server"},
+		{"peer closes during handshake", x509.NewCertPool(), closer.Addr().String(), "tls handshake: "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := serveTLS(tc.roots, tc.host)
+			s := runLoop(t, h, egressapi.StartRequest{Endpoints: 1, Scheme: egressapi.SchemeHTTPS}, atLeast(2))
+			var matched int64
+			for class, n := range s.Errors {
+				if strings.HasPrefix(class, tc.want) {
+					matched += n
+				}
+			}
+			if matched != s.Requests || s.Successes != 0 || s.TLS.Count != 0 {
+				t.Errorf("errors %v, %d successes, %d handshakes for %d requests; want every request classed %q", s.Errors, s.Successes, s.TLS.Count, s.Requests, tc.want)
+			}
+		})
 	}
 }

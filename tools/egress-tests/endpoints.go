@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -27,9 +28,10 @@ import (
 	"github.com/agent-substrate/substrate/tools/egress-tests/internal/egressapi"
 )
 
-// buildPolicy returns the egress policy every actor gets: cleartext HTTP on
-// port 80 to exactly the hosts of endpoints 0 through n-1, the ones the
-// actor's loop calls.
+// buildPolicy returns the egress policy every actor gets: HTTP on port 80 and
+// HTTPS on port 443 to exactly the hosts of endpoints 0 through n-1, the ones
+// the actor's loop calls. Both schemes are always allowed, so a run can switch
+// between them without updating every actor's policy.
 func buildPolicy(atespace string, n int) *ateapipb.EgressPolicy {
 	hosts := make([]string, n)
 	for i := range n {
@@ -37,46 +39,84 @@ func buildPolicy(atespace string, n int) *ateapipb.EgressPolicy {
 	}
 	return &ateapipb.EgressPolicy{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: "default"},
-		Rules:    []*ateapipb.EgressRule{{Http: &ateapipb.HTTPRule{Hostnames: hosts}}},
+		Rules: []*ateapipb.EgressRule{
+			{Http: &ateapipb.HTTPRule{Hostnames: hosts}},
+			{Https: &ateapipb.HTTPSRule{Hostnames: slices.Clone(hosts)}},
+		},
 	}
 }
 
-// samePolicyHosts reports whether existing allows exactly the hostnames of
-// want, the only thing that differs between runs.
-func samePolicyHosts(existing, want *ateapipb.EgressPolicy) bool {
-	if len(existing.GetRules()) != 1 || existing.GetRules()[0].GetHttp() == nil {
-		return false
-	}
-	got := slices.Sorted(slices.Values(existing.GetRules()[0].GetHttp().GetHostnames()))
-	exp := slices.Sorted(slices.Values(want.GetRules()[0].GetHttp().GetHostnames()))
-	return slices.Equal(got, exp)
+// samePolicyRules reports whether existing allows what want does: the same
+// kinds of rule, each with the same hostnames. Ports are not compared; the
+// server fills in each kind's default, and the driver sets none.
+func samePolicyRules(existing, want *ateapipb.EgressPolicy) bool {
+	return slices.Equal(ruleKeys(existing), ruleKeys(want))
 }
+
+// ruleKeys describes each rule by its kind and sorted hostnames, sorted, so
+// policies compare regardless of order.
+func ruleKeys(p *ateapipb.EgressPolicy) []string {
+	var keys []string
+	for _, r := range p.GetRules() {
+		kind, hosts := "other", []string(nil)
+		switch {
+		case r.GetHttp() != nil:
+			kind, hosts = "http", r.GetHttp().GetHostnames()
+		case r.GetHttps() != nil:
+			kind, hosts = "https", r.GetHttps().GetHostnames()
+		}
+		keys = append(keys, kind+" "+strings.Join(slices.Sorted(slices.Values(hosts)), ","))
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// httpsPort is the endpoint Services' HTTPS port, the default the policy's
+// https rule covers.
+const httpsPort = 443
 
 // preflight fails unless the Services of endpoints 0 through n-1 exist, so a
-// run never measures requests to names that do not resolve.
-func preflight(ctx context.Context, k8s kubernetes.Interface, n int) error {
+// run never measures requests to names that do not resolve. Over HTTPS it also
+// needs their HTTPS port and a gateway that trusts the target's certificate.
+func preflight(ctx context.Context, k8s kubernetes.Interface, n int, scheme string) error {
 	list, err := k8s.CoreV1().Services(egressapi.TargetNamespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("listing endpoint Services in %s: %w", egressapi.TargetNamespace, err)
 	}
-	have := make(map[string]bool, len(list.Items))
+	services := make(map[string]corev1.Service, len(list.Items))
 	for _, svc := range list.Items {
-		have[svc.Name] = true
+		services[svc.Name] = svc
 	}
-	var missing []string
+	var missing, noHTTPS []string
 	for i := range n {
-		if !have[egressapi.ServiceName(i)] {
+		svc, ok := services[egressapi.ServiceName(i)]
+		switch {
+		case !ok:
 			missing = append(missing, egressapi.ServiceName(i))
+		case scheme == egressapi.SchemeHTTPS && !slices.ContainsFunc(svc.Spec.Ports, func(p corev1.ServicePort) bool { return p.Port == httpsPort }):
+			noHTTPS = append(noHTTPS, egressapi.ServiceName(i))
 		}
 	}
-	if len(missing) == 0 {
-		return nil
+	if len(missing) > 0 {
+		return fmt.Errorf("%d of %d endpoint Services are missing in %s (%s); deploy them with tools/egress-tests/deploy.sh --deploy --endpoints %d",
+			len(missing), n, egressapi.TargetNamespace, firstFew(missing), n)
 	}
-	shown := missing[:min(len(missing), 5)]
+	if len(noHTTPS) > 0 {
+		return fmt.Errorf("%d of %d endpoint Services have no port %d (%s); redeploy them with tools/egress-tests/deploy.sh --deploy --https --endpoints %d",
+			len(noHTTPS), n, httpsPort, firstFew(noHTTPS), n)
+	}
+	if scheme == egressapi.SchemeHTTPS {
+		return checkGatewayTrust(ctx, k8s)
+	}
+	return nil
+}
+
+// firstFew lists up to five names, and how many more there are.
+func firstFew(names []string) string {
+	shown := names[:min(len(names), 5)]
 	more := ""
-	if len(missing) > len(shown) {
-		more = fmt.Sprintf(" and %d more", len(missing)-len(shown))
+	if len(names) > len(shown) {
+		more = fmt.Sprintf(" and %d more", len(names)-len(shown))
 	}
-	return fmt.Errorf("%d of %d endpoint Services are missing in %s (%s%s); deploy them with tools/egress-tests/deploy.sh --deploy --endpoints %d",
-		len(missing), n, egressapi.TargetNamespace, strings.Join(shown, ", "), more, n)
+	return strings.Join(shown, ", ") + more
 }

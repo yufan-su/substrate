@@ -19,7 +19,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,6 +53,7 @@ type runConfig struct {
 	ProgressInterval  time.Duration `json:"progressInterval"`
 	Atespace          string        `json:"atespace"`
 	Template          string        `json:"template"`
+	Scheme            string        `json:"scheme"`
 }
 
 func (c *runConfig) validate() error {
@@ -75,6 +78,8 @@ func (c *runConfig) validate() error {
 		return fmt.Errorf("--resume-timeout must be positive, got %v", c.ResumeTimeout)
 	case c.ProgressInterval < 0:
 		return fmt.Errorf("--progress-interval cannot be negative, got %v", c.ProgressInterval)
+	case c.Scheme != egressapi.SchemeHTTP && c.Scheme != egressapi.SchemeHTTPS:
+		return fmt.Errorf("--scheme must be %s or %s, got %q", egressapi.SchemeHTTP, egressapi.SchemeHTTPS, c.Scheme)
 	case c.Atespace == "" || c.Template == "":
 		return errors.New("--atespace and --template are required")
 	}
@@ -103,6 +108,8 @@ type runner struct {
 	// cleanupTimeout bounds stopping the loops and suspending the actors,
 	// which still happen after the run is interrupted.
 	cleanupTimeout time.Duration
+	// rand picks which actors a run resumes.
+	rand *rand.Rand
 }
 
 func newRunner(cfg runConfig, api ateapipb.ControlClient, k8s kubernetes.Interface, router *routerClient, out io.Writer) *runner {
@@ -116,6 +123,7 @@ func newRunner(cfg runConfig, api ateapipb.ControlClient, k8s kubernetes.Interfa
 		createTimeout:  2 * time.Minute,
 		pollInterval:   200 * time.Millisecond,
 		cleanupTimeout: 3 * time.Minute,
+		rand:           rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())),
 	}
 }
 
@@ -131,7 +139,7 @@ func (r *runner) run(ctx context.Context) (*report, error) {
 	rep := &report{Config: r.cfg, Started: time.Now()}
 	defer func() { rep.Finished = time.Now() }()
 
-	if err := preflight(ctx, r.k8s, r.cfg.Endpoints); err != nil {
+	if err := preflight(ctx, r.k8s, r.cfg.Endpoints, r.cfg.Scheme); err != nil {
 		return nil, err
 	}
 
@@ -141,12 +149,7 @@ func (r *runner) run(ctx context.Context) (*report, error) {
 		return rep, ctx.Err()
 	}
 
-	var names []string
-	for i, ok := range created {
-		if ok && len(names) < r.cfg.Parallel {
-			names = append(names, actorName(i))
-		}
-	}
+	names := r.pickActors(created)
 	if len(names) < r.cfg.Parallel {
 		r.logf("only %d actors were created; resuming %d instead of %d", len(names), len(names), r.cfg.Parallel)
 	}
@@ -276,7 +279,7 @@ func (r *runner) ensurePolicy(ctx context.Context, name string, want *ateapipb.E
 	}); err != nil {
 		return false, err
 	}
-	if samePolicyHosts(existing, want) {
+	if samePolicyRules(existing, want) {
 		return false, nil
 	}
 	// The update needs the current UID and version as preconditions.
@@ -286,6 +289,27 @@ func (r *runner) ensurePolicy(ctx context.Context, name string, want *ateapipb.E
 		return err
 	})
 	return err == nil, err
+}
+
+// pickActors returns the names of Parallel actors chosen at random among the
+// created ones, or of all of them if fewer were created. Picking at random
+// spreads runs over the whole population instead of always resuming the same
+// first actors, so successive runs also resume actors that never ran.
+func (r *runner) pickActors(created []bool) []string {
+	var idx []int
+	for i, ok := range created {
+		if ok {
+			idx = append(idx, i)
+		}
+	}
+	r.rand.Shuffle(len(idx), func(i, j int) { idx[i], idx[j] = idx[j], idx[i] })
+	idx = idx[:min(len(idx), r.cfg.Parallel)]
+	slices.Sort(idx)
+	names := make([]string, len(idx))
+	for i, n := range idx {
+		names[i] = actorName(n)
+	}
+	return names
 }
 
 // actorRun is one resumed actor and what happened to it.
@@ -380,6 +404,7 @@ func (r *runner) startLoops(ctx context.Context, ready []*actorRun, rep *report)
 		NewConnPerRequest: r.cfg.ConnMode == connModeNewConn,
 		RequestTimeoutMs:  r.cfg.RequestTimeout.Milliseconds(),
 		IntervalMs:        r.cfg.RequestInterval.Milliseconds(),
+		Scheme:            r.cfg.Scheme,
 	}
 	res := newPhase()
 	start := time.Now()
@@ -409,7 +434,7 @@ func (r *runner) startLoops(ctx context.Context, ready []*actorRun, rep *report)
 		}
 	}
 	rep.Start = res.result(len(ready), time.Since(start))
-	r.logf("start: %d/%d loops running against %d endpoints (%s)", len(started), len(ready), r.cfg.Endpoints, r.cfg.ConnMode)
+	r.logf("start: %d/%d loops running against %d endpoints (%s, %s)", len(started), len(ready), r.cfg.Endpoints, r.cfg.Scheme, r.cfg.ConnMode)
 	return started
 }
 

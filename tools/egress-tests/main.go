@@ -34,6 +34,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/installdefaults"
 	"github.com/agent-substrate/substrate/internal/portforward"
 	"github.com/agent-substrate/substrate/tools/egress-tests/internal/egressapi"
+	"github.com/agent-substrate/substrate/tools/egress-tests/internal/targetcert"
 )
 
 const usage = `Usage: go run ./tools/egress-tests <command> [flags]
@@ -41,6 +42,7 @@ const usage = `Usage: go run ./tools/egress-tests <command> [flags]
 Commands:
   run       create the actors, run the egress loops, and print a report
   cleanup   delete the actors a run created
+  certs     write a CA and the target's HTTPS certificate (deploy.sh uses this)
 
 Run "go run ./tools/egress-tests <command> -h" for the flags of a command.
 `
@@ -59,6 +61,8 @@ func main() {
 		err = runCmd(ctx, os.Args[2:])
 	case "cleanup":
 		err = cleanupCmd(ctx, os.Args[2:])
+	case "certs":
+		err = certsCmd(os.Args[2:])
 	case "-h", "--help", "help":
 		fmt.Fprint(os.Stdout, usage)
 		return
@@ -125,6 +129,7 @@ func runCmd(ctx context.Context, args []string) error {
 	fs.DurationVar(&cfg.ResumeTimeout, "resume-timeout", 5*time.Minute, "Per actor: how long to keep resuming (a full pool is retried) and waiting for it to answer.")
 	fs.DurationVar(&cfg.ProgressInterval, "progress-interval", 30*time.Second, "How often to print progress; 0 turns it off.")
 	fs.StringVar(&cfg.Template, "template", "egress-tests-actor", "Actor template the actors are created from.")
+	fs.StringVar(&cfg.Scheme, "scheme", egressapi.SchemeHTTP, "Scheme the loops request endpoints over: http, or https through the gateway's TLS interception (needs deploy.sh --https).")
 	routerURL := fs.String("router-url", "", "atenet router base URL. Empty port-forwards to the atenet-router Service.")
 	output := fs.String("output", "", "If set, write the report as JSON to this file.")
 	if err := fs.Parse(args); err != nil {
@@ -202,4 +207,20 @@ func cleanupCmd(ctx context.Context, args []string) error {
 		return fmt.Errorf("%d actors were not deleted", res.Failed)
 	}
 	return ctx.Err()
+}
+
+func certsCmd(args []string) error {
+	fs := flag.NewFlagSet("certs", flag.ExitOnError)
+	out := fs.String("out", "", "Directory to write ca.crt, tls.crt and tls.key to. Required.")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *out == "" {
+		return errors.New("--out is required")
+	}
+	bundle, err := targetcert.Generate(time.Now())
+	if err != nil {
+		return err
+	}
+	return bundle.Write(*out)
 }

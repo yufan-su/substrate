@@ -28,14 +28,23 @@ func ServiceName(i int) string {
 	return fmt.Sprintf("egress-target-%d", i)
 }
 
+// EndpointDomain is the DNS domain every endpoint name sits directly under.
+const EndpointDomain = TargetNamespace + ".svc.cluster.local"
+
+// EndpointHostPattern matches every endpoint name and nothing below them: a
+// wildcard stands for exactly one leftmost label. The target's certificate is
+// issued for it.
+const EndpointHostPattern = "*." + EndpointDomain
+
 // EndpointHost is the DNS name of endpoint i. It is the one place the
 // endpoint names are defined: the actor's loop calls these names and the
 // driver's egress policy allows them.
 func EndpointHost(i int) string {
-	return ServiceName(i) + "." + TargetNamespace + ".svc.cluster.local"
+	return ServiceName(i) + "." + EndpointDomain
 }
 
-// EndpointURL is the URL the actor's loop requests for endpoint i.
-func EndpointURL(i int) string {
-	return "http://" + EndpointHost(i) + "/"
+// EndpointURL is the URL the actor's loop requests for endpoint i over scheme,
+// http or https, each on its default port.
+func EndpointURL(i int, scheme string) string {
+	return scheme + "://" + EndpointHost(i) + "/"
 }

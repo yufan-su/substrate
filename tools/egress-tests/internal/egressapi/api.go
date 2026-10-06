@@ -30,6 +30,12 @@ const (
 // DefaultRequestTimeoutMs applies when StartRequest.RequestTimeoutMs is zero.
 const DefaultRequestTimeoutMs = 5000
 
+// The schemes the loop can request endpoints over.
+const (
+	SchemeHTTP  = "http"
+	SchemeHTTPS = "https"
+)
+
 // StartRequest is the JSON body of POST /start.
 type StartRequest struct {
 	// Endpoints is C: the loop requests EndpointURL(0) through
@@ -42,6 +48,16 @@ type StartRequest struct {
 	RequestTimeoutMs int64 `json:"requestTimeoutMs"`
 	// IntervalMs is the pause after each request; zero sends back to back.
 	IntervalMs int64 `json:"intervalMs"`
+	// Scheme is SchemeHTTP or SchemeHTTPS; empty means SchemeHTTP.
+	Scheme string `json:"scheme,omitempty"`
+}
+
+// URLScheme is the scheme the loop requests endpoints over.
+func (r *StartRequest) URLScheme() string {
+	if r.Scheme == "" {
+		return SchemeHTTP
+	}
+	return r.Scheme
 }
 
 // Validate reports whether r can start a loop.
@@ -54,6 +70,9 @@ func (r *StartRequest) Validate() error {
 	}
 	if r.IntervalMs < 0 {
 		return fmt.Errorf("intervalMs cannot be negative: %d", r.IntervalMs)
+	}
+	if r.Scheme != "" && r.Scheme != SchemeHTTP && r.Scheme != SchemeHTTPS {
+		return fmt.Errorf("scheme must be %s or %s, got %q", SchemeHTTP, SchemeHTTPS, r.Scheme)
 	}
 	return nil
 }
