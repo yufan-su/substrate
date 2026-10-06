@@ -280,6 +280,23 @@ go run ./tools/egress-tests run --actors 10 --parallel 1 --endpoints 10 \
 It should end with `verify     PASS`. At 30s the cAdvisor-only components
 are `insufficient`, as expected.
 
+### Plotting runs
+
+`plot/plot.py` draws one or more `--output` reports as one self-contained
+HTML page: CPU, working set, throttling, the gateway's connections, req/s
+and p99, one panel each, on a shared axis of seconds since the steady
+window started. Each component keeps one color; each run gets a dash style.
+`plot/verify.py` runs the checks that span runs: gateway cost per 1000
+req/s across B, each run's own connection verdict, runs with and without
+`--usage`, and each run's driver overhead. `make verify` runs their tests
+through `hack/verify/egress-plot.sh`.
+
+```bash
+python3 -m venv /tmp/egress-plot && /tmp/egress-plot/bin/pip install -r tools/egress-tests/plot/requirements.txt
+/tmp/egress-plot/bin/python tools/egress-tests/plot/plot.py b10.json b100.json -o runs.html
+/tmp/egress-plot/bin/python tools/egress-tests/plot/verify.py b*.json
+```
+
 ## Reading the report
 
 This is a real run: `--actors 100 --parallel 1 --endpoints 10 --duration 2m

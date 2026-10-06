@@ -30,7 +30,8 @@ const (
 // bucketBounds holds the inclusive upper bound, in microseconds, of each
 // finite bucket: 10^(k/20) for k = 0, 1, ... up to the first bound at or past
 // maxBucketMicros. Neighboring bounds differ by about 12%, which is the
-// resolution of every quantile read from a Histogram.
+// resolution of every quantile read from a Histogram. plot/runs.py mirrors
+// these bounds in bucket_bounds; change both.
 var bucketBounds = func() []float64 {
 	var bounds []float64
 	for k := 0; ; k++ {
