@@ -381,16 +381,24 @@ Record the `atenet-egress` replica count with each result. The default is 1.
 - **Keep-alive mode holds one tunnel per actor and endpoint.** Every actor
   connection is its own atunnel tunnel, and its own connection in the gateway's
   `mitm_internal` cluster.
-  - That cluster allows 16,384 tunnels per gateway replica.
+  - The `egress-test` tree allows 16,384 tunnels per gateway replica in that
+    cluster. Upstream sets no breaker there, so Envoy's default of 1,024
+    applies, and CONNECTs fail past roughly 1k open tunnels (B×C). A cluster
+    may also change the limit in the `atenet-egress` ConfigMap.
   - Past that, the gateway refuses new tunnels, and the actor sees `EOF` or
     `connection reset`.
   - To confirm, port-forward to the gateway's Envoy admin port
     (`kubectl -n ate-system port-forward deploy/atenet-egress 15000`) and read
-    `cluster.mitm_internal.upstream_cx_overflow` under `/stats`.
+    `cluster.mitm_internal.upstream_cx_overflow` under `/stats`. The report's
+    `mitm_internal` cx counters, and
+    `cluster.<name>.circuit_breakers.default.cx_open`, which the `memory` line
+    reports as `breaker OPENED`, show which limit applies.
   - The clusters that connect to destinations (`egress_forward_proxy` and
     `egress_forward_proxy_cleartext`) still use Envoy's defaults of 1,024
     connections. Bursts of simultaneous requests to the same destination push
-    those counts up.
+    those counts up. The cleartext proxy's connections scale with concurrent
+    upstream connections to the targets, not with tunnels. They peaked at 631
+    at B=10 C=100 and 121 at B=100 C=10; the `memory` line prints the peak.
 - **HTTPS costs more per connection.**
   - Session resumption is off, so new-conn mode does a full handshake with the
     gateway on every request.

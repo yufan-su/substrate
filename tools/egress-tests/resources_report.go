@@ -574,6 +574,12 @@ func (rep *report) printResources(w io.Writer) {
 	cx := ""
 	if over, ok := envoyDelta(res.Envoy, "cluster.mitm_internal.upstream_cx_overflow"); ok {
 		cx = fmt.Sprintf("; mitm_internal cx overflow +%.0f, active max %.0f", over, envoyMax(res.Envoy, "cluster.mitm_internal.upstream_cx_active"))
+		cx += fmt.Sprintf("; cleartext cx active max %.0f", envoyMax(res.Envoy, "cluster.egress_forward_proxy_cleartext.upstream_cx_active"))
+		for _, c := range envoyClusters {
+			if envoyMax(res.Envoy, "cluster."+c+".circuit_breakers.default.cx_open") > 0 {
+				cx += "; " + c + " connection breaker OPENED"
+			}
+		}
 	}
 	if len(mem) > 0 || cx != "" {
 		fmt.Fprintf(w, "%-10s steady max working set: %s%s\n", "memory", strings.Join(mem, " "), cx)

@@ -71,7 +71,8 @@ func testResourceReport() *report {
 			Driver:  driverUsage{Steady: usageWindow{CPUSeconds: 1.2, WallSeconds: 60, Cores: 0.02}},
 			Envoy: []envoySample{
 				{T: t0.Add(10 * s), Label: markSteadyBegin, Pod: "gw", Counters: map[string]float64{"cluster.mitm_internal.upstream_cx_overflow": 0, "cluster.mitm_internal.upstream_cx_active": 40}},
-				{T: t0.Add(70 * s), Label: markSteadyEnd, Pod: "gw", Counters: map[string]float64{"cluster.mitm_internal.upstream_cx_overflow": 3, "cluster.mitm_internal.upstream_cx_active": 100}},
+				{T: t0.Add(70 * s), Label: markSteadyEnd, Pod: "gw", Counters: map[string]float64{"cluster.mitm_internal.upstream_cx_overflow": 3, "cluster.mitm_internal.upstream_cx_active": 100,
+					"cluster.mitm_internal.circuit_breakers.default.cx_open": 1, "cluster.egress_forward_proxy_cleartext.upstream_cx_active": 7}},
 			},
 		},
 	}
@@ -130,7 +131,7 @@ func TestSummarizeResources(t *testing.T) {
 		"gateway/ext-proc 0.400",
 		"driver 0.020",
 		"gateway 128Mi workers 128Mi",
-		"mitm_internal cx overflow +3, active max 100",
+		"mitm_internal cx overflow +3, active max 100; cleartext cx active max 7; mitm_internal connection breaker OPENED",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("printed resources lack %q:\n%s", want, out.String())

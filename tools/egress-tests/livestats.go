@@ -29,8 +29,12 @@ const (
 	metricProcessRSS = "process_resident_memory_bytes"
 )
 
-// envoyStatsFilter selects the gateway's connection counters from /stats.
-const envoyStatsFilter = `^cluster\.(mitm_internal|egress_forward_proxy_cleartext)\.upstream_cx_(total|active|overflow)$`
+// envoyStatsFilter selects the gateway's connection counters, and the gauge
+// that is 1 while a cluster's connection breaker is open, from /stats.
+const envoyStatsFilter = `^cluster\.(mitm_internal|egress_forward_proxy_cleartext)\.(upstream_cx_(total|active|overflow)|circuit_breakers\.default\.cx_open)$`
+
+// envoyClusters are the gateway clusters the sampler reads.
+var envoyClusters = []string{"mitm_internal", "egress_forward_proxy_cleartext"}
 
 // envoyCxTotal counts the connections the gateway opened toward the actors'
 // tunnels, one per actor connection.

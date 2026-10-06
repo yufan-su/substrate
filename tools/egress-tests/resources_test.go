@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -137,9 +138,20 @@ func TestParseProcessMetrics(t *testing.T) {
 
 func TestParseEnvoyStats(t *testing.T) {
 	t.Parallel()
-	got := parseEnvoyStats([]byte("cluster.mitm_internal.upstream_cx_total: 42\ncluster.x.upstream_rq_time: P0(nan,1)\nnot a stat\n"))
-	if len(got) != 1 || got[envoyCxTotal] != 42 {
-		t.Errorf("parseEnvoyStats = %v, want only %s=42", got, envoyCxTotal)
+	got := parseEnvoyStats([]byte("cluster.mitm_internal.upstream_cx_total: 42\ncluster.mitm_internal.circuit_breakers.default.cx_open: 1\ncluster.x.upstream_rq_time: P0(nan,1)\nnot a stat\n"))
+	if len(got) != 2 || got[envoyCxTotal] != 42 || got["cluster.mitm_internal.circuit_breakers.default.cx_open"] != 1 {
+		t.Errorf("parseEnvoyStats = %v, want %s=42 and cx_open=1", got, envoyCxTotal)
+	}
+	filter := regexp.MustCompile(envoyStatsFilter)
+	for _, c := range envoyClusters {
+		for _, stat := range []string{"upstream_cx_total", "upstream_cx_active", "upstream_cx_overflow", "circuit_breakers.default.cx_open"} {
+			if name := "cluster." + c + "." + stat; !filter.MatchString(name) {
+				t.Errorf("envoyStatsFilter does not select %s", name)
+			}
+		}
+	}
+	if filter.MatchString("cluster.mitm_internal.circuit_breakers.high.cx_open") {
+		t.Errorf("envoyStatsFilter selects the high-priority breaker")
 	}
 }
 
