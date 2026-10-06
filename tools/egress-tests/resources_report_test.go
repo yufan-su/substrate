@@ -134,7 +134,7 @@ func TestSummarizeResources(t *testing.T) {
 		"gateway/ext-proc 0.400",
 		"driver 0.020",
 		"gateway 128Mi workers 128Mi",
-		"envoy      steady: mitm_internal cx overflow +3, CONNECTs held +3 (admitted later ≈0, cancelled +50, refused +0); whole run: pending queue depth max 12; whole run: cx active max mitm_internal 100, egress_forward_proxy 0, egress_forward_proxy_cleartext 7; connection breaker OPENED: mitm_internal",
+		"envoy      steady: mitm_internal cx overflow +3, CONNECTs held +3 (admitted later ≈0, cancelled +50, refused at the queue +0, refused on attach +0); whole run: pending queue depth max 12; whole run: cx active max mitm_internal 100, egress_forward_proxy 0, egress_forward_proxy_cleartext 7; connection breaker OPENED: mitm_internal",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("printed resources lack %q:\n%s", want, out.String())
@@ -453,6 +453,29 @@ func TestSummarizeResourcesSettled(t *testing.T) {
 	var out bytes.Buffer
 	rep.printResources(&out)
 	want := "cores per 1000 req/s, settled: gateway 1.50 workers 0.50 (from steady +15.0s by 1.5 rounds, 1000.0 req/s)"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("printed resources lack %q:\n%s", want, out.String())
+	}
+}
+
+// TestPrintRequestBreaker checks the envoy line for a run where max_requests,
+// not max_connections, refused CONNECTs: no connection overflow, active
+// overflow and an open request breaker.
+func TestPrintRequestBreaker(t *testing.T) {
+	t.Parallel()
+	rep := testResourceReport()
+	t0 := time.Unix(1000, 0)
+	rep.Resources.Envoy = []envoySample{
+		{T: t0.Add(10 * time.Second), Label: markSteadyBegin, Pod: "gw", Counters: map[string]float64{
+			"cluster.mitm_internal.upstream_cx_overflow": 0, "cluster.mitm_internal.upstream_rq_active_overflow": 0}},
+		{T: t0.Add(70 * time.Second), Label: markSteadyEnd, Pod: "gw", Counters: map[string]float64{
+			"cluster.mitm_internal.upstream_cx_overflow": 0, "cluster.mitm_internal.upstream_rq_active_overflow": 76,
+			"cluster.mitm_internal.circuit_breakers.default.rq_open": 1}},
+	}
+	summarizeResources(rep)
+	var out bytes.Buffer
+	rep.printResources(&out)
+	want := "steady: mitm_internal cx overflow +0, CONNECTs held +0 (admitted later ≈0, cancelled +0, refused at the queue +0, refused on attach +76); whole run: cx active max mitm_internal 0, egress_forward_proxy 0, egress_forward_proxy_cleartext 0; request breaker OPENED: mitm_internal"
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("printed resources lack %q:\n%s", want, out.String())
 	}

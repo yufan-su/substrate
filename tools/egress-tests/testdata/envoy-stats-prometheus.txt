@@ -14,6 +14,12 @@ envoy_cluster_upstream_cx_total{envoy_cluster_name="egress_forward_proxy_clearte
 envoy_cluster_upstream_cx_total{envoy_cluster_name="ext_proc_server"} 22
 envoy_cluster_upstream_cx_total{envoy_cluster_name="mitm_internal"} 210
 envoy_cluster_upstream_cx_total{envoy_cluster_name="sds_mint"} 0
+# TYPE envoy_cluster_upstream_rq_active_overflow counter
+envoy_cluster_upstream_rq_active_overflow{envoy_cluster_name="egress_forward_proxy"} 0
+envoy_cluster_upstream_rq_active_overflow{envoy_cluster_name="egress_forward_proxy_cleartext"} 0
+envoy_cluster_upstream_rq_active_overflow{envoy_cluster_name="ext_proc_server"} 0
+envoy_cluster_upstream_rq_active_overflow{envoy_cluster_name="mitm_internal"} 0
+envoy_cluster_upstream_rq_active_overflow{envoy_cluster_name="sds_mint"} 0
 # TYPE envoy_cluster_upstream_rq_cancelled counter
 envoy_cluster_upstream_rq_cancelled{envoy_cluster_name="egress_forward_proxy"} 0
 envoy_cluster_upstream_rq_cancelled{envoy_cluster_name="egress_forward_proxy_cleartext"} 0
@@ -39,6 +45,12 @@ envoy_cluster_circuit_breakers_default_cx_open{envoy_cluster_name="ext_proc_serv
 envoy_cluster_circuit_breakers_default_cx_open{envoy_cluster_name="mitm_internal"} 0
 envoy_cluster_circuit_breakers_default_cx_open{envoy_cluster_name="sds_mint"} 0
 envoy_cluster_circuit_breakers_high_cx_open{envoy_cluster_name="mitm_internal"} 0
+# TYPE envoy_cluster_circuit_breakers_default_rq_open gauge
+envoy_cluster_circuit_breakers_default_rq_open{envoy_cluster_name="egress_forward_proxy"} 0
+envoy_cluster_circuit_breakers_default_rq_open{envoy_cluster_name="egress_forward_proxy_cleartext"} 0
+envoy_cluster_circuit_breakers_default_rq_open{envoy_cluster_name="ext_proc_server"} 0
+envoy_cluster_circuit_breakers_default_rq_open{envoy_cluster_name="mitm_internal"} 0
+envoy_cluster_circuit_breakers_default_rq_open{envoy_cluster_name="sds_mint"} 0
 # TYPE envoy_cluster_upstream_cx_active gauge
 envoy_cluster_upstream_cx_active{envoy_cluster_name="egress_forward_proxy"} 0
 envoy_cluster_upstream_cx_active{envoy_cluster_name="egress_forward_proxy_cleartext"} 0

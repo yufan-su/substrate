@@ -599,36 +599,48 @@ func (rep *report) printResources(w io.Writer) {
 }
 
 // envoyLine summarizes the gateway's connection counters: the tunnel
-// overflow over steady, each cluster's peak of open connections over the
-// whole run, and any connection breaker that opened during it.
+// overflow and refusals over steady, each cluster's peak of open
+// connections over the whole run, and any breaker that opened during it.
 func envoyLine(samples []envoySample) string {
 	over, ok := envoyDelta(samples, "cluster.mitm_internal.upstream_cx_overflow")
 	if !ok {
 		return ""
 	}
 	steady := fmt.Sprintf("steady: mitm_internal cx overflow +%.0f", over)
-	if over > 0 {
+	attach, _ := envoyDelta(samples, envoyRqAttachRefused)
+	if over > 0 || attach > 0 {
 		// A held CONNECT is admitted once a tunnel closes, cancelled when
-		// the actor gives up, or refused when the queue is full too.
+		// the actor gives up, or refused when the queue is full too. One
+		// that got a connection is still refused on attach when it would
+		// exceed max_requests.
 		cancelled, _ := envoyDelta(samples, envoyRqCancelled)
 		refused, _ := envoyDelta(samples, envoyRqRefused)
-		steady += fmt.Sprintf(", CONNECTs held +%.0f (admitted later ≈%.0f, cancelled +%.0f, refused +%.0f)",
-			over, max(0, over-cancelled-refused), cancelled, refused)
+		steady += fmt.Sprintf(", CONNECTs held +%.0f (admitted later ≈%.0f, cancelled +%.0f, refused at the queue +%.0f, refused on attach +%.0f)",
+			over, max(0, over-cancelled-refused-attach), cancelled, refused, attach)
 	}
 	parts := []string{steady}
+	if n, _ := envoyDelta(samples, "cluster.egress_forward_proxy_cleartext.upstream_rq_active_overflow"); n > 0 {
+		parts = append(parts, fmt.Sprintf("steady: cleartext requests refused on attach +%.0f", n))
+	}
 	if depth := envoyMax(samples, envoyPendingActive); depth > 0 {
 		parts = append(parts, fmt.Sprintf("whole run: pending queue depth max %.0f", depth))
 	}
-	var peaks, opened []string
+	var peaks, cxOpened, rqOpened []string
 	for _, c := range envoyClusters {
 		peaks = append(peaks, fmt.Sprintf("%s %.0f", c, envoyMax(samples, "cluster."+c+".upstream_cx_active")))
 		if envoyMax(samples, "cluster."+c+".circuit_breakers.default.cx_open") > 0 {
-			opened = append(opened, c)
+			cxOpened = append(cxOpened, c)
+		}
+		if envoyMax(samples, "cluster."+c+".circuit_breakers.default.rq_open") > 0 {
+			rqOpened = append(rqOpened, c)
 		}
 	}
 	parts = append(parts, "whole run: cx active max "+strings.Join(peaks, ", "))
-	if len(opened) > 0 {
-		parts = append(parts, "connection breaker OPENED: "+strings.Join(opened, ", "))
+	if len(cxOpened) > 0 {
+		parts = append(parts, "connection breaker OPENED: "+strings.Join(cxOpened, ", "))
+	}
+	if len(rqOpened) > 0 {
+		parts = append(parts, "request breaker OPENED: "+strings.Join(rqOpened, ", "))
 	}
 	return strings.Join(parts, "; ")
 }
