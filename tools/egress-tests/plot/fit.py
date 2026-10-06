@@ -166,7 +166,12 @@ def extract(path: str | Path, base: str = "") -> dict:
     row["gateway_ws_mib"] = ws_delta_mib(run, "gateway", s0, s1)
     row["worker_ws_mib"] = ws_delta_mib(run, "workers", s0, s1)
     row["first_round_s"] = lo - s0 if settled and settled.get("rule") != "1.5 rounds" else None
-    resumes = [a["resumeLatency"] / 1e6 for a in rep.get("actors") or [] if a.get("resumeLatency")]
+    # Own-snapshot resumes only, when the driver reports the source; a first
+    # resume from the golden snapshot is a different population.
+    actors = [a for a in rep.get("actors") or [] if a.get("resumeLatency")]
+    if any("resumeSource" in a for a in actors):
+        actors = [a for a in actors if a.get("resumeSource") == "own"]
+    resumes = [a["resumeLatency"] / 1e6 for a in actors]
     row["resume_p50_ms"] = rr.median(resumes) if resumes else None
     row["dns_p99_ms"] = rr.quantile_ms(loop["dns"], 0.99) if (loop.get("dns") or {}).get("count") else None
     row["p99_settled_ms"] = settled["p99"] / 1e6 if settled and settled.get("p99") else None

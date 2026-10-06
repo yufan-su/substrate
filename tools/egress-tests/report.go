@@ -105,18 +105,22 @@ type resumeResult struct {
 	phaseResult
 	ResumeLatency latencySummary `json:"resumeLatency"`
 	ReadyLatency  latencySummary `json:"readyLatency"`
+	// Sources counts the ready actors by the snapshot they resumed from.
+	Sources map[string]int `json:"sources,omitempty"`
 }
 
 type actorResult struct {
 	Name          string           `json:"name"`
 	ResumeLatency time.Duration    `json:"resumeLatency"`
 	ReadyLatency  time.Duration    `json:"readyLatency"`
+	ResumeSource  string           `json:"resumeSource,omitempty"`
 	Error         string           `json:"error,omitempty"`
 	Stats         *egressapi.Stats `json:"stats,omitempty"`
 }
 
 func (a *actorRun) result() actorResult {
-	res := actorResult{Name: a.name, ResumeLatency: a.resumeLatency, ReadyLatency: a.readyLatency, Stats: a.stats}
+	res := actorResult{Name: a.name, ResumeLatency: a.resumeLatency, ReadyLatency: a.readyLatency,
+		ResumeSource: a.resumeSource, Stats: a.stats}
 	if a.err != nil {
 		res.Error = a.err.Error()
 	}
@@ -263,6 +267,13 @@ func (rep *report) print(w io.Writer) {
 		fmt.Sprintf(" (%d actors reused, %d policies updated)", rep.Create.ActorsReused, rep.Create.PoliciesUpdated))
 	printPhase(w, "resume", rep.Resume.phaseResult, "")
 	fmt.Fprintf(w, "%-10s resume %s; ready %s\n", "", rep.Resume.ResumeLatency, rep.Resume.ReadyLatency)
+	if len(rep.Resume.Sources) > 0 {
+		var src []string
+		for _, k := range slices.Sorted(maps.Keys(rep.Resume.Sources)) {
+			src = append(src, fmt.Sprintf("%s %d", k, rep.Resume.Sources[k]))
+		}
+		fmt.Fprintf(w, "%-10s resumed from: %s\n", "", strings.Join(src, ", "))
+	}
 	printPhase(w, "start", rep.Start, "")
 
 	if s := rep.Loop; s != nil && s.Requests > 0 {

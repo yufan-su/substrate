@@ -233,6 +233,13 @@ At B=10 and C=100, a round takes 10s and opens 1,000 tunnels. Steady
 charges the workers 4.39 cores per 1000 req/s and the gateway 1.20. Settled
 gives about 2.5 and 1.0.
 
+**Resume sources.** Before each resume the driver reads the actor's
+external snapshot. `resume.sources` counts the actors that resumed from
+their own snapshot, from a tag's (the golden snapshot, until an actor's
+first suspend) or from none, and each actor carries `resumeSource`. A
+first resume from the golden snapshot is slower, so compare resume
+latency within one source.
+
 **Baseline.** `--pre-idle 30s` samples for that long before create, with
 none of the run's actors running. `resources.baseline` holds each
 component's and container's use over that phase, and the `cpu` lines add a

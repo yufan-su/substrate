@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc/status"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/agent-substrate/substrate/tools/egress-tests/internal/egressapi"
 )
@@ -380,6 +381,9 @@ type actorRun struct {
 	resumeLatency time.Duration
 	// readyLatency runs from the resume to the first answer through the router.
 	readyLatency time.Duration
+	// resumeSource is the snapshot the resume restored from, read just
+	// before it: resumeFromOwn, resumeFromTag or resumeFromNone.
+	resumeSource string
 	resumed      bool
 	// mayBeRunning is set when a resume failed in a way that may still have
 	// committed, such as a timeout, so the actor is suspended anyway.
@@ -401,6 +405,13 @@ func (r *runner) resumeActors(ctx context.Context, names []string, rep *report) 
 		actors[i] = a
 		actorCtx, cancel := context.WithTimeout(ctx, r.cfg.ResumeTimeout)
 		defer cancel()
+
+		a.resumeSource = resumeFromUnknown
+		if got, err := r.api.GetActor(actorCtx, &ateapipb.GetActorRequest{
+			Actor: &ateapipb.ObjectRef{Atespace: r.cfg.Atespace, Name: a.name},
+		}); err == nil {
+			a.resumeSource = resumeSource(got)
+		}
 
 		resumeStart := time.Now()
 		err := r.backoff.retry(actorCtx, func(ctx context.Context) error {
@@ -441,9 +452,44 @@ func (r *runner) resumeActors(ctx context.Context, names []string, rep *report) 
 	}
 	rep.Resume.ResumeLatency = summarize(resumeLat)
 	rep.Resume.ReadyLatency = summarize(readyLat)
+	rep.Resume.Sources = map[string]int{}
+	for _, a := range actors {
+		if a.ready {
+			rep.Resume.Sources[a.resumeSource]++
+		}
+	}
 	r.logf("resume: %d/%d ready in %v (resume %s; ready %s)", rep.Resume.Succeeded, len(names),
 		rep.Resume.Duration.Round(time.Millisecond), rep.Resume.ResumeLatency, rep.Resume.ReadyLatency)
 	return actors
+}
+
+// Snapshots a resume can restore from.
+const (
+	// resumeFromOwn is a snapshot the actor took at its last suspend.
+	resumeFromOwn = "own"
+	// resumeFromTag is a tag's snapshot, such as the template's golden
+	// one, borrowed until the actor's first suspend.
+	resumeFromTag = "tag"
+	// resumeFromNone means the actor has no snapshot and boots fresh.
+	resumeFromNone    = "none"
+	resumeFromUnknown = "unknown"
+)
+
+// resumeSource classifies the external snapshot an actor would resume
+// from: its own when the snapshot sits under the actor's prefix.
+func resumeSource(a *ateapipb.Actor) string {
+	uri := a.GetStatus().GetExternalSnapshot().GetSnapshotUri()
+	if uri == "" {
+		return resumeFromNone
+	}
+	u, err := resources.ParseSnapshotURI(uri)
+	if err != nil {
+		return resumeFromUnknown
+	}
+	if u.Owner() == resources.ActorSnapshotOwner(u.Atespace(), a.GetMetadata().GetUid()) {
+		return resumeFromOwn
+	}
+	return resumeFromTag
 }
 
 // waitReady polls the actor's readiness route through the router: right after

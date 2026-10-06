@@ -198,6 +198,18 @@ class ExtractTest(unittest.TestCase):
         self.assertAlmostEqual(row["p99_settled_ms"], 3.548)
         self.assertAlmostEqual(row["gateway_ws_mib"], 30)
 
+    def test_resume_p50_counts_own_snapshots_only(self):
+        report = json.loads(FIXTURE.read_text())
+        report["actors"] = [
+            {"name": "egress-0", "resumeLatency": 400e6, "resumeSource": "own"},
+            {"name": "egress-1", "resumeLatency": 420e6, "resumeSource": "own"},
+            {"name": "egress-2", "resumeLatency": 1600e6, "resumeSource": "tag"},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "r.json"
+            p.write_text(json.dumps(report))
+            self.assertAlmostEqual(fit.extract(p)["resume_p50_ms"], 410)
+
     def test_no_settled_p99_without_the_driver_field(self):
         self.assertIsNone(fit.extract(FIXTURE)["p99_settled_ms"])
 

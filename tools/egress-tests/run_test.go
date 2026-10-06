@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
@@ -69,6 +70,9 @@ type fakeAPI struct {
 	// resumeLostAnswer makes every ResumeActor commit and then time out.
 	resumeLostAnswer bool
 	nextUID          int
+	// snapshots maps an actor to its external snapshot URI; GetActor reports
+	// actor <name> with UID uid-<name>.
+	snapshots map[string]string
 }
 
 func newFakeAPI() *fakeAPI {
@@ -99,6 +103,21 @@ func (f *fakeAPI) isRunning(name string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.actors[name] == "running"
+}
+
+func (f *fakeAPI) GetActor(_ context.Context, in *ateapipb.GetActorRequest, _ ...grpc.CallOption) (*ateapipb.Actor, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	name := in.GetActor().GetName()
+	f.record("GetActor", name)
+	if _, ok := f.actors[name]; !ok {
+		return nil, status.Error(codes.NotFound, "no actor")
+	}
+	a := &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Name: name, Uid: "uid-" + name}, Status: &ateapipb.ActorStatus{}}
+	if uri := f.snapshots[name]; uri != "" {
+		a.Status.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: uri}
+	}
+	return a, nil
 }
 
 func (f *fakeAPI) CreateActor(_ context.Context, in *ateapipb.CreateActorRequest, _ ...grpc.CallOption) (*ateapipb.Actor, error) {
@@ -414,17 +433,53 @@ func wantHosts(n int) []string {
 	return hosts
 }
 
+// sourcesLine is how the report prints resume sources: "none 1, own 2".
+func sourcesLine(sources map[string]int) string {
+	var parts []string
+	for _, k := range slices.Sorted(maps.Keys(sources)) {
+		parts = append(parts, fmt.Sprintf("%s %d", k, sources[k]))
+	}
+	return strings.Join(parts, ", ")
+}
+
 func TestRun(t *testing.T) {
 	for _, mode := range []string{connModeKeepAlive, connModeNewConn} {
 		t.Run(mode, func(t *testing.T) {
 			cfg := testConfig()
 			cfg.ConnMode = mode
 			api := newFakeAPI()
+			// The run resumes actors at random, so every actor gets a source:
+			// its own snapshot, the golden tag, or none, by index mod 3.
+			wantSource := map[string]string{}
+			api.snapshots = map[string]string{}
+			for i := range cfg.Actors {
+				name := actorName(i)
+				switch i % 3 {
+				case 0:
+					api.snapshots[name] = "gs://b/r/atespaces/egress-tests/actors/uid-" + name + "/snapshots/s"
+					wantSource[name] = resumeFromOwn
+				case 1:
+					api.snapshots[name] = "gs://b/r/atespaces/ate-golden/tags/golden"
+					wantSource[name] = resumeFromTag
+				default:
+					wantSource[name] = resumeFromNone
+				}
+			}
 			r, fr, out := newTestRunner(t, cfg, api, cfg.Endpoints)
 
 			rep, err := r.run(t.Context())
 			if err != nil {
 				t.Fatalf("run: %v\n%s", err, out)
+			}
+			wantSources := map[string]int{}
+			for _, a := range rep.Actors {
+				wantSources[wantSource[a.Name]]++
+				if a.ResumeSource != wantSource[a.Name] {
+					t.Errorf("%s resumed from %q, want %q", a.Name, a.ResumeSource, wantSource[a.Name])
+				}
+			}
+			if len(rep.Actors) != cfg.Parallel || !maps.Equal(rep.Resume.Sources, wantSources) {
+				t.Errorf("resume sources = %v over %d actors, want %v over %d", rep.Resume.Sources, len(rep.Actors), wantSources, cfg.Parallel)
 			}
 
 			if got := api.callCount("CreateActor"); got != cfg.Actors {
@@ -487,7 +542,8 @@ func TestRun(t *testing.T) {
 
 			var printed bytes.Buffer
 			rep.print(&printed)
-			for _, want := range []string{"scheme=http ", "request-interval=0s", "300 requests", "timeout=3", "egress-target-0 (3/300)"} {
+			for _, want := range []string{"scheme=http ", "request-interval=0s", "300 requests", "timeout=3", "egress-target-0 (3/300)",
+				"resumed from: " + sourcesLine(wantSources)} {
 				if !strings.Contains(printed.String(), want) {
 					t.Errorf("printed report lacks %q:\n%s", want, printed.String())
 				}
@@ -1060,6 +1116,33 @@ func TestLostAnswers(t *testing.T) {
 			tc.setup(api)
 			r, _, _ := newTestRunner(t, testConfig(), api, testConfig().Endpoints)
 			tc.check(t, r, api)
+		})
+	}
+}
+
+func TestResumeSource(t *testing.T) {
+	t.Parallel()
+	const loc = "gs://bucket/root/atespaces/egress-tests"
+	for _, tc := range []struct {
+		name string
+		uri  string
+		want string
+	}{
+		{name: "own snapshot", uri: loc + "/actors/uid-a/snapshots/s1", want: resumeFromOwn},
+		{name: "golden tag, borrowed", uri: "gs://bucket/root/atespaces/ate-golden/tags/t1", want: resumeFromTag},
+		{name: "another actor's snapshot", uri: loc + "/actors/uid-b/snapshots/s1", want: resumeFromTag},
+		{name: "no snapshot", uri: "", want: resumeFromNone},
+		{name: "unparsable", uri: "gs://bucket/elsewhere", want: resumeFromUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Uid: "uid-a"}, Status: &ateapipb.ActorStatus{}}
+			if tc.uri != "" {
+				a.Status.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: tc.uri}
+			}
+			if got := resumeSource(a); got != tc.want {
+				t.Errorf("resumeSource(%q) = %q, want %q", tc.uri, got, tc.want)
+			}
 		})
 	}
 }
