@@ -132,12 +132,17 @@ func runCmd(ctx context.Context, args []string) error {
 	fs.StringVar(&cfg.Scheme, "scheme", egressapi.SchemeHTTP, "Scheme the loops request endpoints over: http, or https through the gateway's TLS interception (needs deploy.sh --https).")
 	routerURL := fs.String("router-url", "", "atenet router base URL. Empty port-forwards to the atenet-router Service.")
 	output := fs.String("output", "", "If set, write the report as JSON to this file.")
+	resources := fs.Bool("resources", false, "Sample the CPU and memory of the components on the egress path during the run.")
+	resourcesInterval := fs.Duration("resources-interval", time.Second, "How often --resources reads the live sources (Go process counters, Envoy stats).")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	cfg.Atespace = cf.atespace
 	if err := cfg.validate(); err != nil {
 		return err
+	}
+	if *resources && *resourcesInterval <= 0 {
+		return fmt.Errorf("--resources-interval must be positive, got %v", *resourcesInterval)
 	}
 
 	conn, err := cf.connect(ctx)
@@ -161,6 +166,9 @@ func runCmd(ctx context.Context, args []string) error {
 	}
 
 	r := newRunner(cfg, conn.api, conn.k8s, newRouterClient(*routerURL, cfg.Atespace, cfg.Parallel), os.Stdout)
+	if *resources {
+		r.res = newResourceSampler(restRawGetter{conn.k8s.CoreV1().RESTClient()}, conn.k8s, *resourcesInterval)
+	}
 	rep, runErr := r.run(ctx)
 	if rep != nil {
 		rep.print(os.Stdout)
