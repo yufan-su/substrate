@@ -16,7 +16,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"math"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -206,6 +208,27 @@ func TestPrintVerify(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestPlotFixtureMatchesReport decodes the Python tests' fixture as the Go
+// report, rejecting unknown fields, so a field the plots read cannot be
+// renamed or dropped on the Go side without this test noticing.
+func TestPlotFixtureMatchesReport(t *testing.T) {
+	t.Parallel()
+	f, err := os.Open("plot/testdata/run-b10.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	dec := json.NewDecoder(f)
+	dec.DisallowUnknownFields()
+	var rep report
+	if err := dec.Decode(&rep); err != nil {
+		t.Fatalf("the plot fixture no longer matches the report: %v", err)
+	}
+	if rep.phase("steady").Start.IsZero() || rep.Resources == nil || len(rep.Resources.Series) == 0 || len(rep.Resources.Envoy) == 0 || len(rep.Resources.Verify) == 0 {
+		t.Errorf("fixture lacks what the plots read: steady phase, resources series, envoy samples and verify results")
 	}
 }
 
