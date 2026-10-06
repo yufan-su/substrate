@@ -32,18 +32,22 @@ const (
 )
 
 // envoyClusters are the gateway clusters the sampler reads: the actors'
-// tunnels and the cleartext connections to the targets.
-var envoyClusters = []string{"mitm_internal", "egress_forward_proxy_cleartext"}
+// tunnels, and the TLS and cleartext connections to the targets, which
+// HTTPS and HTTP requests use in turn.
+var envoyClusters = []string{"mitm_internal", "egress_forward_proxy", "egress_forward_proxy_cleartext"}
 
 // envoyStats maps each Prometheus metric the sampler reads from the gateway
 // to the admin stat it is reported under, so the report keys stay
 // cluster.<cluster>.<stat> whatever the endpoint. The gateway's admin API
 // is loopback-only; its envoy_metrics listener forwards GET /ready and
-// GET /stats/prometheus to it and nothing else.
+// GET /stats/prometheus to it and nothing else. The connection counters
+// come with the gauge that is 1 while a cluster's connection breaker is
+// open.
 var envoyStats = map[string]string{
-	"envoy_cluster_upstream_cx_total":    "upstream_cx_total",
-	"envoy_cluster_upstream_cx_active":   "upstream_cx_active",
-	"envoy_cluster_upstream_cx_overflow": "upstream_cx_overflow",
+	"envoy_cluster_upstream_cx_total":                "upstream_cx_total",
+	"envoy_cluster_upstream_cx_active":               "upstream_cx_active",
+	"envoy_cluster_upstream_cx_overflow":             "upstream_cx_overflow",
+	"envoy_cluster_circuit_breakers_default_cx_open": "circuit_breakers.default.cx_open",
 }
 
 // envoyStatsFilter selects the sampler's stats on /stats/prometheus, which

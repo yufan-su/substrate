@@ -164,6 +164,8 @@ envoy_cluster_upstream_cx_total{envoy_cluster_name="mitm_internal"} 42
 envoy_cluster_upstream_cx_total{envoy_cluster_name="egress_forward_proxy_cleartext"} 7 1791287695035
 envoy_cluster_upstream_cx_total{envoy_cluster_name="ext_proc"} 9
 envoy_cluster_upstream_cx_active{envoy_cluster_name="mitm_internal"} 3
+envoy_cluster_circuit_breakers_default_cx_open{envoy_cluster_name="mitm_internal"} 1
+envoy_cluster_circuit_breakers_high_cx_open{envoy_cluster_name="mitm_internal"} 1
 envoy_cluster_upstream_cx_total_x{envoy_cluster_name="mitm_internal"} 1
 envoy_cluster_upstream_cx_length_ms_bucket{envoy_cluster_name="mitm_internal",le="0.5"} 0
 envoy_server_uptime{} 12
@@ -174,6 +176,7 @@ not a metric
 		envoyCxTotal: 42,
 		"cluster.egress_forward_proxy_cleartext.upstream_cx_total": 7,
 		"cluster.mitm_internal.upstream_cx_active":                 3,
+		"cluster.mitm_internal.circuit_breakers.default.cx_open":   1,
 	}
 	if !maps.Equal(got, want) {
 		t.Errorf("parseEnvoyStats = %v, want %v", got, want)

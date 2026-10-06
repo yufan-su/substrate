@@ -571,13 +571,35 @@ func (rep *report) printResources(w io.Writer) {
 	if len(live) > 0 {
 		fmt.Fprintf(w, "%-10s steady cores, exact: %s\n", "", strings.Join(live, " "))
 	}
-	cx := ""
-	if over, ok := envoyDelta(res.Envoy, "cluster.mitm_internal.upstream_cx_overflow"); ok {
-		cx = fmt.Sprintf("; mitm_internal cx overflow +%.0f, active max %.0f", over, envoyMax(res.Envoy, "cluster.mitm_internal.upstream_cx_active"))
+	if len(mem) > 0 {
+		fmt.Fprintf(w, "%-10s steady max working set: %s\n", "memory", strings.Join(mem, " "))
 	}
-	if len(mem) > 0 || cx != "" {
-		fmt.Fprintf(w, "%-10s steady max working set: %s%s\n", "memory", strings.Join(mem, " "), cx)
+	if line := envoyLine(res.Envoy); line != "" {
+		fmt.Fprintf(w, "%-10s %s\n", "envoy", line)
 	}
+}
+
+// envoyLine summarizes the gateway's connection counters: the tunnel
+// overflow over steady, each cluster's peak of open connections over the
+// whole run, and any connection breaker that opened during it.
+func envoyLine(samples []envoySample) string {
+	over, ok := envoyDelta(samples, "cluster.mitm_internal.upstream_cx_overflow")
+	if !ok {
+		return ""
+	}
+	parts := []string{fmt.Sprintf("steady: mitm_internal cx overflow +%.0f", over)}
+	var peaks, opened []string
+	for _, c := range envoyClusters {
+		peaks = append(peaks, fmt.Sprintf("%s %.0f", c, envoyMax(samples, "cluster."+c+".upstream_cx_active")))
+		if envoyMax(samples, "cluster."+c+".circuit_breakers.default.cx_open") > 0 {
+			opened = append(opened, c)
+		}
+	}
+	parts = append(parts, "whole run: cx active max "+strings.Join(peaks, ", "))
+	if len(opened) > 0 {
+		parts = append(parts, "connection breaker OPENED: "+strings.Join(opened, ", "))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // envoyDelta is the counter's increase over steady, summed over pods.
