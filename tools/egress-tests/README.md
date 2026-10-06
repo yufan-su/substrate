@@ -217,6 +217,17 @@ long-format `series` for plots, per-component summaries, and the
 self-checks. `phases` and `loopTimeline` hold the phase boundaries and the
 progress polls; use `--progress-interval 5s` for a finer timeline.
 
+**Steady and settled.** The first round over the C endpoints opens every
+connection and resolves every name, so the steady mean carries that setup
+cost. The `settled` line drops it. The settled window starts one progress
+poll after new connections stop growing. When the polls come further apart
+than one round, it starts 1.5 rounds (1.5 x C x `--request-interval`) into
+steady instead. `resources.settledWindow` records the start, the rule and
+the request rate, and each component carries `settled` beside `steady`.
+At B=10 and C=100, a round takes 10s and opens 1,000 tunnels. Steady
+charges the workers 4.39 cores per 1000 req/s and the gateway 1.20. Settled
+gives about 2.5 and 1.0.
+
 **Run at least 45s.** A cAdvisor series needs two readings inside the
 steady window. A shorter run marks cAdvisor-only components
 `insufficient`; the live sources still resolve one second.
@@ -236,7 +247,8 @@ every series has its readings, and the driver stays under half a core.
 `INFO` lines report what a short run cannot resolve.
 
 Gaps between reads are judged in two tiers, since one slow API server
-round trip costs a point of a cumulative counter, not CPU:
+round trip costs a point of a cumulative counter, not CPU. Live reads are
+stamped at the midpoint of their round trip, and keep it as `rttNs`:
 
 | Source | Fails when | INFO when |
 |---|---|---|

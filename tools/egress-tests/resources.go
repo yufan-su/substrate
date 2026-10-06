@@ -109,6 +109,8 @@ type resourceReport struct {
 	MetricsServer []podMetricsSample `json:"metricsServer,omitempty"`
 	// Components summarizes each component over the steady window.
 	Components map[string]*componentSummary `json:"components,omitempty"`
+	// Settled is the window the components' settled summaries cover.
+	Settled *settledWindow `json:"settledWindow,omitempty"`
 	// Cgreader holds the cgroup readers' one-second rows, when enabled.
 	Cgreader *cgreaderReport `json:"cgreader,omitempty"`
 	// Series holds per-interval rates and gauges in long format for plots.
@@ -135,6 +137,8 @@ type liveSample struct {
 	Container         string    `json:"container"`
 	ProcessCPUSeconds float64   `json:"processCpuSeconds"`
 	RSSBytes          float64   `json:"rssBytes"`
+	// RTT is the read's round trip; T is its midpoint.
+	RTT time.Duration `json:"rttNs,omitempty"`
 }
 
 type envoySample struct {
@@ -489,15 +493,16 @@ func (s *resourceSampler) pollLive(ctx context.Context, label string) {
 }
 
 func (s *resourceSampler) readProcess(ctx context.Context, t liveTarget, pod, label string) {
+	sent := s.now()
 	body, err := s.get.GetRaw(ctx, podProxyPath(t.namespace, pod, t.port, "/metrics"), nil)
-	at := s.now()
+	rtt := s.now().Sub(sent)
 	if err == nil {
 		var cpu, rss float64
 		if cpu, rss, err = parseProcessMetrics(body); err == nil {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			s.rep.Live = append(s.rep.Live, liveSample{T: at, Label: label, Component: t.component, Pod: pod,
-				Container: t.container, ProcessCPUSeconds: cpu, RSSBytes: rss})
+			s.rep.Live = append(s.rep.Live, liveSample{T: sent.Add(rtt / 2), Label: label, Component: t.component, Pod: pod,
+				Container: t.container, ProcessCPUSeconds: cpu, RSSBytes: rss, RTT: rtt})
 			return
 		}
 	}

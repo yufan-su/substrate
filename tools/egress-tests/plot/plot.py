@@ -39,6 +39,8 @@ MAX_DIRECT_LABELS = 6
 STEP = 1.0  # seconds between resampled points
 # Phase labels closer than this share of the x span are dropped.
 MIN_LABEL_GAP = 0.06
+# End labels sit at least this share of the panel's y span apart.
+MIN_END_LABEL_GAP = 0.08
 
 EMPTY_NOTES = {
     "throttled": "no CPU periods counted: the containers have no CPU limit",
@@ -119,6 +121,25 @@ def overflow_points(run: rr.Run) -> tuple[list[float], list[float]]:
     return xs, ys
 
 
+def place_labels(ys: list[float], top: float) -> list[float] | None:
+    """Spreads end labels at heights ys at least MIN_END_LABEL_GAP x top
+    apart, keeping their order, or returns None when they no longer fit
+    under top."""
+    gap = MIN_END_LABEL_GAP * top
+    placed = [0.0] * len(ys)
+    prev = None
+    for i in sorted(range(len(ys)), key=lambda i: ys[i]):
+        y = ys[i] if prev is None else max(ys[i], prev + gap)
+        if y > top:
+            return None
+        placed[i] = prev = y
+    return placed
+
+
+def end_point(x: list[float], y: list[float | None]) -> tuple[float, float] | None:
+    return next(((xx, yy) for xx, yy in zip(reversed(x), reversed(y)) if yy is not None), None)
+
+
 def build_figure(loaded: list[rr.Run]) -> go.Figure:
     fig = make_subplots(rows=len(PANELS), cols=1, shared_xaxes=True, vertical_spacing=0.03,
                         subplot_titles=[title for _, title in PANELS])
@@ -143,7 +164,15 @@ def build_figure(loaded: list[rr.Run]) -> go.Figure:
             fig.add_annotation(text=EMPTY_NOTES.get(panel, "no data"), xref=f"x{axis} domain", yref=f"y{axis} domain",
                                x=0.5, y=0.5, showarrow=False, font={"color": "#52514e"})
         direct = len(entries) <= MAX_DIRECT_LABELS
-        for run, i, comp, x, y in entries:
+        ends = [end_point(x, y) for _, _, _, x, y in entries]
+        heights = None
+        if direct:
+            top = max((v for *_, y in entries for v in y if v is not None), default=0.0)
+            heights = place_labels([e[1] for e in ends if e], top) if top > 0 else [e[1] for e in ends if e]
+            # Labels that cannot be spread apart give way to a legend.
+            direct = heights is not None
+        heights = iter(heights or [])
+        for (run, i, comp, x, y), end in zip(entries, ends):
             name = f"{comp} · {run.label}" if multi else comp
             show = not direct and name not in in_legend
             if show:
@@ -153,11 +182,9 @@ def build_figure(loaded: list[rr.Run]) -> go.Figure:
                 line={"color": rr.COMPONENT_COLORS.get(comp, "#52514e"), "width": 2, "dash": DASHES[i % len(DASHES)]},
                 connectgaps=False, hovertemplate=f"{name}<br>%{{x:.0f}} s: %{{y:.3g}}<extra></extra>",
             ), row=row, col=1)
-            if direct:
-                last = next(((xx, yy) for xx, yy in zip(reversed(x), reversed(y)) if yy is not None), None)
-                if last:
-                    fig.add_annotation(x=last[0], y=last[1], text=name, showarrow=False, xanchor="left", xshift=4,
-                                       font={"size": 11, "color": "#52514e"}, row=row, col=1)
+            if direct and end:
+                fig.add_annotation(x=end[0], y=next(heights), text=name, showarrow=False, xanchor="left", xshift=4,
+                                   font={"size": 11, "color": "#52514e"}, row=row, col=1)
         if panel == "envoy":
             for i, run in enumerate(loaded):
                 xs, ys = overflow_points(run)

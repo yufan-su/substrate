@@ -308,3 +308,112 @@ func TestCheckIdlePhases(t *testing.T) {
 		})
 	}
 }
+
+func TestSettledOf(t *testing.T) {
+	t.Parallel()
+	t0 := time.Unix(1000, 0)
+	s := time.Second
+	steady := phaseMark{Name: "steady", Start: t0, End: t0.Add(60 * s)}
+	// polls builds one poll per 5 s, with new connections and requests at
+	// each.
+	polls := func(conns []int64) []loopPoint {
+		var out []loopPoint
+		for i, c := range conns {
+			out = append(out, loopPoint{T: t0.Add(time.Duration(5*(i+1)) * s), NewConns: c, Requests: int64(500 * (i + 1))})
+		}
+		return out
+	}
+	full := []int64{400, 800, 1000, 1000, 1001, 1001, 1001, 1001, 1001, 1001, 1001, 1001}
+	for _, tc := range []struct {
+		name      string
+		cfg       runConfig
+		timeline  []loopPoint
+		wantOK    bool
+		wantStart time.Duration
+		wantRule  string
+		wantRate  float64
+	}{
+		{
+			name:      "plateau, one poll after it",
+			cfg:       runConfig{Endpoints: 100, RequestInterval: 100 * time.Millisecond, ProgressInterval: 5 * s},
+			timeline:  polls(full),
+			wantOK:    true,
+			wantStart: 20 * s,
+			wantRule:  settledByPlateau,
+			wantRate:  100,
+		},
+		{
+			name:      "polls coarser than a round",
+			cfg:       runConfig{Endpoints: 10, RequestInterval: 100 * time.Millisecond, ProgressInterval: 5 * s},
+			timeline:  polls(full),
+			wantOK:    true,
+			wantStart: 1500 * time.Millisecond,
+			wantRule:  settledByRounds,
+			wantRate:  100,
+		},
+		{
+			name:      "no plateau",
+			cfg:       runConfig{Endpoints: 100, RequestInterval: 100 * time.Millisecond, ProgressInterval: 5 * s},
+			timeline:  polls([]int64{100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200}),
+			wantOK:    true,
+			wantStart: 15 * s,
+			wantRule:  settledByRounds,
+			wantRate:  100,
+		},
+		{
+			name:     "no plateau and no pacing",
+			cfg:      runConfig{Endpoints: 100, ProgressInterval: 5 * s},
+			timeline: polls([]int64{100, 200, 300}),
+		},
+		{
+			name:     "round outlasts steady",
+			cfg:      runConfig{Endpoints: 100, RequestInterval: time.Second, ProgressInterval: 120 * s},
+			timeline: polls(full),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w, ok := settledOf(tc.cfg, steady, tc.timeline)
+			if ok != tc.wantOK {
+				t.Fatalf("settledOf() ok = %v, want %v (window %+v)", ok, tc.wantOK, w)
+			}
+			if !ok {
+				return
+			}
+			if got := w.Start.Sub(t0); got != tc.wantStart || w.Rule != tc.wantRule || !near(w.ReqPerS, tc.wantRate) {
+				t.Errorf("settled from +%v by %q at %.3f req/s, want +%v by %q at %.3f req/s",
+					got, w.Rule, w.ReqPerS, tc.wantStart, tc.wantRule, tc.wantRate)
+			}
+		})
+	}
+}
+
+func TestSummarizeResourcesSettled(t *testing.T) {
+	t.Parallel()
+	rep := testResourceReport()
+	t0 := time.Unix(1000, 0)
+	s := time.Second
+	// A round over 10 endpoints at 1 s takes 10 s; polls every 20 s are
+	// too coarse, so the window starts 15 s into steady, at t0+25 s.
+	rep.Config = runConfig{Endpoints: 10, RequestInterval: s, ProgressInterval: 20 * s}
+	rep.LoopTimeline = []loopPoint{
+		{T: t0.Add(30 * s), Requests: 20000, NewConns: 10},
+		{T: t0.Add(50 * s), Requests: 40000, NewConns: 10},
+		{T: t0.Add(70 * s), Requests: 60000, NewConns: 10},
+	}
+	summarizeResources(rep)
+	w := rep.Resources.Settled
+	if w == nil || !w.Start.Equal(t0.Add(25*s)) || w.Rule != settledByRounds || !near(w.ReqPerS, 1000) {
+		t.Fatalf("settled window = %+v, want from t0+25s by %q at 1000 req/s", w, settledByRounds)
+	}
+	gw := rep.Resources.Components["gateway"].Settled
+	if gw == nil || !near(gw.CPUCores.Mean, 1.5) || !near(gw.CoresPerKrps, 1.5) || !near(gw.Coverage, 32.0/45) {
+		t.Errorf("gateway settled = %+v, want 1.5 cores, 1.5 cores/krps, coverage 32/45", gw)
+	}
+	var out bytes.Buffer
+	rep.printResources(&out)
+	want := "cores per 1000 req/s, settled: gateway 1.50 workers 0.50 (from steady +15.0s by 1.5 rounds, 1000.0 req/s)"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("printed resources lack %q:\n%s", want, out.String())
+	}
+}

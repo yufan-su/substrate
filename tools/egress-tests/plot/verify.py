@@ -64,6 +64,19 @@ def request_rate(report: dict) -> float:
     return loop.get("requests", 0) / elapsed if elapsed > 0 else 0.0
 
 
+def load_window(report: dict) -> tuple[dict | None, float]:
+    """The gateway's settled summary and request rate, or steady's when the
+    run has no settled window."""
+    res = report.get("resources") or {}
+    gw = (res.get("components") or {}).get("gateway")
+    if not gw:
+        return None, 0.0
+    settled = res.get("settledWindow")
+    if gw.get("settled") and settled:
+        return gw["settled"], settled.get("reqPerS", 0.0)
+    return gw.get("steady"), request_rate(report)
+
+
 def idle_gateway_cores(run: rr.Run) -> float | None:
     """The gateway's mean cores before the actors resumed, if sampled."""
     rows = run.series("cpu_cores", ("cadvisor", "cgreader"))
@@ -90,12 +103,11 @@ def check_load(runs: list[rr.Run]) -> list[Result]:
     for (endpoints, mode, interval), group in sorted(groups.items()):
         marginals = {}
         for r in group:
-            gw = ((r.report.get("resources") or {}).get("components") or {}).get("gateway")
-            rps = request_rate(r.report)
-            if not gw or gw["steady"].get("insufficient") or rps <= 0:
+            window, rps = load_window(r.report)
+            if not window or window.get("insufficient") or rps <= 0:
                 continue
             idle = idle_gateway_cores(r) or 0.0
-            marginals[r] = (gw["steady"]["cpuCores"]["mean"] - idle) / (rps / 1000)
+            marginals[r] = (window["cpuCores"]["mean"] - idle) / (rps / 1000)
         judged = {r: m for r, m in marginals.items() if r.report["config"]["parallel"] >= 10}
         mid = rr.median(list(judged.values())) if judged else None
         for r, m in marginals.items():

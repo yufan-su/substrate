@@ -109,6 +109,30 @@ class PlotTest(unittest.TestCase):
         self.assertIn(plot.EMPTY_NOTES["throttled"], notes)
         self.assertTrue(any(s.type == "rect" for s in fig.layout.shapes), "steady window not shaded")
 
+    def test_place_labels(self):
+        cases = [
+            ("apart already", [0.0, 5.0, 10.0], 10.0, [0.0, 5.0, 10.0]),
+            ("near zero spread upward in order", [0.02, 0.0, 0.01], 10.0, [1.6, 0.0, 0.8]),
+            ("no room left", [9.9, 9.95, 10.0], 10.0, None),
+        ]
+        for name, ys, top, want in cases:
+            with self.subTest(name):
+                got = plot.place_labels(ys, top)
+                if want is None:
+                    self.assertIsNone(got)
+                else:
+                    self.assertEqual([round(v, 6) for v in got], want)
+
+    def test_end_labels_spaced(self):
+        report = json.loads(FIXTURE.read_text())
+        with tempfile.TemporaryDirectory() as d:
+            fig = plot.build_figure(write_runs(Path(d), {"r": report}))
+            cpu = [a for a in fig.layout.annotations if a.yref == "y" and a.text in rr.COMPONENT_COLORS]
+            heights = sorted(a.y for a in cpu)
+            top = max(v for t in fig.data if t.yaxis == "y" and t.mode == "lines" for v in t.y if v is not None)
+            for lo, hi in zip(heights, heights[1:]):
+                self.assertGreaterEqual(hi - lo, plot.MIN_END_LABEL_GAP * top - 1e-9, heights)
+
     def test_overlay_writes_one_page(self):
         base = json.loads(FIXTURE.read_text())
         with tempfile.TemporaryDirectory() as d:
@@ -148,6 +172,21 @@ class VerifyTest(unittest.TestCase):
                 self.assertEqual(len(judged), 2)
                 self.assertEqual(all(r.passed for r in judged), want, got)
                 self.assertTrue(any(r.info for r in got.values()), "B=1 should be reported, not judged")
+
+    def test_load_uses_settled(self):
+        def with_settled(report: dict, cores: float, rps: float) -> dict:
+            r = copy.deepcopy(report)
+            gw = r["resources"]["components"]["gateway"]
+            gw["settled"] = copy.deepcopy(gw["steady"])
+            gw["settled"]["cpuCores"]["mean"] = cores
+            r["resources"]["settledWindow"] = {"start": r["phases"][0]["start"], "rule": "1.5 rounds", "reqPerS": rps}
+            return r
+        # Steady alone disagrees by 2x; the settled windows agree.
+        got = self.results({"b10": with_settled(scaled(self.base, 10, 1.8, 1000), 0.9, 1000),
+                            "b100": with_settled(scaled(self.base, 100, 8.5, 10000), 8.5, 10000)}, "load")
+        judged = [r for r in got.values() if not r.info]
+        self.assertEqual(len(judged), 2)
+        self.assertTrue(all(r.passed for r in judged), got)
 
     def test_connections(self):
         newconn = copy.deepcopy(self.base)
