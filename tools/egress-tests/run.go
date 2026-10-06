@@ -110,6 +110,8 @@ type runner struct {
 	cleanupTimeout time.Duration
 	// rand picks which actors a run resumes.
 	rand *rand.Rand
+	// res samples the components' CPU and memory; nil when --resources is off.
+	res *resourceSampler
 }
 
 func newRunner(cfg runConfig, api ateapipb.ControlClient, k8s kubernetes.Interface, router *routerClient, out io.Writer) *runner {
@@ -142,8 +144,16 @@ func (r *runner) run(ctx context.Context) (*report, error) {
 	if err := preflight(ctx, r.k8s, r.cfg.Endpoints, r.cfg.Scheme); err != nil {
 		return nil, err
 	}
+	if r.res != nil {
+		if err := r.res.start(ctx); err != nil {
+			return nil, fmt.Errorf("starting resource sampling: %w", err)
+		}
+		defer r.finishResources(rep)
+	}
 
+	phaseStart := time.Now()
 	created := r.createActors(ctx, rep)
+	rep.addPhase("create", phaseStart)
 	if ctx.Err() != nil {
 		rep.Interrupted = true
 		return rep, ctx.Err()
@@ -154,7 +164,9 @@ func (r *runner) run(ctx context.Context) (*report, error) {
 		r.logf("only %d actors were created; resuming %d instead of %d", len(names), len(names), r.cfg.Parallel)
 	}
 
+	phaseStart = time.Now()
 	actors := r.resumeActors(ctx, names, rep)
+	rep.addPhase("resume", phaseStart)
 
 	var ready []*actorRun
 	for _, a := range actors {
@@ -163,7 +175,15 @@ func (r *runner) run(ctx context.Context) (*report, error) {
 		}
 	}
 	if ctx.Err() == nil {
-		r.steady(ctx, r.startLoops(ctx, ready, rep))
+		r.mark(ctx, markStartBegin)
+		phaseStart = time.Now()
+		started := r.startLoops(ctx, ready, rep)
+		rep.addPhase("start", phaseStart)
+		r.mark(ctx, markSteadyBegin)
+		phaseStart = time.Now()
+		r.steady(ctx, started, rep)
+		rep.addPhase("steady", phaseStart)
+		r.mark(ctx, markSteadyEnd)
 	}
 
 	// Everything resumed is put back, even after an interrupt, under its own
@@ -172,8 +192,13 @@ func (r *runner) run(ctx context.Context) (*report, error) {
 	defer cancel()
 	// Every ready actor gets a stop: an interrupt can land after an actor
 	// started its loop but before the driver saw the answer.
+	phaseStart = time.Now()
 	r.stopLoops(cleanupCtx, ready, rep)
+	rep.addPhase("stop", phaseStart)
+	r.mark(cleanupCtx, markStopEnd)
+	phaseStart = time.Now()
 	r.suspendActors(cleanupCtx, actors, rep)
+	rep.addPhase("suspend", phaseStart)
 
 	if ctx.Err() != nil {
 		rep.Interrupted = true
@@ -454,29 +479,54 @@ func (r *runner) startLoops(ctx context.Context, ready []*actorRun, rep *report)
 	return started
 }
 
-// steady lets the loops run for Duration, printing progress along the way.
-func (r *runner) steady(ctx context.Context, started []*actorRun) {
+// steady lets the loops run for Duration, printing progress along the way
+// and keeping each progress poll in the report's loop timeline.
+func (r *runner) steady(ctx context.Context, started []*actorRun, rep *report) {
 	if len(started) == 0 {
 		return
 	}
 	start := time.Now()
 	var last egressapi.Stats
 	lastAt := start
+	var timeline []loopPoint
 	stopProgress := r.progress(ctx, func() {
 		cur := r.pollStats(ctx, started)
 		now := time.Now()
+		timeline = append(timeline, loopPoint{T: now, Requests: cur.Requests, Successes: cur.Successes,
+			NewConns: cur.NewConns, Latency: cur.Latency})
 		secs := now.Sub(lastAt).Seconds()
 		reqs, errs := cur.Requests-last.Requests, (cur.Requests-cur.Successes)-(last.Requests-last.Successes)
 		r.logf("loop: %v elapsed, %.1f req/s, %.1f errors/s, p99 %v (cumulative)",
 			now.Sub(start).Round(time.Second), float64(reqs)/secs, float64(errs)/secs, cur.Latency.Quantile(0.99))
 		last, lastAt = *cur, now
 	})
-	defer stopProgress()
 
 	select {
 	case <-ctx.Done():
 	case <-time.After(r.cfg.Duration):
 	}
+	stopProgress()
+	rep.LoopTimeline = timeline
+}
+
+// mark forces a read of every resource source at a phase boundary.
+func (r *runner) mark(ctx context.Context, label string) {
+	if r.res != nil {
+		r.res.mark(ctx, label)
+	}
+}
+
+// finishResources stops the sampler and runs the self-checks that need the
+// whole run.
+func (r *runner) finishResources(rep *report) {
+	res := r.res.stop()
+	var newConns int64
+	if rep.Loop != nil {
+		newConns = rep.Loop.NewConns
+	}
+	res.Verify = append(res.Verify, checkEnvoyConnections(res.Envoy, newConns), checkDriverOverhead(res.Driver))
+	res.Verify = append(res.Verify, checkLiveGaps(res.Live, r.res.interval)...)
+	rep.Resources = res
 }
 
 // pollStats merges the live stats of every running loop; actors that do not
