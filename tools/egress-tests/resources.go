@@ -295,6 +295,22 @@ func (s *resourceSampler) every(ctx context.Context, interval time.Duration, pol
 	})
 }
 
+// podContainers names the containers that run for a pod's lifetime: its
+// containers and its native sidecars, the init containers that restart
+// always. Ordinary init containers have exited by the time it runs.
+func podContainers(p *corev1.Pod) []string {
+	var out []string
+	for _, c := range p.Spec.InitContainers {
+		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			out = append(out, c.Name)
+		}
+	}
+	for _, c := range p.Spec.Containers {
+		out = append(out, c.Name)
+	}
+	return out
+}
+
 // resolveCadvisor finds the pods of every cAdvisor target and their nodes.
 func (s *resourceSampler) resolveCadvisor(ctx context.Context) error {
 	s.cadvisorPods = map[string]cadvisorPod{}
@@ -310,13 +326,25 @@ func (s *resourceSampler) resolveCadvisor(ctx context.Context) error {
 				continue
 			}
 			found = true
+			// A pod is complete when every container it runs is a target,
+			// so that its containers add up to the pod cgroup. The pod's
+			// own list is what the rollup check sums: a target container
+			// the pod lacks, such as a sidecar an older gateway manifest
+			// does not run, must not leave the check waiting for readings.
+			have := podContainers(&p)
 			complete := true
-			for _, c := range p.Spec.Containers {
-				if !slices.Contains(t.containers, c.Name) {
+			for _, c := range have {
+				if !slices.Contains(t.containers, c) {
 					complete = false
 				}
 			}
-			s.cadvisorPods[p.Namespace+"/"+p.Name] = cadvisorPod{component: t.component, containers: t.containers, complete: complete}
+			var containers []string
+			for _, c := range t.containers {
+				if slices.Contains(have, c) {
+					containers = append(containers, c)
+				}
+			}
+			s.cadvisorPods[p.Namespace+"/"+p.Name] = cadvisorPod{component: t.component, containers: containers, complete: complete}
 			if p.Spec.NodeName != "" {
 				nodes[p.Spec.NodeName] = true
 			}
