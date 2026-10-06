@@ -590,6 +590,7 @@ func TestRunWithResources(t *testing.T) {
 	}
 	r.res = newResourceSampler(get, r.k8s, 5*time.Millisecond)
 	r.preIdle = 30 * time.Millisecond
+	r.waitCleartextIdle = time.Minute
 
 	rep, err := r.run(t.Context())
 	if err != nil {
@@ -607,6 +608,9 @@ func TestRunWithResources(t *testing.T) {
 	}
 	if rep.Resources == nil {
 		t.Fatal("no resources section")
+	}
+	if g := rep.Resources.CleartextGate; g == nil || !g.Idle || g.Reads != 1 {
+		t.Errorf("cleartext gate = %+v, want idle after one read", g)
 	}
 	// Overhead and gaps depend on the test machine's load; only check they ran.
 	checks := map[string]int{}
@@ -732,6 +736,72 @@ func TestResolveCadvisorCompleteness(t *testing.T) {
 			}
 			if got := s.cadvisorPods["ate-system/gw"].complete; got != tc.want {
 				t.Errorf("complete = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// gateGetter answers the gateway's /stats/prometheus with a scripted
+// cleartext pool size per read, an error when the script says -1, or a
+// body without the stat when it says -2.
+type gateGetter struct {
+	mu     sync.Mutex
+	active []float64
+	reads  int
+}
+
+func (g *gateGetter) GetRaw(_ context.Context, path string, params url.Values) ([]byte, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !strings.HasSuffix(path, ":15090/proxy/stats/prometheus") || params.Get("filter") != envoyStatsFilter {
+		return nil, fmt.Errorf("unexpected read %s", path)
+	}
+	v := g.active[min(g.reads, len(g.active)-1)]
+	g.reads++
+	switch v {
+	case -1:
+		return nil, errors.New("proxy error")
+	case -2:
+		return []byte("envoy_cluster_upstream_cx_total{envoy_cluster_name=\"egress_forward_proxy_cleartext\"} 1\n"), nil
+	}
+	return fmt.Appendf(nil, "envoy_cluster_upstream_cx_active{envoy_cluster_name=%q} %.0f\n", "egress_forward_proxy_cleartext", v), nil
+}
+
+func TestWaitCleartextIdle(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		active  []float64
+		noPods  bool
+		timeout time.Duration
+		want    cleartextGate
+	}{
+		{name: "already idle", active: []float64{0}, timeout: time.Minute, want: cleartextGate{Idle: true, Reads: 1}},
+		{name: "drains", active: []float64{900, 300, 0}, timeout: time.Minute, want: cleartextGate{Idle: true, Reads: 3}},
+		{name: "never drains", active: []float64{5}, timeout: 30 * time.Millisecond, want: cleartextGate{Residual: 5}},
+		{name: "unreadable", active: []float64{-1}, timeout: 30 * time.Millisecond, want: cleartextGate{Residual: -1}},
+		// A body without the stat and a gateway with no pod say nothing
+		// about the pool, so neither passes the gate.
+		{name: "stat missing from the body", active: []float64{-2}, timeout: 30 * time.Millisecond, want: cleartextGate{Residual: -1}},
+		{name: "no gateway pod", active: []float64{0}, noPods: true, timeout: 30 * time.Millisecond, want: cleartextGate{Residual: -1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newResourceSampler(&gateGetter{active: tc.active}, fake.NewSimpleClientset(), time.Second)
+			s.envoys = []string{"atenet-egress-a"}
+			if tc.noPods {
+				s.envoys = nil
+			}
+			s.gatePoll = 5 * time.Millisecond
+			got := s.waitCleartextIdle(t.Context(), tc.timeout)
+			if got.Idle != tc.want.Idle || got.Residual != tc.want.Residual || (tc.want.Reads > 0 && got.Reads != tc.want.Reads) {
+				t.Errorf("waitCleartextIdle = %+v, want %+v", got, tc.want)
+			}
+			if !tc.want.Idle && got.Waited < tc.timeout {
+				t.Errorf("gave up after %v, want at least the %v timeout", got.Waited, tc.timeout)
+			}
+			if s.rep.CleartextGate == nil || *s.rep.CleartextGate != got {
+				t.Errorf("recorded gate %+v, want %+v", s.rep.CleartextGate, got)
 			}
 		})
 	}

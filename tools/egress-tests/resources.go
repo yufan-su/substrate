@@ -105,6 +105,9 @@ type resourceReport struct {
 	Sources []sourceInfo  `json:"sources"`
 	Live    []liveSample  `json:"live,omitempty"`
 	Envoy   []envoySample `json:"envoy,omitempty"`
+	// CleartextGate records the wait for the gateway's cleartext pool to
+	// empty before the run, with --wait-for-cleartext-idle.
+	CleartextGate *cleartextGate `json:"cleartextGate,omitempty"`
 	// EnvoyMemory holds each gateway Envoy's heap gauges, one per envoy
 	// read.
 	EnvoyMemory []envoyMemorySample `json:"envoyMemory,omitempty"`
@@ -217,7 +220,9 @@ type resourceSampler struct {
 	k8s              kubernetes.Interface
 	interval         time.Duration
 	cadvisorInterval time.Duration
-	now              func() time.Time
+	// gatePoll paces the reads while waiting for the cleartext pool to empty.
+	gatePoll time.Duration
+	now      func() time.Time
 
 	mu     sync.Mutex
 	rep    resourceReport
@@ -244,6 +249,7 @@ func newResourceSampler(get rawGetter, k8s kubernetes.Interface, interval time.D
 		k8s:              k8s,
 		interval:         interval,
 		cadvisorInterval: cadvisorPollInterval,
+		gatePoll:         cleartextGatePoll,
 		now:              time.Now,
 		lastTS:           map[string]time.Time{},
 		rusage:           map[string]rusageMark{},
@@ -592,6 +598,76 @@ func (s *resourceSampler) readEnvoy(ctx context.Context, pod, label string) {
 		AllocatedBytes: counters["server.memory_allocated"], HeapSizeBytes: counters["server.memory_heap_size"],
 		PhysicalBytes: counters["server.memory_physical_size"]})
 	s.rep.Reads[sourceKey("envoy", pod)]++
+}
+
+// cleartextGatePoll is how often the driver rereads the cleartext pool while
+// waiting for it to empty.
+const cleartextGatePoll = 10 * time.Second
+
+// envoyCleartextActive is the gateway's open upstream connections to the
+// targets. The dynamic forward proxy keeps idle ones until it purges the
+// host, up to about 6 minutes after the last request.
+const envoyCleartextActive = "cluster.egress_forward_proxy_cleartext.upstream_cx_active"
+
+// cleartextGate is the outcome of waiting for the cleartext pool to empty.
+type cleartextGate struct {
+	Waited time.Duration `json:"waited"`
+	// Residual is the open connections when the wait ended; 0 when idle,
+	// -1 when the pool could not be read.
+	Residual float64 `json:"residual"`
+	Idle     bool    `json:"idle"`
+	Reads    int     `json:"reads"`
+}
+
+// waitCleartextIdle polls the gateway Envoys until their cleartext pools
+// hold no connection, or until timeout, and records the outcome. The pool
+// is read the way the sampler reads it, from the envoy_metrics listener. A
+// read that fails, a body without the stat and a gateway with no pod to
+// read all count as not idle: the gate must see an empty pool, not fail to
+// see a full one.
+func (s *resourceSampler) waitCleartextIdle(ctx context.Context, timeout time.Duration) cleartextGate {
+	start := s.now()
+	var g cleartextGate
+	for {
+		active, ok := 0.0, len(s.envoys) > 0
+		for _, pod := range s.envoys {
+			body, err := s.get.GetRaw(ctx, podProxyPath(envoyTarget.namespace, pod, envoyTarget.port, envoyTarget.path),
+				url.Values{"filter": {envoyStatsFilter}})
+			var v float64
+			var found bool
+			if err == nil {
+				v, found = parseEnvoyStats(body)[envoyCleartextActive]
+			}
+			if err != nil || !found {
+				ok = false
+				break
+			}
+			active += v
+		}
+		g.Reads++
+		g.Waited = s.now().Sub(start)
+		g.Residual, g.Idle = active, ok && active == 0
+		if !ok {
+			g.Residual = -1
+		}
+		if g.Idle || g.Waited >= timeout {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			s.recordGate(g)
+			return g
+		case <-time.After(s.gatePoll):
+		}
+	}
+	s.recordGate(g)
+	return g
+}
+
+func (s *resourceSampler) recordGate(g cleartextGate) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rep.CleartextGate = &g
 }
 
 // sourceKey names one target of a source in Reads and Errors.
