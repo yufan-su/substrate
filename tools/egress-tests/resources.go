@@ -17,7 +17,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/url"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -69,12 +71,15 @@ var envoyTarget = struct {
 
 // resourceReport is the resources section of the report.
 type resourceReport struct {
-	Sources []sourceInfo   `json:"sources"`
-	Live    []liveSample   `json:"live,omitempty"`
-	Envoy   []envoySample  `json:"envoy,omitempty"`
-	Driver  driverUsage    `json:"driver"`
-	Errors  map[string]int `json:"errors,omitempty"`
-	Verify  []verifyResult `json:"verify,omitempty"`
+	Sources []sourceInfo  `json:"sources"`
+	Live    []liveSample  `json:"live,omitempty"`
+	Envoy   []envoySample `json:"envoy,omitempty"`
+	// Samples holds the cAdvisor readings, one per container per new
+	// cAdvisor timestamp.
+	Samples []cadvisorSample `json:"samples,omitempty"`
+	Driver  driverUsage      `json:"driver"`
+	Errors  map[string]int   `json:"errors,omitempty"`
+	Verify  []verifyResult   `json:"verify,omitempty"`
 }
 
 // sourceInfo says how often a source is read and whose clock stamps it.
@@ -143,15 +148,22 @@ func usageBetween(a, b rusageMark) usageWindow {
 // path while a run goes on. Each source polls on its own cadence; phase
 // marks force an extra read of every source so windows line up with them.
 type resourceSampler struct {
-	get      rawGetter
-	k8s      kubernetes.Interface
-	interval time.Duration
-	now      func() time.Time
+	get              rawGetter
+	k8s              kubernetes.Interface
+	interval         time.Duration
+	cadvisorInterval time.Duration
+	now              func() time.Time
 
-	mu      sync.Mutex
-	rep     resourceReport
-	live    map[liveTarget][]string // target -> pod names
-	envoys  []string
+	mu     sync.Mutex
+	rep    resourceReport
+	live   map[liveTarget][]string // target -> pod names
+	envoys []string
+	// cadvisorPods is keyed by namespace/name; nodes are where they run.
+	cadvisorPods map[string]cadvisorPod
+	nodes        []string
+	lastTS       map[string]time.Time // series key -> newest cAdvisor timestamp kept
+	// missing lists every cAdvisor component that matched no Running pod.
+	missing []string
 	rusage  map[string]rusageMark
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
@@ -160,12 +172,14 @@ type resourceSampler struct {
 
 func newResourceSampler(get rawGetter, k8s kubernetes.Interface, interval time.Duration) *resourceSampler {
 	return &resourceSampler{
-		get:      get,
-		k8s:      k8s,
-		interval: interval,
-		now:      time.Now,
-		rusage:   map[string]rusageMark{},
-		rep:      resourceReport{Errors: map[string]int{}},
+		get:              get,
+		k8s:              k8s,
+		interval:         interval,
+		cadvisorInterval: cadvisorPollInterval,
+		now:              time.Now,
+		lastTS:           map[string]time.Time{},
+		rusage:           map[string]rusageMark{},
+		rep:              resourceReport{Errors: map[string]int{}},
 	}
 }
 
@@ -186,26 +200,102 @@ func (s *resourceSampler) start(ctx context.Context) error {
 		return err
 	}
 	s.envoys = envoys
+	if err := s.resolveCadvisor(ctx); err != nil {
+		return err
+	}
 	s.rep.Sources = append(s.rep.Sources,
 		sourceInfo{Name: "live", Interval: s.interval, Clock: "driver"},
-		sourceInfo{Name: "envoy", Interval: s.interval, Clock: "driver"})
+		sourceInfo{Name: "envoy", Interval: s.interval, Clock: "driver"},
+		sourceInfo{Name: "cadvisor", Interval: s.cadvisorInterval, Clock: "kubelet"})
 	s.markRusage("run:begin")
 
+	// Each source polls on its own goroutine, so a slow cAdvisor fetch never
+	// delays the one-second sources.
 	pollCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s.cancel = cancel
+	s.every(pollCtx, s.interval, func(ctx context.Context) { s.pollLive(ctx, "") })
+	s.every(pollCtx, s.cadvisorInterval, s.pollCadvisor)
+	return nil
+}
+
+// every calls poll at once and then every interval until ctx ends.
+func (s *resourceSampler) every(ctx context.Context, interval time.Duration, poll func(context.Context)) {
 	s.wg.Go(func() {
-		ticker := time.NewTicker(s.interval)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
+			poll(ctx)
 			select {
-			case <-pollCtx.Done():
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.pollLive(pollCtx, "")
 			}
 		}
 	})
+}
+
+// resolveCadvisor finds the pods of every cAdvisor target and their nodes.
+func (s *resourceSampler) resolveCadvisor(ctx context.Context) error {
+	s.cadvisorPods = map[string]cadvisorPod{}
+	nodes := map[string]bool{}
+	for _, t := range cadvisorTargets {
+		list, err := s.k8s.CoreV1().Pods(t.namespace).List(ctx, metav1.ListOptions{LabelSelector: t.selector})
+		if err != nil {
+			return fmt.Errorf("listing pods %s in %s: %w", t.selector, t.namespace, err)
+		}
+		found := false
+		for _, p := range list.Items {
+			if p.Status.Phase != corev1.PodRunning {
+				continue
+			}
+			found = true
+			complete := true
+			for _, c := range p.Spec.Containers {
+				if !slices.Contains(t.containers, c.Name) {
+					complete = false
+				}
+			}
+			s.cadvisorPods[p.Namespace+"/"+p.Name] = cadvisorPod{component: t.component, containers: t.containers, complete: complete}
+			if p.Spec.NodeName != "" {
+				nodes[p.Spec.NodeName] = true
+			}
+		}
+		if !found {
+			s.missing = append(s.missing, t.component)
+		}
+	}
+	s.nodes = slices.Sorted(maps.Keys(nodes))
 	return nil
+}
+
+// pollCadvisor reads every node's cAdvisor and keeps the readings whose
+// timestamp is new for their series.
+func (s *resourceSampler) pollCadvisor(ctx context.Context) {
+	var wg sync.WaitGroup
+	for _, node := range s.nodes {
+		wg.Go(func() {
+			body, err := s.get.GetRaw(ctx, "/api/v1/nodes/"+node+"/proxy/metrics/cadvisor", nil)
+			if err != nil {
+				s.fail("cadvisor")
+				return
+			}
+			rows, err := parseCadvisor(body, s.cadvisorPods)
+			if err != nil {
+				s.fail("cadvisor")
+				return
+			}
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			for _, r := range rows {
+				if r.T.IsZero() || !r.T.After(s.lastTS[r.key()]) {
+					continue
+				}
+				s.lastTS[r.key()] = r.T
+				s.rep.Samples = append(s.rep.Samples, r)
+			}
+		})
+	}
+	wg.Wait()
 }
 
 // mark records a phase boundary: it reads every source once, labeled, and

@@ -526,6 +526,10 @@ func (r *runner) finishResources(rep *report) {
 	}
 	res.Verify = append(res.Verify, checkEnvoyConnections(res.Envoy, newConns), checkDriverOverhead(res.Driver))
 	res.Verify = append(res.Verify, checkLiveGaps(res.Live, r.res.interval)...)
+	res.Verify = append(res.Verify, checkComponentsFound(r.res.missing, res.Samples)...)
+	res.Verify = append(res.Verify, checkCadvisorCoverage(res.Samples, rep.phase("steady"))...)
+	res.Verify = append(res.Verify, checkPodRollups(res.Samples, r.res.cadvisorPods)...)
+	res.Verify = append(res.Verify, checkProcessVsCgroup(res.Live, res.Samples)...)
 	rep.Resources = res
 }
 
