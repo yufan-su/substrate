@@ -19,6 +19,10 @@
 # The actor's loop starts on POST /start rather than at boot, so the golden
 # snapshot holds an idle actor. It sets no OTLP endpoint on purpose: telemetry
 # export would be egress too, through the gateway this test measures.
+#
+# Over HTTPS the gateway terminates the actor's TLS with a certificate it mints
+# for each name, so the actor trusts the gateway's MITM CA. It does not trust
+# the target's own CA: a request that succeeds was intercepted.
 metadata:
   atespace: egress-tests
   name: egress-tests-actor
@@ -30,11 +34,26 @@ containers:
   image: ko://github.com/agent-substrate/substrate/tools/egress-tests/actor
   # Port 80 is the only inbound port forwarded into the actor sandbox.
   command: ["/ko-app/actor", "--listen=:80"]
+  env:
+  # Go reads it on the first TLS handshake, after the actor is restored.
+  - name: SSL_CERT_FILE
+    value: /run/ate/trust-bundle.pem
+  volumeMounts:
+  - name: system-info
+    mountPath: /run/ate
   # Hold ResumeActor open until port 80 answers.
   wakeupProbe:
     httpGet:
       path: /readyz
       port: 80
+volumes:
+- name: system-info
+  systemInfo:
+    dataSources:
+    - trustBundle:
+        names:
+        - egress-mitm.ate.dev
+        path: trust-bundle.pem
 resources:
   limits:
   - name: memory

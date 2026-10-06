@@ -17,11 +17,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -31,14 +35,17 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/agent-substrate/substrate/internal/atenet"
+	"github.com/agent-substrate/substrate/internal/installdefaults"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/agent-substrate/substrate/tools/egress-tests/internal/egressapi"
+	"github.com/agent-substrate/substrate/tools/egress-tests/internal/targetcert"
 )
 
 // fakeAPI is an in-memory ateapi holding just enough state for the driver.
@@ -279,10 +286,66 @@ func (fr *fakeRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func services(n int) []runtime.Object {
+// services returns the Services of endpoints 0 through n-1, exposing ports.
+func services(n int, ports ...int32) []runtime.Object {
 	var objs []runtime.Object
 	for i := range n {
-		objs = append(objs, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: egressapi.ServiceName(i), Namespace: egressapi.TargetNamespace}})
+		svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: egressapi.ServiceName(i), Namespace: egressapi.TargetNamespace}}
+		for _, p := range ports {
+			svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{Port: p})
+		}
+		objs = append(objs, svc)
+	}
+	return objs
+}
+
+// gatewaySetup is what deploy.sh --deploy --https leaves behind: the target's
+// TLS Secret, the CA ConfigMap and a gateway patched for it and rolled out.
+type gatewaySetup struct {
+	secret *corev1.Secret
+	cm     *corev1.ConfigMap
+	dep    *appsv1.Deployment
+}
+
+func newGatewaySetup(t *testing.T) *gatewaySetup {
+	t.Helper()
+	bundle, err := targetcert.Generate(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(bundle.CA)
+	replicas := int32(1)
+	return &gatewaySetup{
+		secret: &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: targetTLSSecret, Namespace: egressapi.TargetNamespace},
+			Data:       map[string][]byte{targetcert.CAFile: bundle.CA, targetcert.CertFile: bundle.Cert, targetcert.KeyFile: bundle.Key},
+		},
+		cm: &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: gatewayCAConfigMap, Namespace: installdefaults.SystemNamespace},
+			Data:       map[string]string{targetcert.CAFile: string(bundle.CA)},
+		},
+		dep: &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: gatewayDeployment, Namespace: installdefaults.SystemNamespace, Generation: 2},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: &replicas,
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{gatewayCAAnnotation: hex.EncodeToString(sum[:])}},
+					Spec: corev1.PodSpec{InitContainers: []corev1.Container{
+						{Name: gatewayTrustInitContainer}, {Name: "sdsmint"},
+					}},
+				},
+			},
+			Status: appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 1, UpdatedReplicas: 1, AvailableReplicas: 1},
+		},
+	}
+}
+
+func (g *gatewaySetup) objects() []runtime.Object {
+	var objs []runtime.Object
+	for _, o := range []runtime.Object{g.secret, g.cm, g.dep} {
+		if !reflect.ValueOf(o).IsNil() {
+			objs = append(objs, o)
+		}
 	}
 	return objs
 }
@@ -300,14 +363,21 @@ func testConfig() runConfig {
 		ProgressInterval:  10 * time.Millisecond,
 		Atespace:          "egress-tests",
 		Template:          "egress-tests-actor",
+		Scheme:            egressapi.SchemeHTTP,
 	}
 }
 
 func newTestRunner(t *testing.T, cfg runConfig, api *fakeAPI, deployed int) (*runner, *fakeRouter, *bytes.Buffer) {
 	t.Helper()
+	return newTestRunnerWith(t, cfg, api, services(deployed)...)
+}
+
+// newTestRunnerWith is newTestRunner with the cluster holding exactly objs.
+func newTestRunnerWith(t *testing.T, cfg runConfig, api *fakeAPI, objs ...runtime.Object) (*runner, *fakeRouter, *bytes.Buffer) {
+	t.Helper()
 	fr, srv := newFakeRouter(t, api)
 	out := &bytes.Buffer{}
-	r := newRunner(cfg, api, fake.NewSimpleClientset(services(deployed)...), newRouterClient(srv.URL, cfg.Atespace, cfg.Parallel), out)
+	r := newRunner(cfg, api, fake.NewSimpleClientset(objs...), newRouterClient(srv.URL, cfg.Atespace, cfg.Parallel), out)
 	r.backoff = backoff{initial: time.Millisecond, max: 5 * time.Millisecond, rpcTimeout: time.Second}
 	r.pollInterval = time.Millisecond
 	return r, fr, out
@@ -341,15 +411,26 @@ func TestRun(t *testing.T) {
 				t.Errorf("%d egress policies, want one per actor (%d)", len(api.policies), cfg.Actors)
 			}
 			for name, p := range api.policies {
-				hosts := p.GetRules()[0].GetHttp().GetHostnames()
-				if !slices.Equal(hosts, wantHosts(cfg.Endpoints)) {
-					t.Errorf("policy of %s allows %v, want %v", name, hosts, wantHosts(cfg.Endpoints))
+				if len(p.GetRules()) != 2 {
+					t.Errorf("policy of %s has %d rules, want an http and an https rule", name, len(p.GetRules()))
+					continue
+				}
+				if hosts := p.GetRules()[0].GetHttp().GetHostnames(); !slices.Equal(hosts, wantHosts(cfg.Endpoints)) {
+					t.Errorf("http rule of %s allows %v, want %v", name, hosts, wantHosts(cfg.Endpoints))
+				}
+				if hosts := p.GetRules()[1].GetHttps().GetHostnames(); !slices.Equal(hosts, wantHosts(cfg.Endpoints)) {
+					t.Errorf("https rule of %s allows %v, want %v", name, hosts, wantHosts(cfg.Endpoints))
 				}
 			}
 
 			resumed := api.callNames("ResumeActor")
-			if want := []string{"egress-0", "egress-1", "egress-2"}; !slices.Equal(resumed, want) {
-				t.Errorf("resumed %v, want %v", resumed, want)
+			if len(resumed) != cfg.Parallel || len(slices.Compact(slices.Clone(resumed))) != cfg.Parallel {
+				t.Errorf("resumed %v, want %d distinct actors", resumed, cfg.Parallel)
+			}
+			for _, name := range resumed {
+				if _, ok := api.actors[name]; !ok {
+					t.Errorf("resumed %s, which the run did not create", name)
+				}
 			}
 			for _, name := range resumed {
 				req, ok := fr.starts[name]
@@ -383,7 +464,7 @@ func TestRun(t *testing.T) {
 
 			var printed bytes.Buffer
 			rep.print(&printed)
-			for _, want := range []string{"request-interval=0s", "300 requests", "timeout=3", "egress-target-0 (3/300)"} {
+			for _, want := range []string{"scheme=http ", "request-interval=0s", "300 requests", "timeout=3", "egress-target-0 (3/300)"} {
 				if !strings.Contains(printed.String(), want) {
 					t.Errorf("printed report lacks %q:\n%s", want, printed.String())
 				}
@@ -492,7 +573,7 @@ func TestResumeGivesUpOnCrash(t *testing.T) {
 
 func TestStartRecoversLeftoverLoop(t *testing.T) {
 	cfg := testConfig()
-	cfg.Parallel = 1
+	cfg.Actors, cfg.Parallel = 1, 1 // so the run resumes egress-0
 	api := newFakeAPI()
 	r, fr, out := newTestRunner(t, cfg, api, cfg.Endpoints)
 	// An interrupted run left egress-0's loop running.
@@ -512,6 +593,7 @@ func TestStartRecoversLeftoverLoop(t *testing.T) {
 
 func TestStopReachesLoopsWhoseStartFailed(t *testing.T) {
 	cfg := testConfig()
+	cfg.Actors = cfg.Parallel // so the run resumes egress-0 to egress-2
 	api := newFakeAPI()
 	r, fr, out := newTestRunner(t, cfg, api, cfg.Endpoints)
 	fr.startFault["egress-1"] = "lost-answer"
@@ -576,6 +658,47 @@ func TestRunFailsWhenActorsAreLeftRunning(t *testing.T) {
 	}
 }
 
+func TestPickActorsAtRandom(t *testing.T) {
+	cfg := testConfig()
+	cfg.Actors, cfg.Parallel = 20, 5
+	created := make([]bool, cfg.Actors)
+	for i := range created {
+		created[i] = i != 3 // egress-3 failed to create
+	}
+	firstFive := []string{"egress-0", "egress-1", "egress-2", "egress-4", "egress-5"}
+
+	picks := map[string]bool{}
+	for seed := range uint64(20) {
+		r := newRunner(cfg, nil, nil, nil, io.Discard)
+		r.rand = rand.New(rand.NewPCG(seed, seed))
+		names := r.pickActors(created)
+		if len(names) != cfg.Parallel || len(slices.Compact(slices.Clone(names))) != cfg.Parallel {
+			t.Fatalf("seed %d picked %v, want %d distinct actors", seed, names, cfg.Parallel)
+		}
+		if slices.Contains(names, "egress-3") {
+			t.Fatalf("seed %d picked egress-3, which was not created", seed)
+		}
+		picks[strings.Join(names, ",")] = true
+
+		again := newRunner(cfg, nil, nil, nil, io.Discard)
+		again.rand = rand.New(rand.NewPCG(seed, seed))
+		if !slices.Equal(again.pickActors(created), names) {
+			t.Fatalf("seed %d picked differently on a second runner", seed)
+		}
+	}
+	if len(picks) < 2 || (len(picks) == 1 && picks[strings.Join(firstFive, ",")]) {
+		t.Errorf("20 seeds picked %v; want the pick to vary instead of always the first created actors", picks)
+	}
+
+	// Fewer created than wanted: all of them.
+	r := newRunner(cfg, nil, nil, nil, io.Discard)
+	few := make([]bool, cfg.Actors)
+	few[7], few[11] = true, true
+	if got := r.pickActors(few); !slices.Equal(got, []string{"egress-7", "egress-11"}) {
+		t.Errorf("pick with two created = %v, want both, in order", got)
+	}
+}
+
 func TestRunInterruptedStillStopsAndSuspends(t *testing.T) {
 	cfg := testConfig()
 	cfg.Duration = time.Hour
@@ -631,17 +754,138 @@ func TestBuildPolicy(t *testing.T) {
 	if p.GetMetadata().GetName() != "default" || p.GetMetadata().GetAtespace() != "ns" {
 		t.Errorf("policy metadata = %v, want default in ns", p.GetMetadata())
 	}
-	if len(p.GetRules()) != 1 || p.GetRules()[0].GetHttp().GetPorts() != nil {
-		t.Errorf("policy rules = %v, want one http rule on the default port", p.GetRules())
+	rules := p.GetRules()
+	if len(rules) != 2 || rules[0].GetHttp() == nil || rules[1].GetHttps() == nil {
+		t.Fatalf("policy rules = %v, want an http rule and an https rule", rules)
 	}
-	if !slices.Equal(p.GetRules()[0].GetHttp().GetHostnames(), wantHosts(3)) {
-		t.Errorf("policy hostnames = %v", p.GetRules()[0].GetHttp().GetHostnames())
+	if rules[0].GetHttp().GetPorts() != nil || rules[1].GetHttps().GetPorts() != nil {
+		t.Errorf("policy rules = %v, want both on their default ports", rules)
+	}
+	if !slices.Equal(rules[0].GetHttp().GetHostnames(), wantHosts(3)) || !slices.Equal(rules[1].GetHttps().GetHostnames(), wantHosts(3)) {
+		t.Errorf("policy hostnames = %v", rules)
 	}
 
 	reordered := buildPolicy("ns", 3)
 	slices.Reverse(reordered.Rules[0].Http.Hostnames)
-	if !samePolicyHosts(reordered, p) || samePolicyHosts(buildPolicy("ns", 2), p) {
-		t.Errorf("samePolicyHosts should ignore order and notice a different set")
+	slices.Reverse(reordered.Rules)
+	httpOnly := &ateapipb.EgressPolicy{Rules: []*ateapipb.EgressRule{{Http: &ateapipb.HTTPRule{Hostnames: wantHosts(3)}}}}
+	switch {
+	case !samePolicyRules(reordered, p):
+		t.Error("samePolicyRules told apart policies that differ only in order")
+	case samePolicyRules(buildPolicy("ns", 2), p):
+		t.Error("samePolicyRules missed a different set of hostnames")
+	case samePolicyRules(httpOnly, p):
+		t.Error("samePolicyRules took an http-only policy for one that also allows https")
+	}
+}
+
+// Policies an earlier driver created allow only HTTP; a run brings each up to
+// both rules once and then leaves them alone.
+func TestRunUpgradesHTTPOnlyPolicies(t *testing.T) {
+	cfg := testConfig()
+	api := newFakeAPI()
+	for i := range cfg.Actors {
+		name := actorName(i)
+		api.actors[name] = "suspended"
+		api.nextUID++
+		api.policies[name] = &ateapipb.EgressPolicy{
+			Metadata: &ateapipb.ResourceMetadata{Atespace: cfg.Atespace, Name: "default", Uid: fmt.Sprint(api.nextUID)},
+			Rules:    []*ateapipb.EgressRule{{Http: &ateapipb.HTTPRule{Hostnames: wantHosts(cfg.Endpoints)}}},
+		}
+	}
+
+	r, _, out := newTestRunner(t, cfg, api, cfg.Endpoints)
+	rep, err := r.run(t.Context())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	if rep.Create.PoliciesUpdated != cfg.Actors {
+		t.Errorf("updated %d policies, want all %d http-only ones", rep.Create.PoliciesUpdated, cfg.Actors)
+	}
+	for name, p := range api.policies {
+		if len(p.GetRules()) != 2 {
+			t.Errorf("policy of %s has %d rules after the run, want 2", name, len(p.GetRules()))
+		}
+	}
+
+	r, _, out = newTestRunner(t, cfg, api, cfg.Endpoints)
+	if rep, err = r.run(t.Context()); err != nil {
+		t.Fatalf("second run: %v\n%s", err, out)
+	}
+	if rep.Create.PoliciesUpdated != 0 {
+		t.Errorf("second run updated %d policies, want none", rep.Create.PoliciesUpdated)
+	}
+}
+
+func TestRunHTTPS(t *testing.T) {
+	cfg := testConfig()
+	cfg.Scheme = egressapi.SchemeHTTPS
+	api := newFakeAPI()
+	objs := append(services(cfg.Endpoints, 80, httpsPort), newGatewaySetup(t).objects()...)
+	r, fr, out := newTestRunnerWith(t, cfg, api, objs...)
+
+	rep, err := r.run(t.Context())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	if len(fr.starts) != cfg.Parallel {
+		t.Fatalf("%d loops started, want %d", len(fr.starts), cfg.Parallel)
+	}
+	for name, req := range fr.starts {
+		if req.Scheme != egressapi.SchemeHTTPS {
+			t.Errorf("%s started over %q, want https", name, req.Scheme)
+		}
+	}
+	var printed bytes.Buffer
+	rep.print(&printed)
+	if !strings.Contains(printed.String(), "scheme=https ") {
+		t.Errorf("report header does not say https:\n%s", printed.String())
+	}
+}
+
+func TestPreflightHTTPS(t *testing.T) {
+	const n = 3
+	for _, tc := range []struct {
+		name    string
+		scheme  string
+		ports   []int32
+		mutate  func(*gatewaySetup)
+		wantErr string // "" means preflight passes
+	}{
+		{name: "patched gateway", scheme: egressapi.SchemeHTTPS, ports: []int32{80, httpsPort}},
+		{name: "http needs no gateway setup", scheme: egressapi.SchemeHTTP, mutate: func(g *gatewaySetup) { *g = gatewaySetup{} }},
+		{name: "service without https port", scheme: egressapi.SchemeHTTPS, ports: []int32{80}, wantErr: "--https"},
+		{name: "no target secret", scheme: egressapi.SchemeHTTPS, ports: []int32{80, httpsPort},
+			mutate: func(g *gatewaySetup) { g.secret = nil }, wantErr: "--deploy --https"},
+		{name: "no CA configmap", scheme: egressapi.SchemeHTTPS, ports: []int32{80, httpsPort},
+			mutate: func(g *gatewaySetup) { g.cm = nil }, wantErr: "--patch-gateway"},
+		{name: "gateway trusts another CA", scheme: egressapi.SchemeHTTPS, ports: []int32{80, httpsPort},
+			mutate: func(g *gatewaySetup) {
+				g.cm.Data[targetcert.CAFile] = string(newGatewaySetup(t).secret.Data[targetcert.CAFile])
+			}, wantErr: "--patch-gateway"},
+		{name: "gateway not patched", scheme: egressapi.SchemeHTTPS, ports: []int32{80, httpsPort},
+			mutate: func(g *gatewaySetup) {
+				g.dep.Spec.Template.Spec.InitContainers = g.dep.Spec.Template.Spec.InitContainers[1:]
+			}, wantErr: "--patch-gateway"},
+		{name: "patch annotation is stale", scheme: egressapi.SchemeHTTPS, ports: []int32{80, httpsPort},
+			mutate: func(g *gatewaySetup) { g.dep.Spec.Template.Annotations[gatewayCAAnnotation] = "0000" }, wantErr: "--patch-gateway"},
+		{name: "rollout in progress", scheme: egressapi.SchemeHTTPS, ports: []int32{80, httpsPort},
+			mutate: func(g *gatewaySetup) { g.dep.Status.UpdatedReplicas = 0 }, wantErr: "rollout status"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newGatewaySetup(t)
+			if tc.mutate != nil {
+				tc.mutate(g)
+			}
+			k8s := fake.NewSimpleClientset(append(services(n, tc.ports...), g.objects()...)...)
+			err := preflight(t.Context(), k8s, n, tc.scheme)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("preflight = %v, want it to pass", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Errorf("preflight = %v, want an error mentioning %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -657,6 +901,7 @@ func TestConfigValidate(t *testing.T) {
 		"bad conn mode":         func(c *runConfig) { c.ConnMode = "pooled" },
 		"zero duration":         func(c *runConfig) { c.Duration = 0 },
 		"negative interval":     func(c *runConfig) { c.RequestInterval = -time.Second },
+		"bad scheme":            func(c *runConfig) { c.Scheme = "ftp" },
 	} {
 		c := testConfig()
 		mutate(&c)

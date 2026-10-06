@@ -15,7 +15,8 @@
 
 # Deploys, or deletes, what the egress scale test runs against: the worker
 # pool, the actor template, and the endpoint Services with the server behind
-# them. See tools/egress-tests/README.md.
+# them. With --https it also patches the egress gateway to trust the target's
+# certificate. See tools/egress-tests/README.md.
 
 set -o errexit -o nounset -o pipefail
 
@@ -33,19 +34,36 @@ POOL_NAMESPACE="egress-tests"
 TARGET_NAMESPACE="egress-tests-targets"
 # The egress policy admits at most this many hostnames.
 MAX_ENDPOINTS=256
+# The egress gateway and what --patch-gateway adds to it. Keep in sync with
+# gateway.go and the gateway-trust-*.yaml manifests.
+SYSTEM_NAMESPACE="ate-system"
+GATEWAY_DEPLOYMENT="atenet-egress"
+GATEWAY_CA_CONFIGMAP="egress-tests-target-ca"
+TARGET_TLS_SECRET="egress-target-tls"
 
 WORKER_COUNT=2
 ACTOR_MEMORY="256Mi"
 WORKER_MEMORY=""
 ENDPOINTS=100
 WAIT_TIMEOUT_SECS=300
+HTTPS=false
+SKIP_TEMPLATE=false
 
 usage() {
-  echo "Usage: $0 --deploy|--delete [options]"
+  echo "Usage: $0 --deploy|--delete|--patch-gateway|--unpatch-gateway [options]"
+  echo ""
+  echo "Actions:"
+  echo "  --deploy                Deploy the worker pool, the actor template and the endpoints"
+  echo "  --delete                Delete them again, and unpatch the gateway"
+  echo "                          (run 'go run ./tools/egress-tests cleanup' first)"
+  echo "  --patch-gateway         Make the egress gateway trust the target's certificate, for"
+  echo "                          --scheme https runs. Rolls the gateway; test clusters only."
+  echo "  --unpatch-gateway       Undo --patch-gateway"
   echo ""
   echo "Options:"
-  echo "  --deploy                Deploy the worker pool, the actor template and the endpoints"
-  echo "  --delete                Delete them again (run 'go run ./tools/egress-tests cleanup' first)"
+  echo "  --https                 With --deploy, also --patch-gateway"
+  echo "  --skip-template         With --deploy, keep the existing actor template. Recreating it"
+  echo "                          strands existing actors, so --deploy refuses while any exist."
   echo "  --workers N             WorkerPool replicas (default: ${WORKER_COUNT})"
   echo "  --worker-memory SIZE    Memory request and limit of each worker pod (default: unset)."
   echo "                          A worker hosts up to worker memory / actor memory actors."
@@ -55,20 +73,28 @@ usage() {
   echo "  --wait-timeout SECONDS  How long to wait for each rollout and the golden snapshot (default: ${WAIT_TIMEOUT_SECS})"
 }
 
+# Scratch space for kubectl-ate and generated certificates, removed on exit.
+WORK_DIR="$(mktemp -d)"
+trap 'rm -rf "${WORK_DIR}"' EXIT
+
 # kubectl-ate runs once per poll while waiting for the golden snapshot, so it
 # is built once up front.
-KUBECTL_ATE_BIN=""
+KUBECTL_ATE_BIN="${WORK_DIR}/kubectl-ate"
 
 build_kubectl_ate() {
-  local dir
-  dir="$(mktemp -d)"
-  trap 'rm -rf '"${dir}" EXIT
-  KUBECTL_ATE_BIN="${dir}/kubectl-ate"
   go build -o "${KUBECTL_ATE_BIN}" ./cmd/kubectl-ate
 }
 
 run_kubectl_ate() {
   "${KUBECTL_ATE_BIN}" "$@"
+}
+
+sha256_file() {
+  if command -v sha256sum &>/dev/null; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
 }
 
 substitute() {
@@ -119,6 +145,90 @@ wait_actortemplate_ready() {
   return 1
 }
 
+# ensure_no_actors refuses to go on while actors exist. Recreating the
+# template deletes the golden snapshot that actors never resumed still restore
+# from, and resume uses the new template for the rest.
+ensure_no_actors() {
+  local count
+  count=$(run_kubectl_ate get actors -a "${ATESPACE}" -o json 2>/dev/null | jq '.actors // [] | length' || echo 0)
+  if ((count > 0)); then
+    echo "Error: ${count} actors exist in atespace ${ATESPACE}, and recreating the actor template would strand them." >&2
+    echo "Delete them first with 'go run ./tools/egress-tests cleanup --actors <largest --actors used>'," >&2
+    echo "or keep the current template with --skip-template." >&2
+    exit 1
+  fi
+}
+
+# ensure_target_tls_secret gives the target a certificate for every endpoint
+# name, issued once by a CA whose key is then discarded.
+ensure_target_tls_secret() {
+  kubectl create namespace "${TARGET_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  if kubectl -n "${TARGET_NAMESPACE}" get secret "${TARGET_TLS_SECRET}" &>/dev/null; then
+    return 0
+  fi
+  echo "Issuing the target's HTTPS certificate..."
+  go run ./tools/egress-tests certs --out "${WORK_DIR}/certs"
+  kubectl -n "${TARGET_NAMESPACE}" create secret generic "${TARGET_TLS_SECRET}" \
+    --type=kubernetes.io/tls \
+    --from-file=tls.crt="${WORK_DIR}/certs/tls.crt" \
+    --from-file=tls.key="${WORK_DIR}/certs/tls.key" \
+    --from-file=ca.crt="${WORK_DIR}/certs/ca.crt" >/dev/null
+  # Pods running from an earlier Secret do not see the new one.
+  if kubectl -n "${TARGET_NAMESPACE}" get deployment egress-target &>/dev/null; then
+    kubectl -n "${TARGET_NAMESPACE}" rollout restart deployment/egress-target
+  fi
+}
+
+# patch_gateway_trust makes the egress gateway trust the target's CA when it
+# re-originates TLS, and waits for the gateway to roll.
+patch_gateway_trust() {
+  local envoy_image ca_file ca_sha256
+  envoy_image=$(kubectl -n "${SYSTEM_NAMESPACE}" get deployment "${GATEWAY_DEPLOYMENT}" \
+    -o jsonpath='{.spec.template.spec.containers[?(@.name=="envoy")].image}')
+  if [[ -z "${envoy_image}" ]]; then
+    echo "Error: ${SYSTEM_NAMESPACE}/${GATEWAY_DEPLOYMENT} has no envoy container; --https supports only the Envoy dataplane." >&2
+    exit 1
+  fi
+  if ! kubectl -n "${TARGET_NAMESPACE}" get secret "${TARGET_TLS_SECRET}" &>/dev/null; then
+    echo "Error: the target has no certificate yet; run $0 --deploy --https first." >&2
+    exit 1
+  fi
+
+  ca_file="${WORK_DIR}/target-ca.crt"
+  kubectl -n "${TARGET_NAMESPACE}" get secret "${TARGET_TLS_SECRET}" \
+    -o go-template='{{index .data "ca.crt" | base64decode}}' >"${ca_file}"
+  kubectl -n "${SYSTEM_NAMESPACE}" create configmap "${GATEWAY_CA_CONFIGMAP}" \
+    --from-file=ca.crt="${ca_file}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  ca_sha256=$(sha256_file "${ca_file}")
+
+  echo "Patching ${SYSTEM_NAMESPACE}/${GATEWAY_DEPLOYMENT} to trust the target's CA..."
+  sed -e "s|\${ENVOY_IMAGE}|${envoy_image}|g" \
+      -e "s|\${TARGET_CA_SHA256}|${ca_sha256}|g" \
+      "${MANIFEST_DIR}/gateway-trust-patch.yaml.tmpl" >"${WORK_DIR}/gateway-trust-patch.yaml"
+  kubectl -n "${SYSTEM_NAMESPACE}" patch deployment "${GATEWAY_DEPLOYMENT}" \
+    --type strategic --patch-file "${WORK_DIR}/gateway-trust-patch.yaml"
+  if ! kubectl -n "${SYSTEM_NAMESPACE}" rollout status deployment/"${GATEWAY_DEPLOYMENT}" \
+    --timeout="${WAIT_TIMEOUT_SECS}s"; then
+    echo "Error: the patched gateway did not become ready; the previous pod keeps serving." >&2
+    echo "Undo the patch with $0 --unpatch-gateway." >&2
+    exit 1
+  fi
+}
+
+# unpatch_gateway_trust puts the gateway back on the public roots alone. The
+# CA ConfigMap goes last, once no gateway pod mounts it.
+unpatch_gateway_trust() {
+  if kubectl -n "${SYSTEM_NAMESPACE}" get deployment "${GATEWAY_DEPLOYMENT}" \
+    -o jsonpath='{.spec.template.spec.initContainers[*].name}' 2>/dev/null | grep -qw egress-tests-trust; then
+    echo "Removing the egress-tests trust patch from ${SYSTEM_NAMESPACE}/${GATEWAY_DEPLOYMENT}..."
+    kubectl -n "${SYSTEM_NAMESPACE}" patch deployment "${GATEWAY_DEPLOYMENT}" \
+      --type strategic --patch-file "${MANIFEST_DIR}/gateway-trust-unpatch.yaml"
+    kubectl -n "${SYSTEM_NAMESPACE}" rollout status deployment/"${GATEWAY_DEPLOYMENT}" \
+      --timeout="${WAIT_TIMEOUT_SECS}s"
+  fi
+  kubectl -n "${SYSTEM_NAMESPACE}" delete configmap "${GATEWAY_CA_CONFIGMAP}" --ignore-not-found >/dev/null
+}
+
 deploy() {
   if [[ -z "${BUCKET_NAME:-}" || -z "${KO_DOCKER_REPO:-}" ]]; then
     echo "Error: BUCKET_NAME and KO_DOCKER_REPO must be set (see .ate-dev-env.sh)." >&2
@@ -141,26 +251,38 @@ deploy() {
   run_kubectl_ate create atespace "${ATESPACE}" >/dev/null 2>&1 \
     || run_kubectl_ate get atespace "${ATESPACE}" >/dev/null
 
-  # Templates are immutable, so a changed one is deleted and created again.
-  echo "Creating actor template ${ATESPACE}/${TEMPLATE} (actor_memory=${ACTOR_MEMORY})..."
-  run_kubectl_ate delete actor-template "${TEMPLATE}" -a "${ATESPACE}" >/dev/null 2>&1 || true
-  substitute "${MANIFEST_DIR}/actor-template.yaml.tmpl" \
-    | hack/run-tool.sh ko resolve -f - \
-    | run_kubectl_ate create actor-template -f -
-  echo "Waiting for the golden snapshot..."
-  wait_actortemplate_ready
+  if [[ "${SKIP_TEMPLATE}" == true ]]; then
+    echo "Keeping the existing actor template ${ATESPACE}/${TEMPLATE}."
+  else
+    ensure_no_actors
+    # Templates are immutable, so a changed one is deleted and created again.
+    echo "Creating actor template ${ATESPACE}/${TEMPLATE} (actor_memory=${ACTOR_MEMORY})..."
+    run_kubectl_ate delete actor-template "${TEMPLATE}" -a "${ATESPACE}" >/dev/null 2>&1 || true
+    substitute "${MANIFEST_DIR}/actor-template.yaml.tmpl" \
+      | hack/run-tool.sh ko resolve -f - \
+      | run_kubectl_ate create actor-template -f -
+    echo "Waiting for the golden snapshot..."
+    wait_actortemplate_ready
+  fi
 
+  ensure_target_tls_secret
   echo "Deploying ${ENDPOINTS} endpoints in ${TARGET_NAMESPACE}..."
   hack/run-tool.sh ko apply -f - <"${MANIFEST_DIR}/targets.yaml.tmpl"
   render_services | kubectl apply -f - >/dev/null
   kubectl rollout status deployment/egress-target \
     --namespace="${TARGET_NAMESPACE}" --timeout="${WAIT_TIMEOUT_SECS}s"
   echo "Ready: endpoints egress-target-0 up to egress-target-$((ENDPOINTS - 1)).${TARGET_NAMESPACE}.svc.cluster.local"
+
+  if [[ "${HTTPS}" == true ]]; then
+    patch_gateway_trust
+    echo "Ready for --scheme https."
+  fi
 }
 
 delete() {
   build_kubectl_ate
   echo "Deleting the egress-tests deployment..."
+  unpatch_gateway_trust
   run_kubectl_ate delete actor-template "${TEMPLATE}" -a "${ATESPACE}" >/dev/null 2>&1 || true
   run_kubectl_ate delete atespace "${ATESPACE}" >/dev/null 2>&1 \
     || echo "atespace ${ATESPACE} not deleted: it may still hold actors; run 'go run ./tools/egress-tests cleanup' first"
@@ -182,6 +304,18 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --delete)
       action="delete"
+      ;;
+    --patch-gateway)
+      action="patch-gateway"
+      ;;
+    --unpatch-gateway)
+      action="unpatch-gateway"
+      ;;
+    --https)
+      HTTPS=true
+      ;;
+    --skip-template)
+      SKIP_TEMPLATE=true
       ;;
     --workers)
       shift
@@ -245,6 +379,8 @@ fi
 case "${action}" in
   deploy) deploy ;;
   delete) delete ;;
+  patch-gateway) patch_gateway_trust ;;
+  unpatch-gateway) unpatch_gateway_trust ;;
   *)
     usage
     exit 1

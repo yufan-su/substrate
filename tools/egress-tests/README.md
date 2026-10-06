@@ -14,15 +14,15 @@ The test has three pieces:
 | Piece | What it is |
 |---|---|
 | `actor/` | The workload. `POST /start` starts the loop, `GET /stats` reports progress, `POST /stop` stops the loop and returns its final stats. |
-| `target/` | A small HTTP server. One Deployment of it backs every endpoint Service. |
+| `target/` | A small HTTP and HTTPS server. One Deployment of it backs every endpoint Service. |
 | `.` (driver) | `go run ./tools/egress-tests run`: creates the actors, gives each one an egress policy, resumes B of them, runs the loops, and prints a report. |
 
 ## Endpoints and the egress policy
 
 Endpoint `i` is the Service DNS name
-`egress-target-<i>.egress-tests-targets.svc.cluster.local`, on port 80. Each
-endpoint has its own Service, so it has its own name and ClusterIP. All the
-Services select the same five `egress-target` pods.
+`egress-target-<i>.egress-tests-targets.svc.cluster.local`, on port 80 for HTTP
+and 443 for HTTPS. Each endpoint has its own Service, so it has its own name and
+ClusterIP. All the Services select the same five `egress-target` pods.
 
 The naming scheme is fixed in code, in
 [internal/egressapi/endpoints.go](internal/egressapi/endpoints.go). The driver
@@ -35,13 +35,19 @@ each actor, the driver gives it this policy:
 
 ```yaml
 rules:
-- http:
+- http:          # no ports means port 80
     hostnames:
     - egress-target-0.egress-tests-targets.svc.cluster.local
-    # ... up to egress-target-<C-1>; no ports means port 80
+    # ... up to egress-target-<C-1>
+- https:         # no ports means port 443
+    hostnames:
+    - egress-target-0.egress-tests-targets.svc.cluster.local
+    # ... the same names
 ```
 
-A rerun with a different C updates the existing policies.
+Both schemes are always allowed, so switching `--scheme` changes no policy. A
+rerun with a different C updates the existing policies, as does the first run
+after an upgrade from a driver that allowed only HTTP.
 
 ## Prerequisites
 
@@ -56,15 +62,25 @@ A rerun with a different C updates the existing policies.
 ./tools/egress-tests/deploy.sh --deploy --workers 4 --worker-memory 8Gi --endpoints 100
 ```
 
-This does four things:
+This does five things:
 1. Creates the `egress-tests` WorkerPool.
 2. Creates the `egress-tests/egress-tests-actor` actor template and waits for
    its golden snapshot.
-3. Deploys the target server.
-4. Creates the endpoint Services `egress-target-0` up to
+3. Issues the target's HTTPS certificate into Secret `egress-target-tls`, the
+   first time only.
+4. Deploys the target server, serving HTTP on 8080 and HTTPS on 8443.
+5. Creates the endpoint Services `egress-target-0` up to
    `egress-target-<C-1>`.
 
+Add `--https` to also patch the egress gateway for HTTPS runs (see
+[HTTPS](#https)).
+
 Deploy at least as many endpoints as the largest `--endpoints` you plan to run.
+
+`--deploy` recreates the actor template, and that strands existing actors:
+those never resumed restore from the template's golden snapshot, which is
+deleted with it. So `--deploy` refuses while any actors exist. Delete them with
+`cleanup` first, or keep the current template with `--skip-template`.
 
 Size the pool for B running actors. A worker hosts up to `--worker-memory` /
 `--actor-memory` actors, and at most 1000. For example, B=100 at the default
@@ -81,9 +97,10 @@ go run ./tools/egress-tests run --actors 1000 --parallel 10 --endpoints 10 --dur
 | Flag | Default | Meaning |
 |---|---|---|
 | `--actors` | 1000 | **A**: actors to create. Actors are named `egress-<i>`. A rerun reuses the ones that already exist. |
-| `--parallel` | 1 | **B**: actors to resume, all running their loops at the same time. These are `egress-0` up to `egress-<B-1>`. |
+| `--parallel` | 1 | **B**: actors to resume, all running their loops at the same time. Each run picks them at random from the A actors. |
 | `--endpoints` | 10 | **C**: endpoints each loop calls, in order, round and round. At most 256. |
 | `--duration` | 5m | How long the loops run once they have all started. |
+| `--scheme` | `http` | `http`, or `https` through the gateway's TLS interception. HTTPS needs `deploy.sh --https`; see [HTTPS](#https). |
 | `--conn-mode` | `keepalive` | `keepalive` keeps one connection per endpoint. `new-conn` opens a new connection for every request. |
 | `--request-timeout` | 5s | Timeout of one request. |
 | `--request-interval` | 100ms | Pause after each request, which sets each actor's rate. 0 sends back to back at full speed. |
@@ -107,7 +124,7 @@ until latency and errors climb.
 The run goes through these phases:
 1. **Preflight**: checks that the C endpoint Services exist.
 2. **Create**: creates the A actors and their policies.
-3. **Resume**: resumes B actors and waits until each one answers through the
+3. **Resume**: resumes B actors, picked at random from the A, and waits until each one answers through the
    router.
 4. **Start**: starts all the loops at the same moment.
 5. **Run**: waits `--duration`, printing progress.
@@ -116,6 +133,54 @@ The run goes through these phases:
 
 After Ctrl-C, the loops that started are still stopped and the actors
 suspended.
+
+### HTTPS
+
+`--scheme https` sends every request over TLS, through the gateway's TLS
+interception path (its `egress_tls_mitm` filter chain):
+1. The gateway terminates the actor's TLS with a certificate it mints for each
+   name.
+2. It checks each decrypted request against the policy.
+3. It opens its own TLS connection to the target.
+
+Most agent egress is HTTPS, so this path is the one that matters at scale.
+
+Each request therefore uses two TLS connections:
+
+| | TLS #1: actor → gateway | TLS #2: gateway → target |
+|---|---|---|
+| Certificate | minted for the name by the gateway's sdsmint, signed by the gateway's MITM CA | the target's own `*.egress-tests-targets.svc.cluster.local`, from Secret `egress-target-tls` |
+| Why it's trusted | the actor template projects the `egress-mitm.ate.dev` trust bundle and points `SSL_CERT_FILE` at it | `deploy.sh --https` patches the gateway so its root bundle includes the target's CA |
+
+**The gateway patch.** The gateway verifies every certificate it gets from a
+destination against the public roots in its Envoy image, and the install has no
+way to add a CA. `--patch-gateway`, or `--deploy --https`, works around that on
+test clusters:
+- It patches the `atenet-egress` Deployment with an init container that appends
+  the target's CA to that root bundle. It changes no `envoy.yaml`, and it rolls
+  the gateway.
+- The CA can vouch only for the endpoint names: it is name-constrained to their
+  domain, and its private key was thrown away after it signed the target's
+  certificate (see [internal/targetcert](internal/targetcert/targetcert.go)).
+- Reinstalling Substrate does not undo the patch. Run `--patch-gateway` again
+  after a reinstall to pick up a new Envoy image, and `--unpatch-gateway` to
+  remove it. `--delete` removes it too.
+- `run --scheme https` checks the patch first and stops with a hint if it is
+  missing, stale or still rolling out.
+
+**The actor deliberately does not trust the target's CA.** If the gateway ever
+passed TLS straight through instead of intercepting it, the actor would get the
+target's certificate and fail with `tls: unknown authority`. So a run with no
+errors shows that every request went through decrypt, policy check and
+re-encrypt.
+
+Setup, starting from a cluster that has actors from earlier runs:
+
+```bash
+go run ./tools/egress-tests cleanup --actors 1000      # the template changes once for HTTPS
+./tools/egress-tests/deploy.sh --deploy --https --workers 8 --worker-memory 4Gi --endpoints 100
+go run ./tools/egress-tests run --actors 100 --parallel 10 --endpoints 100 --scheme https
+```
 
 ### Why the loop waits for `/start`
 
@@ -155,13 +220,28 @@ and a line naming the endpoints with the most errors.
 - **DNS** counts lookups. Go does not cache DNS. Every new connection resolves
   the name through the sandbox DNS relay and the cluster DNS, including the
   `ndots:5` search-suffix tries.
+- **TLS** (HTTPS only) counts completed handshakes between the actor and the
+  gateway, with their times. In keepalive mode that's about B×C; in new-conn
+  mode it's one per request.
 - **Errors** are grouped into classes: `timeout`, `connection refused`,
   `connection reset`, `EOF`, `dns: …`, `HTTP <code>`, and `other: …`. An
   `HTTP 403` means the gateway denied the request.
+- **HTTPS error classes:**
+  - `tls: unknown authority`, `tls: hostname mismatch`, `tls: invalid certificate`,
+    `tls: not a TLS server` and `tls: peer alert: …` name what failed verification.
+  - A `tls handshake: ` prefix marks a failure partway through a handshake. For
+    example, `tls handshake: EOF` is the gateway closing a connection whose name
+    no rule allows.
+  - `HTTP 503` in HTTPS mode usually means the gateway couldn't verify the
+    target. Check `upstream_failure` in the gateway's access log, and whether
+    the gateway is patched.
 
 Resume and ready latency are measured by the driver. Resume latency runs
 from the first `ResumeActor` attempt until it succeeds, retries included.
 Ready latency runs from then until the actor first answers through the router.
+Because each run picks its B actors at random, they usually mix actors that
+never ran, which restore from the template's golden snapshot, with actors an
+earlier run suspended, which restore from their own snapshot.
 
 ## Suggested matrix
 
@@ -186,21 +266,35 @@ Record the `atenet-egress` replica count with each result. The default is 1.
   target. The gateway saturates long before the target does; its five replicas
   leave plenty of room even after scaling the gateway out.
 
-- **Keep-alive mode hits Envoy's default circuit breaker.** Every actor
+- **Keep-alive mode holds one tunnel per actor and endpoint.** Every actor
   connection is its own atunnel tunnel, and its own connection in the gateway's
-  `mitm_internal` cluster. That cluster and `egress_forward_proxy_cleartext`
-  set no `circuit_breakers`, so Envoy's default of 1024 connections applies.
-  Past roughly 1k open tunnels (B×C), expect CONNECTs to fail. The actor sees
-  `EOF` or `connection reset`. To confirm, port-forward to the gateway's Envoy
-  admin port (`kubectl -n ate-system port-forward deploy/atenet-egress 15000`)
-  and read `cluster.mitm_internal.upstream_cx_overflow` under `/stats`.
+  `mitm_internal` cluster.
+  - That cluster allows 16,384 tunnels per gateway replica.
+  - Past that, the gateway refuses new tunnels, and the actor sees `EOF` or
+    `connection reset`.
+  - To confirm, port-forward to the gateway's Envoy admin port
+    (`kubectl -n ate-system port-forward deploy/atenet-egress 15000`) and read
+    `cluster.mitm_internal.upstream_cx_overflow` under `/stats`.
+  - The clusters that connect to destinations (`egress_forward_proxy` and
+    `egress_forward_proxy_cleartext`) still use Envoy's defaults of 1,024
+    connections. Bursts of simultaneous requests to the same destination push
+    those counts up.
+- **HTTPS costs more per connection.**
+  - Session resumption is off, so new-conn mode does a full handshake with the
+    gateway on every request.
+  - The gateway's minted certificates last 15 minutes, so runs longer than that
+    mint them again.
+  - Expect more gateway CPU and memory than the same HTTP run, for TLS on both
+    sides.
 - **New-conn mode loads the control plane.** Every CONNECT makes the gateway
   call ateapi `GetActor`, uncached, to authenticate the actor.
 - **Confirming the gateway carried the traffic.**
   `kubectl -n ate-system logs deploy/atenet-egress -c envoy --tail=3` should
-  show JSON lines with `"leg":"cleartext"`, the actor's SPIFFE ID
-  (`ateom-for-actor/egress-tests/egress-<n>`), and an `egress-target-<i>`
-  authority. The keys are in alphabetical order, so grep for one key at a time.
+  show JSON lines with the actor's SPIFFE ID
+  (`ateom-for-actor/egress-tests/egress-<n>`), an `egress-target-<i>` authority,
+  and `"leg":"cleartext"` (HTTP) or `"leg":"mitm"` (HTTPS). For HTTPS,
+  `"upstream_failure"` should be empty. The keys are in alphabetical order, so
+  grep for one key at a time.
 - **Logging volume.** Envoy writes an access log line for every CONNECT and
   every request, so keep high-rate runs short. The kubelet also rotates the
   log quickly: at about 800 req/s, only the last ~25 seconds survive.
@@ -214,4 +308,5 @@ go run ./tools/egress-tests cleanup --actors 10000   # the largest --actors any 
 
 `cleanup` deletes `egress-0` up to `egress-<actors-1>` in any state. Each
 actor's egress policy is deleted with it. `deploy.sh --delete` removes the
-template, the atespace, the endpoints and the worker pool.
+gateway patch, the template, the atespace, the endpoints and the worker pool.
+To remove only the gateway patch, use `deploy.sh --unpatch-gateway`.
