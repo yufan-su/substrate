@@ -209,8 +209,8 @@ three sources through the API server, each on its own cadence:
 The worker pod is the smallest unit cAdvisor sees: it holds the actors,
 gVisor, atunnel and the sandbox DNS relay together.
 
-The report then adds `cpu` and `memory` lines: each component's mean and
-peak cores over the steady window, cores per 1000 req/s, the exact steady
+The report then adds `cpu`, `memory` and `envoy` lines: each component's
+mean and peak cores over the steady window, cores per 1000 req/s, the exact steady
 CPU of the Go processes and the driver, and the gateway's connection
 overflow. `--output` adds a `resources` section with the raw readings, a
 long-format `series` for plots, per-component summaries, and the
@@ -392,16 +392,26 @@ Record the `atenet-egress` replica count with each result. The default is 1.
 - **Keep-alive mode holds one tunnel per actor and endpoint.** Every actor
   connection is its own atunnel tunnel, and its own connection in the gateway's
   `mitm_internal` cluster.
-  - That cluster allows 16,384 tunnels per gateway replica.
-  - Past that, the gateway refuses new tunnels, and the actor sees `EOF` or
-    `connection reset`.
+  - The `atenet-egress` manifest allows 16,384 tunnels per gateway replica
+    in that cluster (`max_connections`) and queues up to 16,384 more
+    (`max_pending_requests`). A cluster may change both in the
+    `atenet-egress` ConfigMap.
+  - Past the limit, new CONNECTs wait in the pending queue and the actor sees
+    its request time out. The gateway refuses with a 503 only when the pending
+    queue is full too; the actor then sees `EOF` or `connection reset`.
   - To confirm, port-forward to the gateway's Envoy admin port
     (`kubectl -n ate-system port-forward deploy/atenet-egress 15000`) and read
-    `cluster.mitm_internal.upstream_cx_overflow` under `/stats`.
+    `cluster.mitm_internal.upstream_cx_overflow` under `/stats`. The report's
+    `mitm_internal` cx counters, and
+    `cluster.<name>.circuit_breakers.default.cx_open`, which the `envoy` line
+    reports as `breaker OPENED`, show which limit applies.
   - The clusters that connect to destinations (`egress_forward_proxy` and
     `egress_forward_proxy_cleartext`) still use Envoy's defaults of 1,024
     connections. Bursts of simultaneous requests to the same destination push
-    those counts up.
+    those counts up. The cleartext proxy's connections scale with concurrent
+    upstream connections to the targets, not with tunnels. They peaked at 631
+    at B=10 C=100 and 121 at B=100 C=10; the `envoy` line prints each
+    cluster's peak.
 - **HTTPS costs more per connection.**
   - Session resumption is off, so new-conn mode does a full handshake with the
     gateway on every request.
