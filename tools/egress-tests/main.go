@@ -135,6 +135,7 @@ func runCmd(ctx context.Context, args []string) error {
 	resources := fs.Bool("resources", false, "Sample the CPU and memory of the components on the egress path during the run.")
 	resourcesVerify := fs.Bool("resources-verify", false, "With --resources, print the resource self-checks and fail the run if one fails.")
 	resourcesCgreader := fs.Bool("resources-cgreader", false, "With --resources, also pull one-second cgroup readings from the cgroup reader DaemonSet (deploy.sh --deploy --cgreader).")
+	preIdle := fs.Duration("pre-idle", 0, "With --resources, sample this long before create, with none of the run's actors running; the summary reports it as the baseline.")
 	resourcesInterval := fs.Duration("resources-interval", time.Second, "How often --resources reads the live sources (Go process counters, Envoy stats).")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -146,8 +147,11 @@ func runCmd(ctx context.Context, args []string) error {
 	if *resources && *resourcesInterval <= 0 {
 		return fmt.Errorf("--resources-interval must be positive, got %v", *resourcesInterval)
 	}
-	if (*resourcesVerify || *resourcesCgreader) && !*resources {
-		return errors.New("--resources-verify and --resources-cgreader need --resources")
+	if (*resourcesVerify || *resourcesCgreader || *preIdle != 0) && !*resources {
+		return errors.New("--resources-verify, --resources-cgreader and --pre-idle need --resources")
+	}
+	if *preIdle < 0 {
+		return fmt.Errorf("--pre-idle must not be negative, got %v", *preIdle)
 	}
 
 	conn, err := cf.connect(ctx)
@@ -178,6 +182,7 @@ func runCmd(ctx context.Context, args []string) error {
 		}
 		r.res = newResourceSampler(get, conn.k8s, *resourcesInterval)
 		r.settleResources = *resourcesVerify
+		r.preIdle = *preIdle
 		r.res.cgreaderOn = *resourcesCgreader
 	}
 	rep, runErr := r.run(ctx)

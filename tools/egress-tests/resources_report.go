@@ -162,6 +162,11 @@ func summarizeResources(rep *report) {
 	res := rep.Resources
 	steady := rep.phase("steady")
 	res.Components = map[string]*componentSummary{}
+	preIdle := rep.phase("pre-idle")
+	res.Baseline = nil
+	if !preIdle.End.IsZero() {
+		res.Baseline = map[string]*steadySummary{}
+	}
 	var settled phaseMark
 	if !steady.End.IsZero() {
 		if w, ok := settledOf(rep.Config, steady, rep.LoopTimeline); ok {
@@ -224,6 +229,15 @@ func summarizeResources(rep *report) {
 		}
 		if ctr == podContainer || steady.End.IsZero() {
 			continue
+		}
+		if !preIdle.End.IsZero() {
+			b := steadyOf(ss, segs, preIdle).steadySummary
+			for _, k := range []string{comp, comp + "/" + ctr} {
+				if res.Baseline[k] == nil {
+					res.Baseline[k] = &steadySummary{Coverage: 1}
+				}
+				addTo(res.Baseline[k], b)
+			}
 		}
 		sum := steadyOf(ss, segs, steady)
 		cs := res.Components[comp]
@@ -552,6 +566,15 @@ func (rep *report) printResources(w io.Writer) {
 	if st := res.Settled; st != nil && len(settledK) > 0 {
 		fmt.Fprintf(w, "%-10s cores per 1000 req/s, settled: %s (from steady +%.1fs by %s, %.1f req/s)\n", "",
 			strings.Join(settledK, " "), st.Start.Sub(rep.phase("steady").Start).Seconds(), st.Rule, st.ReqPerS)
+	}
+	if len(res.Baseline) > 0 {
+		var base []string
+		for _, name := range componentOrder {
+			if b := res.Baseline[name]; b != nil && !b.Insufficient {
+				base = append(base, fmt.Sprintf("%s %.3f", name, b.CPUCores.Mean))
+			}
+		}
+		fmt.Fprintf(w, "%-10s pre-idle baseline cores: %s\n", "", strings.Join(base, " "))
 	}
 	var live []string
 	for _, name := range append(slices.Clone(componentOrder), "driver") {

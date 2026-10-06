@@ -325,6 +325,7 @@ func TestRunWithResources(t *testing.T) {
 		return 50 + float64(len(fr.starts))
 	}
 	r.res = newResourceSampler(get, r.k8s, 5*time.Millisecond)
+	r.preIdle = 30 * time.Millisecond
 
 	rep, err := r.run(t.Context())
 	if err != nil {
@@ -337,7 +338,7 @@ func TestRunWithResources(t *testing.T) {
 			t.Errorf("phase %s runs %v to %v, out of order", p.Name, p.Start, p.End)
 		}
 	}
-	if got, want := strings.Join(names, ","), "create,resume,start,steady,stop,suspend"; got != want {
+	if got, want := strings.Join(names, ","), "pre-idle,create,resume,start,steady,stop,suspend"; got != want {
 		t.Errorf("phases = %s, want %s", got, want)
 	}
 	if rep.Resources == nil {

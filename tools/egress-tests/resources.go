@@ -109,6 +109,9 @@ type resourceReport struct {
 	MetricsServer []podMetricsSample `json:"metricsServer,omitempty"`
 	// Components summarizes each component over the steady window.
 	Components map[string]*componentSummary `json:"components,omitempty"`
+	// Baseline is each component's and container's use over the pre-idle
+	// phase, keyed "component" and "component/container".
+	Baseline map[string]*steadySummary `json:"baseline,omitempty"`
 	// Settled is the window the components' settled summaries cover.
 	Settled *settledWindow `json:"settledWindow,omitempty"`
 	// Cgreader holds the cgroup readers' one-second rows, when enabled.

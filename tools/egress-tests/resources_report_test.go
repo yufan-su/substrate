@@ -455,3 +455,42 @@ func TestPrintRequestBreaker(t *testing.T) {
 		t.Errorf("printed resources lack %q:\n%s", want, out.String())
 	}
 }
+
+func TestSummarizeResourcesBaseline(t *testing.T) {
+	t.Parallel()
+	rep := testResourceReport()
+	t0 := time.Unix(1000, 0)
+	s := time.Second
+	// Pre-idle covers the readings at 0 and 16 s, before steady at 10–70 s
+	// would start in a real run; the window is all that matters here.
+	rep.Phases = append([]phaseMark{{Name: "pre-idle", Start: t0, End: t0.Add(16 * s)}}, rep.Phases...)
+	summarizeResources(rep)
+	b := rep.Resources.Baseline
+	for _, tc := range []struct {
+		key  string
+		want float64
+	}{
+		{"gateway", 1.5},
+		{"gateway/envoy", 1},
+		{"gateway/ext-proc", 0.5},
+		{"workers", 0.5},
+	} {
+		if b[tc.key] == nil || !near(b[tc.key].CPUCores.Mean, tc.want) {
+			t.Errorf("baseline[%s] = %+v, want %v cores", tc.key, b[tc.key], tc.want)
+		}
+	}
+	if _, ok := b["gateway/POD"]; ok {
+		t.Error("baseline holds the pod cgroup as a container")
+	}
+	var out bytes.Buffer
+	rep.printResources(&out)
+	if want := "pre-idle baseline cores: gateway 1.500 workers 0.500"; !strings.Contains(out.String(), want) {
+		t.Errorf("printed resources lack %q:\n%s", want, out.String())
+	}
+
+	none := testResourceReport()
+	summarizeResources(none)
+	if none.Resources.Baseline != nil {
+		t.Errorf("baseline without a pre-idle phase = %v, want nil", none.Resources.Baseline)
+	}
+}
