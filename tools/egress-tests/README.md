@@ -193,6 +193,15 @@ would then be frozen into every actor's snapshot. Starting on request keeps the
 snapshot idle. It also lets the driver start all B loops together and change
 C or the connection mode without rebuilding the template.
 
+## Usage sampling
+
+**Permissions.** The driver uses your kubeconfig identity. With `--usage` it
+needs `get` on `nodes/proxy`, `list` on pods in `egress-tests`,
+`egress-tests-targets`, `ate-system` and `kube-system`, and `get` on
+`pods/proxy` in `ate-system`. `nodes/proxy` also reaches the kubelet's exec
+and attach endpoints, so grant it only to people who could exec into pods
+anyway.
+
 ## Reading the report
 
 This is a real run: `--actors 100 --parallel 1 --endpoints 10 --duration 2m

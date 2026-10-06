@@ -60,6 +60,16 @@ type phaseMark struct {
 	End   time.Time `json:"end"`
 }
 
+// phase returns the named phase, or a zero mark when it never ran.
+func (rep *report) phase(name string) phaseMark {
+	for _, p := range rep.Phases {
+		if p.Name == name {
+			return p
+		}
+	}
+	return phaseMark{}
+}
+
 func (rep *report) addPhase(name string, start time.Time) {
 	rep.Phases = append(rep.Phases, phaseMark{Name: name, Start: start, End: time.Now()})
 }

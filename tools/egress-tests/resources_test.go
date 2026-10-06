@@ -74,6 +74,13 @@ func (g *fakeGetter) GetRaw(_ context.Context, path string, params url.Values) (
 	switch {
 	case strings.HasSuffix(path, ":9090/proxy/metrics"):
 		return fmt.Appendf(nil, "# TYPE process_cpu_seconds_total counter\nprocess_cpu_seconds_total %.2f\nprocess_resident_memory_bytes 5e+07\n", 100+0.01*float64(n)), nil
+	case strings.HasSuffix(path, "/proxy/metrics/cadvisor"):
+		// cAdvisor refreshes every third read, 15 s apart.
+		ts := 1_700_000_000_000 + int64((n-1)/3)*15_000
+		cpu := 10 + float64((n-1)/3)
+		return fmt.Appendf(nil, `container_cpu_usage_seconds_total{container="envoy",cpu="total",image="envoy",namespace="ate-system",pod="atenet-egress-a"} %v %d
+container_memory_working_set_bytes{container="envoy",image="envoy",namespace="ate-system",pod="atenet-egress-a"} 6e+07 %d
+`, cpu, ts, ts), nil
 	case strings.HasSuffix(path, ":15090/proxy/stats/prometheus"):
 		if params.Get("filter") != envoyStatsFilter {
 			return nil, fmt.Errorf("unexpected filter %q", params.Get("filter"))
@@ -100,8 +107,13 @@ func addSystemPods(t *testing.T, k8s kubernetes.Interface) {
 		"ate-api-server-a": "ate-api-server",
 		"ate-api-server-b": "ate-api-server",
 	} {
+		containers := []corev1.Container{{Name: "ate-api-server"}}
+		if app == "atenet-egress" {
+			containers = []corev1.Container{{Name: "envoy"}, {Name: "ext-proc"}}
+		}
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ate-system", Labels: map[string]string{"app": app}},
+			Spec:       corev1.PodSpec{NodeName: "node-a", Containers: containers},
 			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 		}
 		if _, err := k8s.CoreV1().Pods("ate-system").Create(t.Context(), pod, metav1.CreateOptions{}); err != nil {
@@ -301,6 +313,7 @@ func TestResourceSampler(t *testing.T) {
 	broken := podProxyPath("ate-system", "ate-api-server-b", 9090, "/metrics")
 	get.fail[broken] = true
 	s := newResourceSampler(get, k8s, 5*time.Millisecond)
+	s.cadvisorInterval = 2 * time.Millisecond
 
 	if err := s.start(t.Context()); err != nil {
 		t.Fatal(err)
@@ -331,8 +344,15 @@ func TestResourceSampler(t *testing.T) {
 	if labeled != 4 {
 		t.Errorf("%d labeled live reads, want 2 marks x 2 working pods", labeled)
 	}
-	if len(rep.Envoy) < 3 || len(rep.Sources) != 2 {
-		t.Errorf("%d envoy reads and sources %+v, want at least 3 reads and 2 sources", len(rep.Envoy), rep.Sources)
+	if len(rep.Envoy) < 3 || len(rep.Sources) != 3 {
+		t.Errorf("%d envoy reads and sources %+v, want at least 3 reads and 3 sources", len(rep.Envoy), rep.Sources)
+	}
+	cadvisorReads := get.readsOf("/api/v1/nodes/node-a/proxy/metrics/cadvisor")
+	if want := (cadvisorReads + 2) / 3; len(rep.Samples) != want || cadvisorReads < 6 {
+		t.Errorf("%d cAdvisor samples after %d reads, want one per new timestamp (%d)", len(rep.Samples), cadvisorReads, want)
+	}
+	if !slices.Equal(s.missing, []string{"workers", "router", "targets", "dns"}) {
+		t.Errorf("missing components = %v, want the four with no pods in the fake", s.missing)
 	}
 	if rep.Driver.WholeRun.WallSeconds <= 0 || rep.Driver.Steady.WallSeconds <= 0 {
 		t.Errorf("driver usage %+v, want whole-run and steady windows", rep.Driver)
@@ -376,12 +396,15 @@ func TestRunWithResources(t *testing.T) {
 	checks := map[string]int{}
 	for _, v := range rep.Resources.Verify {
 		checks[v.Check]++
+		if strings.HasPrefix(v.Scope, "live ") {
+			checks["live coverage"]++
+		}
 		if v.Check == "envoy-connections" && !v.Pass {
 			t.Errorf("envoy-connections failed: %+v", v)
 		}
 	}
-	if checks["envoy-connections"] != 1 || checks["overhead"] != 1 || checks["coverage"] != 3 {
-		t.Errorf("self-checks run = %v, want envoy-connections, overhead and coverage for 3 processes", checks)
+	if checks["envoy-connections"] != 1 || checks["overhead"] != 1 || checks["live coverage"] != 3 || checks["conservation"] == 0 {
+		t.Errorf("self-checks run = %v, want envoy-connections, overhead, conservation and live coverage for 3 processes", checks)
 	}
 	if len(rep.LoopTimeline) == 0 || rep.LoopTimeline[len(rep.LoopTimeline)-1].Requests == 0 {
 		t.Errorf("loop timeline = %+v, want the progress polls", rep.LoopTimeline)
