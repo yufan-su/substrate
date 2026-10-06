@@ -108,6 +108,7 @@ go run ./tools/egress-tests run --actors 1000 --parallel 10 --endpoints 10 --dur
 | `--resume-timeout` | 5m | Per actor: how long to keep resuming, then waiting for it to answer. |
 | `--progress-interval` | 30s | How often to print progress. 0 turns it off. |
 | `--usage` | off | Sample the CPU and memory of the components on the egress path. See [Usage sampling](#usage-sampling). |
+| `--usage-verify` | off | With `--usage`, print the self-checks and fail the run if one fails. |
 | `--usage-live-interval` | 1s | How often `--usage` reads the Go process counters and Envoy's stats. |
 | `--output` | | Write the full report, including per-actor stats, as JSON to this file. Durations are in nanoseconds. |
 | `--kubeconfig`, `--context` | | Which cluster to use. |
@@ -195,12 +196,63 @@ C or the connection mode without rebuilding the template.
 
 ## Usage sampling
 
-**Permissions.** The driver uses your kubeconfig identity. With `--usage` it
-needs `get` on `nodes/proxy`, `list` on pods in `egress-tests`,
-`egress-tests-targets`, `ate-system` and `kube-system`, and `get` on
-`pods/proxy` in `ate-system`. `nodes/proxy` also reaches the kubelet's exec
-and attach endpoints, so grant it only to people who could exec into pods
-anyway.
+`--usage` measures what the egress path spends during a run. It reads
+three sources through the API server, each on its own cadence:
+
+| Source | What | Cadence | Path |
+|---|---|---|---|
+| live | `process_cpu_seconds_total` and RSS of `ext-proc` and `ate-api-server` | `--usage-live-interval` (1s) and at each phase boundary | `pods/<pod>:9090/proxy/metrics` |
+| envoy | the gateway's `mitm_internal` and `egress_forward_proxy_cleartext` connection counters | same | `pods/<pod>:15090/proxy/stats/prometheus`, the `envoy_metrics` listener; the admin API itself is loopback-only |
+| cadvisor | container CPU, CFS throttling and working set of the workers, gateway, ateapi, router, targets and kube-dns | polled every 5s; the kubelet refreshes each container every 12 to 20s | `nodes/<node>/proxy/metrics/cadvisor` |
+
+The worker pod is the smallest unit cAdvisor sees: it holds the actors,
+gVisor, atunnel and the sandbox DNS relay together.
+
+The report then adds `cpu` and `memory` lines: each component's mean and
+peak cores over the steady window, cores per 1000 req/s, the exact steady
+CPU of the Go processes and the driver, and the gateway's connection
+overflow. `--output` adds a `resources` section with the raw readings, a
+long-format `series` for plots, per-component summaries, and the
+self-checks. `phases` and `loopTimeline` hold the phase boundaries and the
+progress polls; use `--progress-interval 5s` for a finer timeline.
+
+**Run at least 45s.** A cAdvisor series needs two readings inside the
+steady window. A shorter run marks cAdvisor-only components
+`insufficient`; the live sources still resolve one second.
+
+**Permissions.** The driver uses your kubeconfig identity. It needs `get`
+on `nodes/proxy`, `list` on pods in `egress-tests`, `egress-tests-targets`,
+`ate-system` and `kube-system`, `get` on `pods/proxy` in `ate-system`, and
+`list` on `pods.metrics.k8s.io` in those namespaces. `nodes/proxy` also
+reaches the kubelet's exec and attach endpoints, so grant it only to
+people who could exec into pods anyway.
+
+**Self-checks.** `--usage-verify` prints the checks and fails the run
+when one fails: the gateway's new connections match the actors' own count,
+each pod cgroup equals its containers' sum, each Go process counter matches
+its container's cgroup, metrics-server falls within the sampler's range
+for its window within 15%, every series has its readings, the Go
+processes' steady means fall within their per-interval rates, a rerun's
+create and suspend phases stay near idle, and the driver stays under half
+a core. `INFO` lines report what a short run cannot resolve.
+
+Gaps between reads are judged in two tiers, since one slow API server
+round trip costs a point of a cumulative counter, not CPU:
+
+| Source | Fails when | INFO when |
+|---|---|---|
+| live (1s) | a gap over 5s or three intervals, whichever is longer, or over 5% of intervals over two intervals | a few intervals over two intervals |
+| cAdvisor (12 to 20s) | never | fewer than two readings in steady |
+
+Before a real measurement, run a short smoke test:
+
+```bash
+go run ./tools/egress-tests run --actors 10 --parallel 1 --endpoints 10 \
+  --duration 30s --usage --usage-verify --progress-interval 5s
+```
+
+It should end with `verify     PASS`. At 30s the cAdvisor-only components
+are `insufficient`, as expected.
 
 ## Reading the report
 

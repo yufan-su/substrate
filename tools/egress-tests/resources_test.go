@@ -81,6 +81,11 @@ func (g *fakeGetter) GetRaw(_ context.Context, path string, params url.Values) (
 		return fmt.Appendf(nil, `container_cpu_usage_seconds_total{container="envoy",cpu="total",image="envoy",namespace="ate-system",pod="atenet-egress-a"} %v %d
 container_memory_working_set_bytes{container="envoy",image="envoy",namespace="ate-system",pod="atenet-egress-a"} 6e+07 %d
 `, cpu, ts, ts), nil
+	case path == "/apis/metrics.k8s.io/v1beta1/namespaces/ate-system/pods":
+		return []byte(`{"items":[{"metadata":{"name":"atenet-egress-a","namespace":"ate-system"},"timestamp":"2023-11-14T22:13:20Z","window":"30s",
+"containers":[{"name":"envoy","usage":{"cpu":"812m","memory":"64Mi"}},{"name":"other","usage":{"cpu":"1"}}]}]}`), nil
+	case strings.HasPrefix(path, "/apis/metrics.k8s.io/"):
+		return []byte(`{"items":[]}`), nil
 	case strings.HasSuffix(path, ":15090/proxy/stats/prometheus"):
 		if params.Get("filter") != envoyStatsFilter {
 			return nil, fmt.Errorf("unexpected filter %q", params.Get("filter"))
@@ -265,28 +270,44 @@ func TestCheckEnvoyConnections(t *testing.T) {
 func TestCheckLiveGaps(t *testing.T) {
 	t.Parallel()
 	t0 := time.Unix(1000, 0)
-	series := func(offsets ...time.Duration) []liveSample {
+	// series reads every step for n intervals, with the listed intervals
+	// stretched to slow.
+	series := func(step time.Duration, n int, slow time.Duration, at ...int) []liveSample {
 		var out []liveSample
-		for _, o := range offsets {
-			out = append(out, liveSample{T: t0.Add(o), Component: "gateway", Container: "ext-proc", Pod: "p"})
+		t := t0
+		for i := 0; i <= n; i++ {
+			out = append(out, liveSample{T: t, Component: "gateway", Container: "ext-proc", Pod: "p"})
+			d := step
+			if slices.Contains(at, i) {
+				d = slow
+			}
+			t = t.Add(d)
 		}
 		return out
 	}
+	tenSlow := []int{5, 15, 25, 35, 45, 55, 65, 75, 85, 95}
 	for _, tc := range []struct {
-		name    string
-		samples []liveSample
-		want    bool
+		name               string
+		samples            []liveSample
+		interval           time.Duration
+		wantPass, wantInfo bool
 	}{
-		{name: "every second", samples: series(0, time.Second, 2*time.Second), want: true},
-		{name: "one missed poll", samples: series(0, 2*time.Second), want: true},
-		{name: "two missed polls", samples: series(0, 3*time.Second), want: false},
-		{name: "single read", samples: series(0), want: false},
+		{"every second", series(time.Second, 130, 0), time.Second, true, false},
+		{"one 2.4 s gap in 130 intervals", series(time.Second, 130, 2400*time.Millisecond, 60), time.Second, false, true},
+		{"one 6 s gap", series(time.Second, 130, 6*time.Second, 60), time.Second, false, false},
+		{"ten 2.5 s gaps in 130 intervals", series(time.Second, 130, 2500*time.Millisecond, tenSlow...), time.Second, false, false},
+		{"single read", series(time.Second, 0, 0), time.Second, false, false},
+		{"5 s interval, one 12 s gap", series(5*time.Second, 100, 12*time.Second, 50), 5 * time.Second, false, true},
+		{"5 s interval, one 16 s gap", series(5*time.Second, 100, 16*time.Second, 50), 5 * time.Second, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := checkLiveGaps(tc.samples, time.Second)
-			if len(got) != 1 || got[0].Pass != tc.want {
-				t.Errorf("checkLiveGaps = %+v, want one result with pass %v", got, tc.want)
+			got := checkLiveGaps(tc.samples, tc.interval, phaseMark{Start: t0, End: t0.Add(time.Hour)})
+			if len(got) != 1 || got[0].Pass != tc.wantPass || got[0].Info != tc.wantInfo {
+				t.Errorf("checkLiveGaps = %+v, want pass %v info %v", got, tc.wantPass, tc.wantInfo)
+			}
+			if !strings.HasPrefix(got[0].Got, "n=") {
+				t.Errorf("got %q, want the read count and longest gap kept", got[0].Got)
 			}
 		})
 	}
@@ -351,6 +372,9 @@ func TestResourceSampler(t *testing.T) {
 	if want := (cadvisorReads + 2) / 3; len(rep.Samples) != want || cadvisorReads < 6 {
 		t.Errorf("%d cAdvisor samples after %d reads, want one per new timestamp (%d)", len(rep.Samples), cadvisorReads, want)
 	}
+	if len(rep.MetricsServer) != 1 || rep.MetricsServer[0].CPUCores != 0.812 || rep.MetricsServer[0].Window != 30*time.Second {
+		t.Errorf("metrics-server readings = %+v, want envoy at 0.812 cores over 30s", rep.MetricsServer)
+	}
 	if !slices.Equal(s.missing, []string{"workers", "router", "targets", "dns"}) {
 		t.Errorf("missing components = %v, want the four with no pods in the fake", s.missing)
 	}
@@ -408,5 +432,26 @@ func TestRunWithResources(t *testing.T) {
 	}
 	if len(rep.LoopTimeline) == 0 || rep.LoopTimeline[len(rep.LoopTimeline)-1].Requests == 0 {
 		t.Errorf("loop timeline = %+v, want the progress polls", rep.LoopTimeline)
+	}
+}
+
+func TestSettle(t *testing.T) {
+	t.Parallel()
+	s := newResourceSampler(newFakeGetter(), fake.NewSimpleClientset(), time.Second)
+	t0 := time.Unix(1000, 0)
+	clock := t0
+	var mu sync.Mutex
+	s.now = func() time.Time { mu.Lock(); defer mu.Unlock(); clock = clock.Add(10 * time.Second); return clock }
+	s.lastTS = map[string]time.Time{"a": t0.Add(time.Hour), "b": t0}
+	start := time.Now()
+	s.settle(t.Context(), t0.Add(time.Minute))
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("settle ran %v, want it bounded by settleTimeout on the sampler clock", elapsed)
+	}
+	s.lastTS["b"] = t0.Add(2 * time.Hour)
+	start = time.Now()
+	s.settle(t.Context(), t0.Add(time.Minute))
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("settle waited %v with every series already past the mark", elapsed)
 	}
 }

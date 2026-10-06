@@ -112,6 +112,9 @@ type runner struct {
 	rand *rand.Rand
 	// res samples the components' CPU and memory; nil when --usage is off.
 	res *resourceSampler
+	// settleResources keeps sampling after the run until cAdvisor has read
+	// every container idle again, for the whole-run self-checks.
+	settleResources bool
 }
 
 func newRunner(cfg runConfig, api ateapipb.ControlClient, k8s kubernetes.Interface, router *routerClient, out io.Writer) *runner {
@@ -199,6 +202,10 @@ func (r *runner) run(ctx context.Context) (*report, error) {
 	phaseStart = time.Now()
 	r.suspendActors(cleanupCtx, actors, rep)
 	rep.addPhase("suspend", phaseStart)
+	if r.res != nil && r.settleResources && ctx.Err() == nil {
+		r.logf("resources: waiting up to %v for cAdvisor to read every container after the run", settleTimeout)
+		r.res.settle(ctx, time.Now())
+	}
 
 	if ctx.Err() != nil {
 		rep.Interrupted = true
@@ -525,12 +532,20 @@ func (r *runner) finishResources(rep *report) {
 		newConns = rep.Loop.NewConns
 	}
 	res.Verify = append(res.Verify, checkEnvoyConnections(res.Envoy, newConns), checkDriverOverhead(res.Driver))
-	res.Verify = append(res.Verify, checkLiveGaps(res.Live, r.res.interval)...)
+	var run phaseMark
+	if len(rep.Phases) > 0 {
+		run = phaseMark{Start: rep.Phases[0].Start, End: rep.Phases[len(rep.Phases)-1].End}
+	}
+	res.Verify = append(res.Verify, checkLiveGaps(res.Live, r.res.interval, run)...)
 	res.Verify = append(res.Verify, checkComponentsFound(r.res.missing, res.Samples)...)
 	res.Verify = append(res.Verify, checkCadvisorCoverage(res.Samples, rep.phase("steady"))...)
 	res.Verify = append(res.Verify, checkPodRollups(res.Samples, r.res.cadvisorPods)...)
 	res.Verify = append(res.Verify, checkProcessVsCgroup(res.Live, res.Samples)...)
+	res.Verify = append(res.Verify, checkMetricsServer(res.MetricsServer, res.Samples)...)
+	res.Verify = append(res.Verify, checkSteadyAttribution(res.Live, rep.phase("steady"))...)
+	res.Verify = append(res.Verify, checkIdlePhases(res.Live, rep)...)
 	rep.Resources = res
+	summarizeResources(rep)
 }
 
 // pollStats merges the live stats of every running loop; actors that do not
