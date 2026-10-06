@@ -119,6 +119,10 @@ type runner struct {
 	// preIdle samples this long before create, with no actor of the run
 	// running, for the summary's baseline.
 	preIdle time.Duration
+	// waitCleartextIdle waits up to this long, before pre-idle and create,
+	// for the gateway's cleartext pool to empty, so a run does not inherit
+	// the previous run's upstream connections.
+	waitCleartextIdle time.Duration
 }
 
 func newRunner(cfg runConfig, api ateapipb.ControlClient, k8s kubernetes.Interface, router *routerClient, out io.Writer) *runner {
@@ -156,6 +160,19 @@ func (r *runner) run(ctx context.Context) (*report, error) {
 			return nil, fmt.Errorf("starting resource sampling: %w", err)
 		}
 		defer r.finishResources(rep)
+		if r.waitCleartextIdle > 0 {
+			g := r.res.waitCleartextIdle(ctx, r.waitCleartextIdle)
+			if g.Idle {
+				r.logf("cleartext pool: idle after %v", g.Waited.Round(time.Second))
+			} else {
+				r.logf("cleartext pool: NOT idle after %v (%.0f open; -1 means unreadable); running anyway",
+					g.Waited.Round(time.Second), g.Residual)
+			}
+			if ctx.Err() != nil {
+				rep.Interrupted = true
+				return rep, ctx.Err()
+			}
+		}
 		if r.preIdle > 0 {
 			phaseStart := time.Now()
 			r.mark(ctx, markPreIdleBegin)

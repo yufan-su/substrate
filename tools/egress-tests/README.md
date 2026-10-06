@@ -243,6 +243,13 @@ first suspend) or from none, and each actor carries `resumeSource`. A
 first resume from the golden snapshot is slower, so compare resume
 latency within one source.
 
+**Starting clean.** The gateway keeps idle upstream connections to the
+targets until its dynamic forward proxy purges the host, up to about 6
+minutes after the last request, so a run started sooner inherits the last
+run's pool. `--wait-for-cleartext-idle 8m` waits up to that long for the
+pool to empty before the run and records the wait and any residual in
+`resources.cleartextGate`; the run goes ahead either way.
+
 **Baseline.** `--pre-idle 30s` samples for that long before create, with
 none of the run's actors running. `resources.baseline` holds each
 component's and container's use over that phase, and the `cpu` lines add a

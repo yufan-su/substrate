@@ -332,6 +332,7 @@ func TestRunWithResources(t *testing.T) {
 	}
 	r.res = newResourceSampler(get, r.k8s, 5*time.Millisecond)
 	r.preIdle = 30 * time.Millisecond
+	r.waitCleartextIdle = time.Minute
 
 	rep, err := r.run(t.Context())
 	if err != nil {
@@ -349,6 +350,9 @@ func TestRunWithResources(t *testing.T) {
 	}
 	if rep.Resources == nil {
 		t.Fatal("no resources section")
+	}
+	if g := rep.Resources.CleartextGate; g == nil || !g.Idle || g.Reads != 1 {
+		t.Errorf("cleartext gate = %+v, want idle after one read", g)
 	}
 	// Overhead and gaps depend on the test machine's load; only check they ran.
 	checks := map[string]int{}
@@ -500,6 +504,60 @@ func TestParseEnvoyMemory(t *testing.T) {
 			}
 			if !tc.wantErr && (a != tc.wantAlloc || h != tc.wantHeap || p != tc.wantPhy) {
 				t.Errorf("parseEnvoyMemory = %v, %v, %v; want %v, %v, %v", a, h, p, tc.wantAlloc, tc.wantHeap, tc.wantPhy)
+			}
+		})
+	}
+}
+
+// gateGetter answers the gateway's /stats with a scripted cleartext pool
+// size per read, or an error when the script says -1.
+type gateGetter struct {
+	mu     sync.Mutex
+	active []float64
+	reads  int
+}
+
+func (g *gateGetter) GetRaw(_ context.Context, path string, params url.Values) ([]byte, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !strings.HasSuffix(path, ":15000/proxy/stats") || params.Get("filter") != envoyStatsFilter {
+		return nil, fmt.Errorf("unexpected read %s", path)
+	}
+	v := g.active[min(g.reads, len(g.active)-1)]
+	g.reads++
+	if v < 0 {
+		return nil, errors.New("proxy error")
+	}
+	return fmt.Appendf(nil, "%s: %.0f\n", envoyCleartextActive, v), nil
+}
+
+func TestWaitCleartextIdle(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		active  []float64
+		timeout time.Duration
+		want    cleartextGate
+	}{
+		{name: "already idle", active: []float64{0}, timeout: time.Minute, want: cleartextGate{Idle: true, Reads: 1}},
+		{name: "drains", active: []float64{900, 300, 0}, timeout: time.Minute, want: cleartextGate{Idle: true, Reads: 3}},
+		{name: "never drains", active: []float64{5}, timeout: 30 * time.Millisecond, want: cleartextGate{Residual: 5}},
+		{name: "unreadable", active: []float64{-1}, timeout: 30 * time.Millisecond, want: cleartextGate{Residual: -1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newResourceSampler(&gateGetter{active: tc.active}, fake.NewSimpleClientset(), time.Second)
+			s.envoys = []string{"atenet-egress-a"}
+			s.gatePoll = 5 * time.Millisecond
+			got := s.waitCleartextIdle(t.Context(), tc.timeout)
+			if got.Idle != tc.want.Idle || got.Residual != tc.want.Residual || (tc.want.Reads > 0 && got.Reads != tc.want.Reads) {
+				t.Errorf("waitCleartextIdle = %+v, want %+v", got, tc.want)
+			}
+			if !tc.want.Idle && got.Waited < tc.timeout {
+				t.Errorf("gave up after %v, want at least the %v timeout", got.Waited, tc.timeout)
+			}
+			if s.rep.CleartextGate == nil || *s.rep.CleartextGate != got {
+				t.Errorf("recorded gate %+v, want %+v", s.rep.CleartextGate, got)
 			}
 		})
 	}
