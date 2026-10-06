@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
@@ -69,6 +70,9 @@ type fakeAPI struct {
 	// resumeLostAnswer makes every ResumeActor commit and then time out.
 	resumeLostAnswer bool
 	nextUID          int
+	// snapshots maps an actor to the owner of its one completed durable
+	// snapshot; GetActor reports actor <name> with UID uid-<name>.
+	snapshots map[string]ateapipb.SnapshotOwner
 }
 
 func newFakeAPI() *fakeAPI {
@@ -99,6 +103,21 @@ func (f *fakeAPI) isRunning(name string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.actors[name] == "running"
+}
+
+func (f *fakeAPI) GetActor(_ context.Context, in *ateapipb.GetActorRequest, _ ...grpc.CallOption) (*ateapipb.Actor, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	name := in.GetActor().GetName()
+	f.record("GetActor", name)
+	if _, ok := f.actors[name]; !ok {
+		return nil, status.Error(codes.NotFound, "no actor")
+	}
+	a := &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Name: name, Uid: "uid-" + name}, Status: &ateapipb.ActorStatus{}}
+	if owner, ok := f.snapshots[name]; ok {
+		a.Status.Snapshots = []*ateapipb.Snapshot{completedSnapshot(1, owner)}
+	}
+	return a, nil
 }
 
 func (f *fakeAPI) CreateActor(_ context.Context, in *ateapipb.CreateActorRequest, _ ...grpc.CallOption) (*ateapipb.Actor, error) {
@@ -414,17 +433,53 @@ func wantHosts(n int) []string {
 	return hosts
 }
 
+// sourcesLine is how the report prints resume sources: "none 1, own 2".
+func sourcesLine(sources map[string]int) string {
+	var parts []string
+	for _, k := range slices.Sorted(maps.Keys(sources)) {
+		parts = append(parts, fmt.Sprintf("%s %d", k, sources[k]))
+	}
+	return strings.Join(parts, ", ")
+}
+
 func TestRun(t *testing.T) {
 	for _, mode := range []string{connModeKeepAlive, connModeNewConn} {
 		t.Run(mode, func(t *testing.T) {
 			cfg := testConfig()
 			cfg.ConnMode = mode
 			api := newFakeAPI()
+			// The run resumes actors at random, so every actor gets a source:
+			// its own snapshot, the golden tag, or none, by index mod 3.
+			wantSource := map[string]string{}
+			api.snapshots = map[string]ateapipb.SnapshotOwner{}
+			for i := range cfg.Actors {
+				name := actorName(i)
+				switch i % 3 {
+				case 0:
+					api.snapshots[name] = ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR
+					wantSource[name] = resumeFromOwn
+				case 1:
+					api.snapshots[name] = ateapipb.SnapshotOwner_SNAPSHOT_OWNER_TAG
+					wantSource[name] = resumeFromTag
+				default:
+					wantSource[name] = resumeFromNone
+				}
+			}
 			r, fr, out := newTestRunner(t, cfg, api, cfg.Endpoints)
 
 			rep, err := r.run(t.Context())
 			if err != nil {
 				t.Fatalf("run: %v\n%s", err, out)
+			}
+			wantSources := map[string]int{}
+			for _, a := range rep.Actors {
+				wantSources[wantSource[a.Name]]++
+				if a.ResumeSource != wantSource[a.Name] {
+					t.Errorf("%s resumed from %q, want %q", a.Name, a.ResumeSource, wantSource[a.Name])
+				}
+			}
+			if len(rep.Actors) != cfg.Parallel || !maps.Equal(rep.Resume.Sources, wantSources) {
+				t.Errorf("resume sources = %v over %d actors, want %v over %d", rep.Resume.Sources, len(rep.Actors), wantSources, cfg.Parallel)
 			}
 
 			if got := api.callCount("CreateActor"); got != cfg.Actors {
@@ -487,7 +542,8 @@ func TestRun(t *testing.T) {
 
 			var printed bytes.Buffer
 			rep.print(&printed)
-			for _, want := range []string{"scheme=http ", "request-interval=0s", "300 requests", "timeout=3", "egress-target-0 (3/300)"} {
+			for _, want := range []string{"scheme=http ", "request-interval=0s", "300 requests", "timeout=3", "egress-target-0 (3/300)",
+				"resumed from: " + sourcesLine(wantSources)} {
 				if !strings.Contains(printed.String(), want) {
 					t.Errorf("printed report lacks %q:\n%s", want, printed.String())
 				}
@@ -1061,5 +1117,51 @@ func TestLostAnswers(t *testing.T) {
 			r, _, _ := newTestRunner(t, testConfig(), api, testConfig().Endpoints)
 			tc.check(t, r, api)
 		})
+	}
+}
+
+func TestResumeSource(t *testing.T) {
+	t.Parallel()
+	own := ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR
+	tag := ateapipb.SnapshotOwner_SNAPSHOT_OWNER_TAG
+	pending := completedSnapshot(2, own)
+	pending.DurableSnapshot.Status = ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING
+	for _, tc := range []struct {
+		name      string
+		snapshots []*ateapipb.Snapshot
+		running   bool
+		want      string
+	}{
+		{name: "own snapshot", snapshots: []*ateapipb.Snapshot{completedSnapshot(1, own)}, want: resumeFromOwn},
+		{name: "own snapshot but already running", snapshots: []*ateapipb.Snapshot{completedSnapshot(1, own)}, running: true, want: resumeFromRunning},
+		{name: "golden tag, borrowed", snapshots: []*ateapipb.Snapshot{completedSnapshot(1, tag)}, want: resumeFromTag},
+		{name: "newest completed generation wins", snapshots: []*ateapipb.Snapshot{completedSnapshot(1, tag), completedSnapshot(2, own)}, want: resumeFromOwn},
+		{name: "a pending upload does not count", snapshots: []*ateapipb.Snapshot{completedSnapshot(1, tag), pending}, want: resumeFromTag},
+		{name: "no snapshot", want: resumeFromNone},
+		{name: "unknown owner", snapshots: []*ateapipb.Snapshot{completedSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_UNSPECIFIED)}, want: resumeFromUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Uid: "uid-a"}, Status: &ateapipb.ActorStatus{Snapshots: tc.snapshots}}
+			if tc.running {
+				a.Status.State = ateapipb.ActorState_ACTOR_STATE_RUNNING
+			}
+			if got := resumeSource(a); got != tc.want {
+				t.Errorf("resumeSource() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// completedSnapshot is a durable snapshot generation that finished uploading.
+func completedSnapshot(gen int32, owner ateapipb.SnapshotOwner) *ateapipb.Snapshot {
+	return &ateapipb.Snapshot{
+		Uuid:       fmt.Sprintf("s%d", gen),
+		Generation: gen,
+		Owner:      owner,
+		DurableSnapshot: &ateapipb.SnapshotStorage{
+			Status: ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED,
+			Object: &ateapipb.ObjectSnapshot{SnapshotUri: fmt.Sprintf("gs://b/r/snapshots/s%d", gen)},
+		},
 	}
 }

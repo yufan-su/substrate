@@ -380,6 +380,9 @@ type actorRun struct {
 	resumeLatency time.Duration
 	// readyLatency runs from the resume to the first answer through the router.
 	readyLatency time.Duration
+	// resumeSource is the snapshot the resume restored from, read just
+	// before it: resumeFromOwn, resumeFromTag or resumeFromNone.
+	resumeSource string
 	resumed      bool
 	// mayBeRunning is set when a resume failed in a way that may still have
 	// committed, such as a timeout, so the actor is suspended anyway.
@@ -394,11 +397,24 @@ type actorRun struct {
 // through the router.
 func (r *runner) resumeActors(ctx context.Context, names []string, rep *report) []*actorRun {
 	actors := make([]*actorRun, len(names))
+	// Read every actor before the burst, so that the reads do not compete
+	// with the resumes at ateapi and the resumes start together, as they
+	// did before the source was recorded.
+	forEach(len(names), len(names), func(i int) {
+		a := &actorRun{name: names[i], resumeSource: resumeFromUnknown}
+		actors[i] = a
+		readCtx, cancel := context.WithTimeout(ctx, r.cfg.ResumeTimeout)
+		defer cancel()
+		if got, err := r.api.GetActor(readCtx, &ateapipb.GetActorRequest{
+			Actor: &ateapipb.ObjectRef{Atespace: r.cfg.Atespace, Name: a.name},
+		}); err == nil {
+			a.resumeSource = resumeSource(got)
+		}
+	})
 	res := newPhase()
 	start := time.Now()
 	forEach(len(names), len(names), func(i int) {
-		a := &actorRun{name: names[i]}
-		actors[i] = a
+		a := actors[i]
 		actorCtx, cancel := context.WithTimeout(ctx, r.cfg.ResumeTimeout)
 		defer cancel()
 
@@ -441,9 +457,59 @@ func (r *runner) resumeActors(ctx context.Context, names []string, rep *report) 
 	}
 	rep.Resume.ResumeLatency = summarize(resumeLat)
 	rep.Resume.ReadyLatency = summarize(readyLat)
+	rep.Resume.Sources = map[string]int{}
+	for _, a := range actors {
+		if a.ready {
+			rep.Resume.Sources[a.resumeSource]++
+		}
+	}
 	r.logf("resume: %d/%d ready in %v (resume %s; ready %s)", rep.Resume.Succeeded, len(names),
 		rep.Resume.Duration.Round(time.Millisecond), rep.Resume.ResumeLatency, rep.Resume.ReadyLatency)
 	return actors
+}
+
+// Snapshots a resume can restore from.
+const (
+	// resumeFromOwn is a snapshot the actor took at its last suspend.
+	resumeFromOwn = "own"
+	// resumeFromTag is a tag's snapshot, such as the template's golden
+	// one, borrowed until the actor's first suspend.
+	resumeFromTag = "tag"
+	// resumeFromNone means the actor has no snapshot and boots fresh.
+	resumeFromNone = "none"
+	// resumeFromRunning means the actor was already running, so the resume
+	// restored nothing; an earlier run left it that way.
+	resumeFromRunning = "running"
+	resumeFromUnknown = "unknown"
+)
+
+// resumeSource classifies the durable snapshot an actor would resume from:
+// the newest completed generation, which is the actor's own when the actor
+// took it and a tag's when the actor was created from one. A running actor
+// resumes from nothing.
+func resumeSource(a *ateapipb.Actor) string {
+	if a.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_RUNNING {
+		return resumeFromRunning
+	}
+	var latest *ateapipb.Snapshot
+	for _, s := range a.GetStatus().GetSnapshots() {
+		if s.GetDurableSnapshot().GetStatus() != ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED {
+			continue
+		}
+		if latest == nil || s.GetGeneration() > latest.GetGeneration() {
+			latest = s
+		}
+	}
+	if latest == nil {
+		return resumeFromNone
+	}
+	switch latest.GetOwner() {
+	case ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR:
+		return resumeFromOwn
+	case ateapipb.SnapshotOwner_SNAPSHOT_OWNER_TAG:
+		return resumeFromTag
+	}
+	return resumeFromUnknown
 }
 
 // waitReady polls the actor's readiness route through the router: right after
