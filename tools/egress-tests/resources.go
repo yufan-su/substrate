@@ -101,6 +101,8 @@ type resourceReport struct {
 	Sources []sourceInfo  `json:"sources"`
 	Live    []liveSample  `json:"live,omitempty"`
 	Envoy   []envoySample `json:"envoy,omitempty"`
+	// EnvoyMemory holds each gateway Envoy's /memory, every 5s.
+	EnvoyMemory []envoyMemorySample `json:"envoyMemory,omitempty"`
 	// Samples holds the cAdvisor readings, one per container per new
 	// cAdvisor timestamp.
 	Samples []cadvisorSample `json:"samples,omitempty"`
@@ -142,6 +144,15 @@ type liveSample struct {
 	RSSBytes          float64   `json:"rssBytes"`
 	// RTT is the read's round trip; T is its midpoint.
 	RTT time.Duration `json:"rttNs,omitempty"`
+}
+
+// envoyMemorySample is one read of a gateway Envoy's /memory.
+type envoyMemorySample struct {
+	T              time.Time `json:"t"`
+	Pod            string    `json:"pod"`
+	AllocatedBytes float64   `json:"allocatedBytes"`
+	HeapSizeBytes  float64   `json:"heapSizeBytes"`
+	PhysicalBytes  float64   `json:"physicalBytes"`
 }
 
 type envoySample struct {
@@ -195,6 +206,7 @@ type resourceSampler struct {
 	k8s              kubernetes.Interface
 	interval         time.Duration
 	cadvisorInterval time.Duration
+	memoryInterval   time.Duration
 	now              func() time.Time
 
 	mu     sync.Mutex
@@ -222,6 +234,7 @@ func newResourceSampler(get rawGetter, k8s kubernetes.Interface, interval time.D
 		k8s:              k8s,
 		interval:         interval,
 		cadvisorInterval: cadvisorPollInterval,
+		memoryInterval:   envoyMemoryInterval,
 		now:              time.Now,
 		lastTS:           map[string]time.Time{},
 		rusage:           map[string]rusageMark{},
@@ -252,7 +265,8 @@ func (s *resourceSampler) start(ctx context.Context) error {
 	s.rep.Sources = append(s.rep.Sources,
 		sourceInfo{Name: "live", Interval: s.interval, Clock: "driver"},
 		sourceInfo{Name: "envoy", Interval: s.interval, Clock: "driver"},
-		sourceInfo{Name: "cadvisor", Interval: s.cadvisorInterval, Clock: "kubelet"})
+		sourceInfo{Name: "cadvisor", Interval: s.cadvisorInterval, Clock: "kubelet"},
+		sourceInfo{Name: "envoy-memory", Interval: s.memoryInterval, Clock: "driver"})
 	if s.cgreaderOn {
 		if err := s.resolveCgreader(ctx); err != nil {
 			return err
@@ -267,6 +281,7 @@ func (s *resourceSampler) start(ctx context.Context) error {
 	s.cancel = cancel
 	s.every(pollCtx, s.interval, func(ctx context.Context) { s.pollLive(ctx, "") })
 	s.every(pollCtx, s.cadvisorInterval, s.pollCadvisor)
+	s.every(pollCtx, s.memoryInterval, s.pollEnvoyMemory)
 	if s.cg != nil {
 		s.every(pollCtx, cgreaderPullInterval, s.pollCgreader)
 	}
@@ -539,6 +554,27 @@ func (s *resourceSampler) readEnvoy(ctx context.Context, pod, label string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rep.Envoy = append(s.rep.Envoy, envoySample{T: at, Label: label, Pod: pod, Counters: parseEnvoyStats(body)})
+}
+
+// pollEnvoyMemory reads every gateway Envoy's /memory.
+func (s *resourceSampler) pollEnvoyMemory(ctx context.Context) {
+	for _, pod := range s.envoys {
+		sent := s.now()
+		body, err := s.get.GetRaw(ctx, podProxyPath(envoyTarget.namespace, pod, envoyTarget.port, "/memory"), nil)
+		at := sent.Add(s.now().Sub(sent) / 2)
+		var alloc, heap, phys float64
+		if err == nil {
+			alloc, heap, phys, err = parseEnvoyMemory(body)
+		}
+		if err != nil {
+			s.fail("envoy-memory")
+			continue
+		}
+		s.mu.Lock()
+		s.rep.EnvoyMemory = append(s.rep.EnvoyMemory, envoyMemorySample{T: at, Pod: pod,
+			AllocatedBytes: alloc, HeapSizeBytes: heap, PhysicalBytes: phys})
+		s.mu.Unlock()
+	}
 }
 
 func (s *resourceSampler) fail(source string) {

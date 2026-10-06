@@ -17,9 +17,11 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Process metrics every Go component serves on its Prometheus port. They are
@@ -81,6 +83,33 @@ func parseProcessMetrics(body []byte) (cpuSeconds, rssBytes float64, err error) 
 
 // parseEnvoyStats reads Envoy's "name: value" /stats lines. Histogram lines
 // and other non-numeric values are skipped.
+// envoyMemoryInterval is how often the sampler reads Envoy's /memory.
+const envoyMemoryInterval = 5 * time.Second
+
+// envoyMemory is Envoy's /memory: the allocator's view of the heap, which
+// the cgroup's working set mixes with page cache and freed pages.
+type envoyMemory struct {
+	Allocated string `json:"allocated"`
+	HeapSize  string `json:"heap_size"`
+	Physical  string `json:"total_physical_bytes"`
+}
+
+// parseEnvoyMemory reads allocated, heap size and physical bytes from
+// Envoy's /memory, which reports them as decimal strings.
+func parseEnvoyMemory(body []byte) (allocated, heap, physical float64, err error) {
+	var m envoyMemory
+	if err := json.Unmarshal(body, &m); err != nil {
+		return 0, 0, 0, fmt.Errorf("parsing /memory: %w", err)
+	}
+	vals := make([]float64, 3)
+	for i, s := range []string{m.Allocated, m.HeapSize, m.Physical} {
+		if vals[i], err = strconv.ParseFloat(s, 64); err != nil {
+			return 0, 0, 0, fmt.Errorf("parsing /memory value %q: %w", s, err)
+		}
+	}
+	return vals[0], vals[1], vals[2], nil
+}
+
 func parseEnvoyStats(body []byte) map[string]float64 {
 	out := map[string]float64{}
 	for line := range strings.Lines(string(body)) {

@@ -448,9 +448,17 @@ func TestPrintRequestBreaker(t *testing.T) {
 			"cluster.mitm_internal.upstream_cx_overflow": 0, "cluster.mitm_internal.upstream_rq_active_overflow": 76,
 			"cluster.mitm_internal.circuit_breakers.default.rq_open": 1}},
 	}
+	rep.Resources.EnvoyMemory = []envoyMemorySample{
+		{T: t0.Add(5 * time.Second), Pod: "gw", AllocatedBytes: 900 << 20},
+		{T: t0.Add(40 * time.Second), Pod: "gw", AllocatedBytes: 120 << 20},
+		{T: t0.Add(60 * time.Second), Pod: "gw", AllocatedBytes: 130 << 20},
+	}
 	summarizeResources(rep)
 	var out bytes.Buffer
 	rep.printResources(&out)
+	if want := "envoy heap allocated max 130Mi"; !strings.Contains(out.String(), want) {
+		t.Errorf("printed resources lack %q (the 900Mi read is before steady):\n%s", want, out.String())
+	}
 	want := "mitm_internal request breaker OPENED; mitm_internal CONNECTs queued +0, cancelled +0, refused +0 pending +76 active"
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("printed resources lack %q:\n%s", want, out.String())

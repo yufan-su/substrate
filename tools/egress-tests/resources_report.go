@@ -628,6 +628,16 @@ func (rep *report) printResources(w io.Writer) {
 				queued, cancelled, pending, active)
 		}
 	}
+	steady := rep.phase("steady")
+	var alloc float64
+	for _, m := range res.EnvoyMemory {
+		if !m.T.Before(steady.Start) && !m.T.After(steady.End) {
+			alloc = max(alloc, m.AllocatedBytes)
+		}
+	}
+	if alloc > 0 {
+		cx += "; envoy heap allocated max " + bytesIEC(alloc)
+	}
 	if len(mem) > 0 || cx != "" {
 		fmt.Fprintf(w, "%-10s steady max working set: %s%s\n", "memory", strings.Join(mem, " "), cx)
 	}

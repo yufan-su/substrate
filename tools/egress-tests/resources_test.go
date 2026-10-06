@@ -71,6 +71,8 @@ container_memory_working_set_bytes{container="envoy",image="envoy",namespace="at
 "containers":[{"name":"envoy","usage":{"cpu":"812m","memory":"64Mi"}},{"name":"other","usage":{"cpu":"1"}}]}]}`), nil
 	case strings.HasPrefix(path, "/apis/metrics.k8s.io/"):
 		return []byte(`{"items":[]}`), nil
+	case strings.HasSuffix(path, ":15000/proxy/memory"):
+		return []byte(`{"allocated": "11492288", "heap_size": "16777216", "pageheap_free": "0", "total_physical_bytes": "19852094"}`), nil
 	case strings.HasSuffix(path, ":15000/proxy/stats"):
 		if params.Get("filter") != envoyStatsFilter {
 			return nil, fmt.Errorf("unexpected filter %q", params.Get("filter"))
@@ -262,6 +264,7 @@ func TestResourceSampler(t *testing.T) {
 	get.fail[broken] = true
 	s := newResourceSampler(get, k8s, 5*time.Millisecond)
 	s.cadvisorInterval = 2 * time.Millisecond
+	s.memoryInterval = 5 * time.Millisecond
 
 	if err := s.start(t.Context()); err != nil {
 		t.Fatal(err)
@@ -292,8 +295,11 @@ func TestResourceSampler(t *testing.T) {
 	if labeled != 4 {
 		t.Errorf("%d labeled live reads, want 2 marks x 2 working pods", labeled)
 	}
-	if len(rep.Envoy) < 3 || len(rep.Sources) != 3 {
-		t.Errorf("%d envoy reads and sources %+v, want at least 3 reads and 3 sources", len(rep.Envoy), rep.Sources)
+	if len(rep.Envoy) < 3 || len(rep.Sources) != 4 {
+		t.Errorf("%d envoy reads and sources %+v, want at least 3 reads and 4 sources", len(rep.Envoy), rep.Sources)
+	}
+	if len(rep.EnvoyMemory) < 3 || rep.EnvoyMemory[0].AllocatedBytes != 11492288 || rep.EnvoyMemory[0].HeapSizeBytes != 16777216 {
+		t.Errorf("envoy memory reads = %+v, want at least 3 with allocated 11492288 and heap 16777216", rep.EnvoyMemory)
 	}
 	cadvisorReads := get.readsOf("/api/v1/nodes/node-a/proxy/metrics/cadvisor")
 	if want := (cadvisorReads + 2) / 3; len(rep.Samples) != want || cadvisorReads < 6 {
@@ -468,6 +474,32 @@ func TestResolveCadvisorCompleteness(t *testing.T) {
 			}
 			if got := s.cadvisorPods["ate-system/gw"].complete; got != tc.want {
 				t.Errorf("complete = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseEnvoyMemory(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name                         string
+		body                         string
+		wantAlloc, wantHeap, wantPhy float64
+		wantErr                      bool
+	}{
+		{name: "live shape", body: `{"allocated": "11492288", "heap_size": "16777216", "pageheap_unmapped": "0", "total_physical_bytes": "19852094"}`,
+			wantAlloc: 11492288, wantHeap: 16777216, wantPhy: 19852094},
+		{name: "not json", body: "allocated: 1", wantErr: true},
+		{name: "missing field", body: `{"allocated": "1", "heap_size": "2"}`, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a, h, p, err := parseEnvoyMemory([]byte(tc.body))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && (a != tc.wantAlloc || h != tc.wantHeap || p != tc.wantPhy) {
+				t.Errorf("parseEnvoyMemory = %v, %v, %v; want %v, %v, %v", a, h, p, tc.wantAlloc, tc.wantHeap, tc.wantPhy)
 			}
 		})
 	}

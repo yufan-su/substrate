@@ -25,6 +25,12 @@ a time. Holdouts are scored against the fit: CPU within 15% or 0.02 core,
 whichever is larger; memory within 15%; settled p99 within two histogram
 buckets. Exits 1 when a holdout misses.
 
+gateway_ws_mib is informational once a run starts with the gateway pod's
+working set above 500 MiB: Envoy keeps the memory it has had, so the pod's
+working set stays at its high-water mark and later deltas read about zero.
+envoy_heap_mib, Envoy's allocated heap from /memory, tracks the open
+tunnels instead.
+
 --provisional rows are earlier runs of already-tested shapes. They enter the
 CPU fits only: their memory deltas came from reused gateway pods, and their
 startup, resume and latency figures predate the warm-up. The coefficients
@@ -50,6 +56,7 @@ FORMS: dict[str, tuple[str, ...]] = {
     "envoy_cores": ("1", "B", "T", "C"),
     "extproc_cores": ("1", "B"),
     "gateway_ws_mib": ("1", "T", "C"),
+    "envoy_heap_mib": ("1", "T"),
     "worker_cores": ("1", "B", "T"),
     "atunnel_cores": ("B", "T"),
     "worker_ws_mib": ("B", "T", "C"),
@@ -64,6 +71,10 @@ FORMS: dict[str, tuple[str, ...]] = {
 # Without a --pre-idle baseline (runs before it existed), the first 10 s of
 # samples stand in for it.
 BASELINE_S = 10.0
+
+# Above this pre-idle working set the gateway pod is at its high-water mark,
+# and gateway_ws_mib is informational.
+WS_PINNED_MIB = 500.0
 
 # Two-sided 97.5% t quantiles by degrees of freedom; 1.96 beyond 30.
 T975 = [0, 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
@@ -137,6 +148,27 @@ def ws_delta_mib(run: rr.Run, component: str, lo: float, hi: float) -> float | N
     return total / 2**20
 
 
+def heap_delta_mib(run: rr.Run, lo: float, hi: float) -> float | None:
+    """Envoy's allocated heap from /memory: the max over [lo, hi] minus the
+    pre-idle max, summed over the gateway pods."""
+    by_pod: dict[str, list[tuple[float, float]]] = {}
+    for m in (run.report.get("resources") or {}).get("envoyMemory") or []:
+        by_pod.setdefault(m["pod"], []).append((rr.parse_time(m["t"]), m["allocatedBytes"]))
+    pre = run.phases.get("pre-idle")
+    total, found = 0.0, False
+    for pts in by_pod.values():
+        steady = [v for t, v in pts if lo <= t <= hi]
+        if pre:
+            base = max((v for t, v in pts if pre[0] <= t <= pre[1]), default=None)
+        else:
+            start = min(t for t, _ in pts)
+            base = min((v for t, v in pts if t <= start + BASELINE_S), default=None)
+        if steady and base is not None:
+            total += max(steady) - base
+            found = True
+    return total / 2**20 if found else None
+
+
 def extract(path: str | Path, base: str = "") -> dict:
     run = rr.load_run(path)
     rep = run.report
@@ -164,6 +196,10 @@ def extract(path: str | Path, base: str = "") -> dict:
     row["worker_cores"] = summed_mean(cpu_points(run, "workers", {"ateom"}), lo, s1)
     row["atunnel_cores"] = summed_mean(cpu_points(run, "workers", {"atunnel"}), lo, s1)
     row["gateway_ws_mib"] = ws_delta_mib(run, "gateway", s0, s1)
+    gw_base = (res.get("baseline") or {}).get("gateway") or {}
+    row["gateway_ws_base_mib"] = (gw_base["workingSetBytes"] / 2**20
+                                  if gw_base.get("workingSetBytes") and not gw_base.get("insufficient") else None)
+    row["envoy_heap_mib"] = heap_delta_mib(run, lo, s1)
     row["worker_ws_mib"] = ws_delta_mib(run, "workers", s0, s1)
     row["first_round_s"] = lo - s0 if settled and settled.get("rule") != "1.5 rounds" else None
     # Own-snapshot resumes only, when the driver reports the source; a first
@@ -271,11 +307,24 @@ PROVISIONAL_OK = [r for r in FORMS if r.endswith("_cores")]
 JUDGED = [r for r in FORMS if r.endswith(("_cores", "_mib")) or r == "p99_settled_ms"]
 
 
+def ws_pinned(row: dict) -> bool:
+    return (row.get("gateway_ws_base_mib") or 0) > WS_PINNED_MIB
+
+
+def informational(resp: str, rows: list[dict]) -> str:
+    """Why resp is reported but not judged over rows, or ""."""
+    pinned = sum(ws_pinned(r) for r in rows)
+    if resp == "gateway_ws_mib" and pinned:
+        return (f"informational: {pinned} of {len(rows)} runs started above {WS_PINNED_MIB:.0f} MiB, "
+                "where Envoy's retained memory hides the delta; see envoy_heap_mib")
+    return ""
+
+
 def score(fits: dict[str, Fit], holdout: dict) -> list[tuple[str, float, float, float, bool]]:
     out = []
     for resp in JUDGED:
         f, meas = fits.get(resp), holdout.get(resp)
-        if f is None or meas is None:
+        if f is None or meas is None or informational(resp, [holdout]):
             continue
         pred, half = f.predict(holdout)
         out.append((resp, pred, half, meas, accept(resp, pred, meas)))
@@ -285,7 +334,7 @@ def score(fits: dict[str, Fit], holdout: dict) -> list[tuple[str, float, float, 
 # ---- output ---------------------------------------------------------------
 
 CSV_FIELDS = ["run", "provisional", "B", "C", "T", "R_measured", "interval_ms", "base", "breakers", "warmup",
-              "policies_updated", "cleartext_active_at_start", "settled_rule", *FORMS]
+              "policies_updated", "cleartext_active_at_start", "settled_rule", "gateway_ws_base_mib", *FORMS]
 
 
 def write_csv(rows: list[dict], path: str) -> None:
@@ -296,10 +345,12 @@ def write_csv(rows: list[dict], path: str) -> None:
             w.writerow({k: ("" if r.get(k) is None else r.get(k)) for k in CSV_FIELDS})
 
 
-def print_fits(fits: dict[str, Fit], out=sys.stdout) -> None:
+def print_fits(fits: dict[str, Fit], out=sys.stdout, rows: list[dict] = ()) -> None:
     for resp, f in fits.items():
         dropped = f" (dropped {', '.join(f.dropped)})" if f.dropped else ""
         print(f"{resp}: n={f.n} sigma={math.sqrt(f.sigma2):.4g}{dropped}", file=out)
+        if why := informational(resp, list(rows)):
+            print(f"  {why}", file=out)
         for i, t in enumerate(f.terms):
             lo, hi = f.interval(i)
             print(f"  {t:>3} {f.coef[i]: .5g}  [{lo:.5g}, {hi:.5g}]", file=out)
@@ -322,9 +373,9 @@ def main(argv: list[str] | None = None) -> int:
     fits = fit_all(rows)
     if args.provisional:
         print("== without provisional rows")
-        print_fits(fit_all(rows, use_provisional=False))
+        print_fits(fit_all(rows, use_provisional=False), rows=rows)
         print(f"== with {len(args.provisional)} provisional rows (CPU only)")
-    print_fits(fits)
+    print_fits(fits, rows=rows)
     if args.predict:
         b, c = args.predict
         q = {"B": b, "C": c, "T": b * c}
