@@ -109,6 +109,7 @@ go run ./tools/egress-tests run --actors 1000 --parallel 10 --endpoints 10 --dur
 | `--progress-interval` | 30s | How often to print progress. 0 turns it off. |
 | `--resources` | off | Sample the CPU and memory of the components on the egress path. See [Resource sampling](#resource-sampling). |
 | `--resources-verify` | off | With `--resources`, print the self-checks and fail the run if one fails. |
+| `--resources-cgreader` | off | With `--resources`, also pull one-second cgroup readings from the cgroup reader DaemonSet. |
 | `--resources-interval` | 1s | How often `--resources` reads the Go process counters and Envoy's stats. |
 | `--output` | | Write the full report, including per-actor stats, as JSON to this file. Durations are in nanoseconds. |
 | `--kubeconfig`, `--context` | | Which cluster to use. |
@@ -233,6 +234,32 @@ each pod cgroup equals its containers' sum, each Go process counter matches
 its container's cgroup, metrics-server agrees with cAdvisor within 15%,
 every series has its readings, and the driver stays under half a core.
 `INFO` lines report what a short run cannot resolve.
+
+Gaps between reads are judged in two tiers, since one slow API server
+round trip costs a point of a cumulative counter, not CPU:
+
+| Source | Fails when | INFO when |
+|---|---|---|
+| live (1s) | a gap over 5s, or over 5% of intervals over 2s | a few intervals over 2s |
+| cgroup reader (1s) | a gap over 10s, or over 5% of intervals over 3s | a few intervals over 3s |
+| cAdvisor (12 to 20s) | never | fewer than two readings in steady |
+
+**One-second cgroup readings.** cAdvisor cannot show behavior shorter than
+its refresh, and it cannot split a worker's CPU between its actors and
+atunnel. `deploy.sh --deploy --cgreader` adds the `egress-tests-cgreader`
+DaemonSet: one pod per node reads the cgroup v2 files of the cgroups the
+driver names, every second, from the host's cgroup tree mounted read-only,
+with no Kubernetes API access. Run with `--resources-cgreader` and the
+driver pulls the rows every 5s through `pods/proxy` in `egress-tests`. The
+summaries then use these readings for every container they cover, the
+workers gain `actors` (the actors' `_pause` cgroups) and `atunnel` (the
+`ateom` cgroup) parts. An actor's cgroups vanish when it suspends, before
+its last second of checkpoint work can be read; when one actor vanishes in
+a round, the driver credits it what the container used beyond its other
+cgroups, as `inferredCpuSeconds` on the gone row. `--resources-verify` adds checks: no rows lost,
+node clocks steady, the leaves summing to their container, the readings
+agreeing with cAdvisor within 2%, and each reader under 0.02 core.
+`deploy.sh --delete` removes the DaemonSet.
 
 Before a real measurement, run a short smoke test:
 

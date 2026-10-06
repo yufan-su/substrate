@@ -61,8 +61,13 @@ const (
 	cxSlack     = 2
 	// A driver above half a core is doing more than control traffic.
 	maxDriverCores = 0.5
-	// A live source may miss one poll.
+	// A live source may miss one poll: a slow API server round trip costs
+	// one point of a cumulative counter, resolution rather than CPU.
 	maxLiveGapPolls = 2
+	// Live gaps fail above this, or when too many intervals are slow.
+	maxLiveGap = 5 * time.Second
+	// maxSlowShare is the share of intervals that may exceed the soft gap.
+	maxSlowShare = 0.05
 )
 
 // within reports whether got is within rel of want, or within abs of it.
@@ -117,8 +122,34 @@ func checkDriverOverhead(d driverUsage) verifyResult {
 	}
 }
 
-// checkLiveGaps reports, per process, the longest gap between reads within
-// the run. Labeled reads count too: they are reads like any other.
+// gapVerdict judges one series' read times. It fails when a gap exceeds
+// hard or more than maxSlowShare of the intervals exceed soft. A few gaps
+// over soft are reported as INFO; they cost resolution, not data.
+func gapVerdict(res verifyResult, ts []time.Time, soft, hard time.Duration) verifyResult {
+	var gap time.Duration
+	slow := 0
+	for i := 1; i < len(ts); i++ {
+		d := ts[i].Sub(ts[i-1])
+		gap = max(gap, d)
+		if d > soft {
+			slow++
+		}
+	}
+	intervals := max(len(ts)-1, 1)
+	res.Want = fmt.Sprintf("no gap over %v, at most %.0f%% of intervals over %v", hard, 100*maxSlowShare, soft)
+	res.Got = fmt.Sprintf("n=%d max gap %v, %d over %v", len(ts), gap.Round(time.Millisecond), slow, soft)
+	switch {
+	case len(ts) < 2 || gap > hard || float64(slow) > maxSlowShare*float64(intervals):
+	case slow > 0:
+		res = res.info(fmt.Sprintf("%d gaps over %v, longest %v", slow, soft, gap.Round(time.Millisecond)))
+	default:
+		res.Pass = true
+	}
+	return res
+}
+
+// checkLiveGaps judges, per process, the gaps between reads within the run.
+// Labeled reads count too: they are reads like any other.
 func checkLiveGaps(samples []liveSample, interval time.Duration, run phaseMark) []verifyResult {
 	byPod := map[string][]time.Time{}
 	for _, s := range samples {
@@ -128,21 +159,11 @@ func checkLiveGaps(samples []liveSample, interval time.Duration, run phaseMark) 
 		key := s.Component + "/" + s.Container + "@" + s.Pod
 		byPod[key] = append(byPod[key], s.T)
 	}
-	limit := maxLiveGapPolls * interval
 	var out []verifyResult
 	for _, key := range slices.Sorted(maps.Keys(byPod)) {
 		ts := byPod[key]
 		slices.SortFunc(ts, func(a, b time.Time) int { return a.Compare(b) })
-		var gap time.Duration
-		for i := 1; i < len(ts); i++ {
-			gap = max(gap, ts[i].Sub(ts[i-1]))
-		}
-		out = append(out, verifyResult{
-			Check: "coverage", Scope: "live " + key,
-			Want: fmt.Sprintf("max gap ≤ %v", limit),
-			Got:  fmt.Sprintf("n=%d max gap %v", len(ts), gap.Round(time.Millisecond)),
-			Pass: len(ts) >= 2 && gap <= limit,
-		})
+		out = append(out, gapVerdict(verifyResult{Check: "coverage", Scope: "live " + key}, ts, maxLiveGapPolls*interval, maxLiveGap))
 	}
 	return out
 }

@@ -48,6 +48,7 @@ ENDPOINTS=100
 WAIT_TIMEOUT_SECS=300
 HTTPS=false
 SKIP_TEMPLATE=false
+CGREADER=false
 
 usage() {
   echo "Usage: $0 --deploy|--delete|--patch-gateway|--unpatch-gateway [options]"
@@ -71,6 +72,7 @@ usage() {
   echo "  --endpoints C           Endpoint Services to create, egress-target-0 up to"
   echo "                          egress-target-<C-1> (default: ${ENDPOINTS}, at most ${MAX_ENDPOINTS})"
   echo "  --wait-timeout SECONDS  How long to wait for each rollout and the golden snapshot (default: ${WAIT_TIMEOUT_SECS})"
+  echo "  --cgreader              Also deploy the cgroup reader DaemonSet for run --resources-cgreader"
 }
 
 # Scratch space for kubectl-ate and generated certificates, removed on exit.
@@ -278,6 +280,13 @@ deploy() {
     patch_gateway_trust
     echo "Ready for --scheme https."
   fi
+
+  if [[ "${CGREADER}" == "true" ]]; then
+    echo "Deploying the cgroup reader DaemonSet..."
+    hack/run-tool.sh ko apply -f - <"${MANIFEST_DIR}/cgreader.yaml.tmpl"
+    kubectl rollout status daemonset/egress-tests-cgreader \
+      --namespace="${POOL_NAMESPACE}" --timeout="${WAIT_TIMEOUT_SECS}s"
+  fi
 }
 
 delete() {
@@ -288,6 +297,7 @@ delete() {
   run_kubectl_ate delete atespace "${ATESPACE}" >/dev/null 2>&1 \
     || echo "atespace ${ATESPACE} not deleted: it may still hold actors; run 'go run ./tools/egress-tests cleanup' first"
   kubectl delete namespace "${TARGET_NAMESPACE}" --ignore-not-found
+  kubectl delete daemonset egress-tests-cgreader --namespace="${POOL_NAMESPACE}" --ignore-not-found
   # The pool manifest has ko:// image references, so it goes through ko.
   substitute "${MANIFEST_DIR}/workerpool.yaml.tmpl" | hack/run-tool.sh ko delete --ignore-not-found -f -
 }
@@ -352,6 +362,9 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --wait-timeout=*)
       WAIT_TIMEOUT_SECS="${1#*=}"
+      ;;
+    --cgreader)
+      CGREADER=true
       ;;
     -h|--help)
       usage

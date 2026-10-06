@@ -56,6 +56,8 @@ func (g *fakeGetter) GetRaw(_ context.Context, path string, params url.Values) (
 	switch {
 	case strings.HasSuffix(path, ":9090/proxy/metrics"):
 		return fmt.Appendf(nil, "# TYPE process_cpu_seconds_total counter\nprocess_cpu_seconds_total %.2f\nprocess_resident_memory_bytes 5e+07\n", 100+0.01*float64(n)), nil
+	case strings.HasSuffix(path, ":8080/proxy/healthz"):
+		return []byte("ok\n"), nil
 	case strings.HasSuffix(path, "/proxy/metrics/cadvisor"):
 		// cAdvisor refreshes every third read, 15 s apart.
 		ts := 1_700_000_000_000 + int64((n-1)/3)*15_000
@@ -174,28 +176,41 @@ func TestCheckEnvoyConnections(t *testing.T) {
 func TestCheckLiveGaps(t *testing.T) {
 	t.Parallel()
 	t0 := time.Unix(1000, 0)
-	series := func(offsets ...time.Duration) []liveSample {
+	// series reads every second for n intervals, with the listed intervals
+	// stretched to slow.
+	series := func(n int, slow time.Duration, at ...int) []liveSample {
 		var out []liveSample
-		for _, o := range offsets {
-			out = append(out, liveSample{T: t0.Add(o), Component: "gateway", Container: "ext-proc", Pod: "p"})
+		t := t0
+		for i := 0; i <= n; i++ {
+			out = append(out, liveSample{T: t, Component: "gateway", Container: "ext-proc", Pod: "p"})
+			d := time.Second
+			if slices.Contains(at, i) {
+				d = slow
+			}
+			t = t.Add(d)
 		}
 		return out
 	}
+	tenSlow := []int{5, 15, 25, 35, 45, 55, 65, 75, 85, 95}
 	for _, tc := range []struct {
-		name    string
-		samples []liveSample
-		want    bool
+		name               string
+		samples            []liveSample
+		wantPass, wantInfo bool
 	}{
-		{name: "every second", samples: series(0, time.Second, 2*time.Second), want: true},
-		{name: "one missed poll", samples: series(0, 2*time.Second), want: true},
-		{name: "two missed polls", samples: series(0, 3*time.Second), want: false},
-		{name: "single read", samples: series(0), want: false},
+		{"every second", series(130, 0), true, false},
+		{"one 2.4 s gap in 130 intervals", series(130, 2400*time.Millisecond, 60), false, true},
+		{"one 6 s gap", series(130, 6*time.Second, 60), false, false},
+		{"ten 2.5 s gaps in 130 intervals", series(130, 2500*time.Millisecond, tenSlow...), false, false},
+		{"single read", series(0, 0), false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := checkLiveGaps(tc.samples, time.Second, phaseMark{Start: t0, End: t0.Add(time.Minute)})
-			if len(got) != 1 || got[0].Pass != tc.want {
-				t.Errorf("checkLiveGaps = %+v, want one result with pass %v", got, tc.want)
+			got := checkLiveGaps(tc.samples, time.Second, phaseMark{Start: t0, End: t0.Add(time.Hour)})
+			if len(got) != 1 || got[0].Pass != tc.wantPass || got[0].Info != tc.wantInfo {
+				t.Errorf("checkLiveGaps = %+v, want pass %v info %v", got, tc.wantPass, tc.wantInfo)
+			}
+			if !strings.HasPrefix(got[0].Got, "n=") {
+				t.Errorf("got %q, want the read count and longest gap kept", got[0].Got)
 			}
 		})
 	}
