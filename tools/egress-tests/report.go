@@ -81,6 +81,11 @@ type loopPoint struct {
 	Successes int64               `json:"successes"`
 	NewConns  int64               `json:"newConns"`
 	Latency   egressapi.Histogram `json:"latency"`
+	// Polled and Answered count the actors asked for their stats and those
+	// that answered. A point with Answered below Polled holds less than the
+	// whole and is left out of the settled window.
+	Polled   int `json:"polled"`
+	Answered int `json:"answered"`
 }
 
 type phaseResult struct {

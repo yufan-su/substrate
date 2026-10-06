@@ -19,6 +19,7 @@ Run from this directory: python3 -m unittest test_fit
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -219,18 +220,34 @@ class ExtractTest(unittest.TestCase):
             self.assertEqual(header.split(",")[:5], ["run", "provisional", "B", "C", "T"])
             self.assertTrue(line.startswith("run-b10.json,False,10,10,100,"))
 
-    def test_settled_p99_from_timeline(self):
-        counts = [0] * (len(fit.rr.BUCKETS) + 1)
-        later = list(counts)
-        later[fit.bucket_index(4.0)] = 99
-        later[fit.bucket_index(9.0)] = 1
-        rep = {"loopTimeline": [
-            {"t": "2026-10-06T10:00:05Z", "latency": {"counts": counts, "count": 0, "maxMicros": 0}},
-            {"t": "2026-10-06T10:00:10Z", "latency": {"counts": later, "count": 100, "maxMicros": 9000}},
-        ]}
-        lo = fit.rr.parse_time("2026-10-06T10:00:00Z")
-        p99 = fit.settled_p99_ms(rep, lo, lo + 60)
-        self.assertEqual(fit.bucket_index(p99), fit.bucket_index(4.0))
+    def test_driver_fields(self):
+        # Settled p99 and the memory baseline come from the driver's JSON.
+        report = json.loads(FIXTURE.read_text())
+        res = report["resources"]
+        steady = next(p for p in report["phases"] if p["name"] == "steady")
+        res["settledWindow"] = {"start": steady["start"], "rule": "new-connection plateau",
+                                "reqPerS": 95.0, "p99": 3_548_000}
+        # A gateway pod cgroup at 40 MiB through steady, 10 MiB at pre-idle.
+        res["series"] += [{"t": steady[k], "source": "cadvisor", "component": "gateway", "pod": "gw",
+                           "container": "POD", "metric": "working_set_bytes", "value": 40 * 2**20}
+                          for k in ("start", "end")]
+        res["baseline"] = {"gateway": {"workingSetBytes": 8 * 2**20, "podWorkingSetBytes": 10 * 2**20,
+                                       "cpuCores": {"mean": 0.01, "max": 0.01}}}
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "r.json"
+            p.write_text(json.dumps(report))
+            row = fit.extract(p)
+        self.assertAlmostEqual(row["p99_settled_ms"], 3.548)
+        # The pod cgroup's baseline is subtracted, not the containers' sum.
+        self.assertAlmostEqual(row["gateway_ws_mib"], 30)
+        del res["baseline"]["gateway"]["podWorkingSetBytes"]
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "r.json"
+            p.write_text(json.dumps(report))
+            self.assertIsNone(fit.extract(p)["gateway_ws_mib"])
+
+    def test_no_settled_p99_without_the_driver_field(self):
+        self.assertIsNone(fit.extract(FIXTURE)["p99_settled_ms"])
 
 
 if __name__ == "__main__":

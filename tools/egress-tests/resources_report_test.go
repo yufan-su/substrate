@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"math"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -533,5 +534,65 @@ func TestSummarizeResourcesBaseline(t *testing.T) {
 	summarizeResources(none)
 	if none.Resources.Baseline != nil {
 		t.Errorf("baseline without a pre-idle phase = %v, want nil", none.Resources.Baseline)
+	}
+}
+
+// TestSettledLatency checks that the settled p50 and p99 count only the
+// requests after the window starts: the first round's slow requests, with
+// their DNS lookups and connects, stay out.
+func TestSettledLatency(t *testing.T) {
+	t.Parallel()
+	t0 := time.Unix(1000, 0)
+	s := time.Second
+	steady := phaseMark{Name: "steady", Start: t0, End: t0.Add(60 * s)}
+	cfg := runConfig{Endpoints: 100, RequestInterval: 100 * time.Millisecond, ProgressInterval: 5 * s}
+	var h egressapi.Histogram
+	var polls []loopPoint
+	conns := []int64{400, 800, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000}
+	for i, c := range conns {
+		// 500 requests per poll: 50 ms each while connections open, 3 ms after.
+		d := 3 * time.Millisecond
+		if i < 3 {
+			d = 50 * time.Millisecond
+		}
+		for range 500 {
+			h.Record(d)
+		}
+		snap := h
+		snap.Counts = slices.Clone(h.Counts)
+		polls = append(polls, loopPoint{T: t0.Add(time.Duration(5*(i+1)) * s), NewConns: c, Requests: int64(500 * (i + 1)), Latency: snap, Polled: 10, Answered: 10})
+	}
+	w, ok := settledOf(cfg, steady, polls)
+	if !ok {
+		t.Fatal("no settled window")
+	}
+	// The window starts at the 20 s poll, after the 50 ms requests.
+	if w.P99 < 3*time.Millisecond || w.P99 > 4*time.Millisecond || w.P50 > w.P99 {
+		t.Errorf("settled p50 %v p99 %v, want both in the 3 ms bucket", w.P50, w.P99)
+	}
+	if whole := polls[len(polls)-1].Latency.Quantile(0.99); whole < 40*time.Millisecond {
+		t.Errorf("whole-run p99 %v, want the first round's 50 ms to show there", whole)
+	}
+
+	// A poll that missed an actor holds less than the whole, so a delta
+	// against it would count that actor's earlier requests, first round
+	// included. The window must open on the next complete poll instead.
+	partial := slices.Clone(polls)
+	partial[3].Answered = 9
+	partial[3].Requests -= 200
+	partial[3].Latency.Counts = slices.Clone(polls[0].Latency.Counts)
+	partial[3].Latency.Count = polls[0].Latency.Count
+	pw, ok := settledOf(cfg, steady, partial)
+	if !ok {
+		t.Fatal("no settled window with a partial poll")
+	}
+	if pw.P99 < 3*time.Millisecond || pw.P99 > 4*time.Millisecond || !near(pw.ReqPerS, w.ReqPerS) {
+		t.Errorf("settled p99 %v, %.1f req/s with a partial poll, want the 3 ms bucket and %.1f req/s as without it", pw.P99, pw.ReqPerS, w.ReqPerS)
+	}
+	// With the partial poll last, nothing complete follows the start.
+	tail := slices.Clone(polls)
+	tail[len(tail)-1].Answered = 9
+	if tw, ok := settledOf(cfg, steady, tail); ok && (tw.P99 == 0 || tw.P99 > 4*time.Millisecond) {
+		t.Errorf("settled p99 %v with the last poll partial, want the 3 ms bucket from the complete polls before it", tw.P99)
 	}
 }

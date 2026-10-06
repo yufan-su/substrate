@@ -515,10 +515,10 @@ func (r *runner) steady(ctx context.Context, started []*actorRun, rep *report) {
 	lastAt := start
 	var timeline []loopPoint
 	stopProgress := r.progress(ctx, func() {
-		cur := r.pollStats(ctx, started)
+		cur, answered := r.pollStats(ctx, started)
 		now := time.Now()
 		timeline = append(timeline, loopPoint{T: now, Requests: cur.Requests, Successes: cur.Successes,
-			NewConns: cur.NewConns, Latency: cur.Latency})
+			NewConns: cur.NewConns, Latency: cur.Latency, Polled: len(started), Answered: answered})
 		secs := now.Sub(lastAt).Seconds()
 		reqs, errs := cur.Requests-last.Requests, (cur.Requests-cur.Successes)-(last.Requests-last.Successes)
 		r.logf("loop: %v elapsed, %.1f req/s, %.1f errors/s, p99 %v (cumulative)",
@@ -584,9 +584,9 @@ func (r *runner) finishResources(rep *report) {
 
 // pollStats merges the live stats of every running loop; actors that do not
 // answer are left out.
-func (r *runner) pollStats(ctx context.Context, actors []*actorRun) *egressapi.Stats {
+func (r *runner) pollStats(ctx context.Context, actors []*actorRun) (merged *egressapi.Stats, answered int) {
 	var mu sync.Mutex
-	merged := &egressapi.Stats{}
+	merged = &egressapi.Stats{}
 	forEach(len(actors), len(actors), func(i int) {
 		var s egressapi.Stats
 		if err := r.router.do(ctx, http.MethodGet, actors[i].name, egressapi.StatsRoute, nil, &s); err != nil {
@@ -595,8 +595,9 @@ func (r *runner) pollStats(ctx context.Context, actors []*actorRun) *egressapi.S
 		mu.Lock()
 		defer mu.Unlock()
 		merged.Merge(&s)
+		answered++
 	})
-	return merged
+	return merged, answered
 }
 
 // stopLoops stops the loop of every ready actor and keeps its final stats.
