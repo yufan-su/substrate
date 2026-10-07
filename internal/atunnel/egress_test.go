@@ -479,6 +479,49 @@ func TestEgressRejectsInactiveConnection(t *testing.T) {
 	}
 }
 
+// A tunnel the gateway never answers fails at the open deadline and closes the
+// actor's connection, rather than waiting for as long as the actor is active.
+func TestEgressBoundsHowLongATunnelWaitsToOpen(t *testing.T) {
+	egress, err := NewEgress(func(net.Conn) (string, error) { return "192.0.2.10:443", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	egress.tunnelOpenTimeout = 50 * time.Millisecond
+	dialEnded := make(chan error, 1)
+	dialer := egressDialerFunc(func(ctx context.Context, _ string) (net.Conn, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("the tunnel was opened with no deadline")
+		}
+		<-ctx.Done()
+		dialEnded <- ctx.Err()
+		return nil, ctx.Err()
+	})
+	source := fakeActorCertificateSource{expiresAt: time.Now().Add(time.Hour)}
+	if err := egress.Activate(testActorUID, dialer, source, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = egress.Deactivate(context.Background(), testActorUID) })
+
+	actor, proxy := net.Pipe()
+	defer actor.Close()
+	// Set before handle runs: once the proxy side closes, the pipe refuses
+	// new deadlines.
+	if err := actor.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	egress.mu.Lock()
+	active := egress.active[testActorUID]
+	egress.mu.Unlock()
+	egress.handle(proxy, active)
+
+	if err := receiveWithin(t, dialEnded, "the tunnel's open deadline"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("the open ended with %v, want context.DeadlineExceeded", err)
+	}
+	if _, err := actor.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Errorf("reading the actor's connection = %v, want it closed (EOF) once the tunnel failed to open", err)
+	}
+}
+
 type egressDialerFunc func(context.Context, string) (net.Conn, error)
 
 func (f egressDialerFunc) DialContext(ctx context.Context, destination string) (net.Conn, error) {

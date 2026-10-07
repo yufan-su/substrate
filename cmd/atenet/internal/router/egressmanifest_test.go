@@ -16,6 +16,7 @@ package router
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,92 @@ func TestEgressManifestsDisableTheConnectTimeout(t *testing.T) {
 			}
 		})
 	}
+}
+
+// envoyDefaultCircuitBreakerLimit is what Envoy applies to a threshold the
+// cluster leaves unset.
+const envoyDefaultCircuitBreakerLimit = 1024
+
+// TestEgressManifestsSizeTheTunnelCircuitBreaker pins mitm_internal's
+// circuit breakers. Every tunnel holds one of its connections and one of its
+// requests while open, so these thresholds are how many tunnels a gateway
+// replica carries; left unset they fall back to Envoy's 1024 and the gateway
+// refuses every tunnel past that with a 503. Every new tunnel also passes
+// through the pending queue while its internal connection is set up, so a
+// pending limit below the connection limit refuses bursts of new tunnels that
+// would otherwise fit.
+func TestEgressManifestsSizeTheTunnelCircuitBreaker(t *testing.T) {
+	for _, path := range egressManifests {
+		t.Run(path, func(t *testing.T) {
+			var cluster *envoyCluster
+			for _, c := range staticClusters(t, envoyConfig(t, path)) {
+				if c.Name == "mitm_internal" {
+					cluster = &c
+					break
+				}
+			}
+			if cluster == nil {
+				t.Fatal("found no mitm_internal cluster; the manifest changed shape and this test is checking nothing")
+			}
+			var th *circuitBreakerThresholds
+			for i := range cluster.CircuitBreakers.Thresholds {
+				if p := cluster.CircuitBreakers.Thresholds[i].Priority; p == "" || p == "DEFAULT" {
+					th = &cluster.CircuitBreakers.Thresholds[i]
+				}
+			}
+			if th == nil {
+				t.Fatalf("mitm_internal sets no DEFAULT circuit breaker thresholds, so it carries at most %d tunnels", envoyDefaultCircuitBreakerLimit)
+			}
+			for name, v := range map[string]*int{
+				"max_connections":      th.MaxConnections,
+				"max_requests":         th.MaxRequests,
+				"max_pending_requests": th.MaxPendingRequests,
+			} {
+				if v == nil || *v <= envoyDefaultCircuitBreakerLimit {
+					t.Errorf("mitm_internal %s = %s, want it set above Envoy's default of %d", name, show(v), envoyDefaultCircuitBreakerLimit)
+				}
+			}
+			if th.MaxPendingRequests != nil && th.MaxConnections != nil && *th.MaxPendingRequests < *th.MaxConnections {
+				t.Errorf("mitm_internal max_pending_requests = %d is below max_connections = %d, so a burst of new tunnels is refused before the connection limit is reached",
+					*th.MaxPendingRequests, *th.MaxConnections)
+			}
+		})
+	}
+}
+
+func show(v *int) string {
+	if v == nil {
+		return "unset"
+	}
+	return strconv.Itoa(*v)
+}
+
+type circuitBreakerThresholds struct {
+	Priority           string `json:"priority"`
+	MaxConnections     *int   `json:"max_connections"`
+	MaxRequests        *int   `json:"max_requests"`
+	MaxPendingRequests *int   `json:"max_pending_requests"`
+}
+
+type envoyCluster struct {
+	Name            string `json:"name"`
+	CircuitBreakers struct {
+		Thresholds []circuitBreakerThresholds `json:"thresholds"`
+	} `json:"circuit_breakers"`
+}
+
+// staticClusters is every static cluster in the bootstrap.
+func staticClusters(t *testing.T, raw string) []envoyCluster {
+	t.Helper()
+	var bootstrap struct {
+		StaticResources struct {
+			Clusters []envoyCluster `json:"clusters"`
+		} `json:"static_resources"`
+	}
+	if err := yaml.Unmarshal([]byte(raw), &bootstrap); err != nil {
+		t.Fatalf("parsing envoy.yaml: %v", err)
+	}
+	return bootstrap.StaticResources.Clusters
 }
 
 // envoyRoute is the sliver of an Envoy bootstrap this test reads. Unnamed
