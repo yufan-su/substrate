@@ -1,0 +1,116 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# A campaign Pod: the campaign runner, or the rehearsal, as ServiceAccount
+# egress-campaign with the output PVC at /out. deploy.sh --campaign renders
+# it. A bare Pod, not a Job: a retry must not rerun measured steps
+# unsupervised. The script sleeps once done, so kubectl cp and exec keep
+# working; the owner deletes the Pod.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${POD_NAME}
+  namespace: egress-tests
+  labels:
+    app: egress-campaign
+    app.kubernetes.io/part-of: egress-tests
+spec:
+  serviceAccountName: egress-campaign
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 30
+  # The campaign's own node pool, tainted ate.dev/campaign=true:NoSchedule so
+  # that neither workers nor the gateway land beside the driver.
+  nodeSelector:
+    cloud.google.com/gke-nodepool: ${CAMPAIGN_POOL}
+  tolerations:
+  - key: ate.dev/campaign
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - topologyKey: kubernetes.io/hostname
+        namespaces: ["ate-system"]
+        labelSelector:
+          matchLabels:
+            app: atenet-egress
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: campaign
+    image: ${IMAGE}
+    command:
+    - /bin/sh
+    - -c
+    - |
+${SCRIPT}
+    env:
+    - name: POD_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.name
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: NODE_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: spec.nodeName
+    # The driver's progress polls after the warm-up (deploy.sh
+    # --progress-interval).
+    - name: PROGRESS_INTERVAL
+      value: "${PROGRESS_INTERVAL}"
+    resources:
+      requests:
+        cpu: "2"
+        memory: 512Mi
+      limits:
+        memory: 2Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: ["ALL"]
+    volumeMounts:
+    - name: out
+      mountPath: /out
+    - name: tmp
+      mountPath: /tmp
+    - name: ateapi-token
+      mountPath: /var/run/ateapi
+      readOnly: true
+  volumes:
+  - name: out
+    persistentVolumeClaim:
+      claimName: egress-campaign-out
+  - name: tmp
+    emptyDir: {}
+  # ateapi accepts ServiceAccount tokens for this audience. kubelet rotates
+  # the file; the driver re-reads it on every call.
+  - name: ateapi-token
+    projected:
+      sources:
+      - serviceAccountToken:
+          audience: api.ate-system.svc
+          expirationSeconds: 3600
+          path: token

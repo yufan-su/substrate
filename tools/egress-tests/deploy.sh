@@ -16,7 +16,8 @@
 # Deploys, or deletes, what the egress scale test runs against: the worker
 # pool, the actor template, and the endpoint Services with the server behind
 # them. With --https it also patches the egress gateway to trust the target's
-# certificate. See tools/egress-tests/README.md.
+# certificate. --campaign runs the campaign runner in a Pod. See
+# tools/egress-tests/README.md.
 
 set -o errexit -o nounset -o pipefail
 
@@ -53,9 +54,22 @@ KUBECONFIG_FILE=""
 KUBE_CONTEXT=""
 # --kubeconfig and --context, for every kubectl, kubectl-ate and ko call.
 CLUSTER_ARGS=()
+# --campaign. Keep in sync with campaign*.yaml.tmpl and campaign.py.
+CAMPAIGN_POD="egress-campaign"
+REHEARSAL_POD="egress-campaign-rehearsal"
+CAMPAIGN_IMAGE=""
+CAMPAIGN_POOL="campaign"
+PROGRESS_INTERVAL="5s"
+DRY_RUN=false
+NO_START=false
+PURGE=false
+REHEARSAL=false
+# --campaign-id: the runner writes to /out/<id>, so one PVC holds several campaigns.
+CAMPAIGN_ID=""
+SCRIPTS_DIR=""
 
 usage() {
-  echo "Usage: $0 --deploy|--delete|--patch-gateway|--unpatch-gateway [options]"
+  echo "Usage: $0 --deploy|--delete|--patch-gateway|--unpatch-gateway|--campaign|--delete-campaign [options]"
   echo ""
   echo "Actions:"
   echo "  --deploy                Deploy the worker pool, the actor template and the endpoints"
@@ -64,6 +78,10 @@ usage() {
   echo "  --patch-gateway         Make the egress gateway trust the target's certificate, for"
   echo "                          --scheme https runs. Rolls the gateway; test clusters only."
   echo "  --unpatch-gateway       Undo --patch-gateway"
+  echo "  --campaign              Create the egress-campaign ServiceAccount, its read-only RBAC and the"
+  echo "                          output PVC, then the Pod running campaign.py --in-cluster"
+  echo "  --delete-campaign       Delete the campaign Pods, the RBAC and the ServiceAccount; keep"
+  echo "                          the output PVC unless --purge"
   echo ""
   echo "Options:"
   echo "  --https                 With --deploy, also --patch-gateway"
@@ -80,6 +98,21 @@ usage() {
   echo "  --kubeconfig FILE       Kubeconfig for every kubectl, kubectl-ate and ko call"
   echo "                          (default: the usual loading rules)"
   echo "  --context CTX           Kubeconfig context for every call (default: the current context)"
+  echo ""
+  echo "Campaign options:"
+  echo "  --context CTX           Required; also the owner's context the runner prints in its commands"
+  echo "  --image IMAGE           Campaign image (default: \${KO_DOCKER_REPO}/egress-campaign:<short HEAD>)"
+  echo "  --campaign-pool POOL    Node pool the Pod runs on, tainted ate.dev/campaign=true:NoSchedule"
+  echo "                          (default: ${CAMPAIGN_POOL})"
+  echo "  --progress-interval D   The driver's progress polls after the warm-up, as the Pod's"
+  echo "                          PROGRESS_INTERVAL (default: ${PROGRESS_INTERVAL})"
+  echo "  --no-start              With --campaign, create everything but the Pod"
+  echo "  --rehearsal             With --campaign, create the rehearsal Pod ${REHEARSAL_POD} instead"
+  echo "  --dry-run               With --campaign, print what it would apply; change nothing"
+  echo "  --campaign-id ID        With --campaign, write to /out/ID instead of /out"
+  echo "  --scripts-dir DIR       The owner's directory of E0 scripts, for the runner's printed commands"
+  echo "  --purge                 With --delete-campaign, also delete the output PVC and its disk"
+  echo "                          (kubectl cp /out first)"
 }
 
 # Scratch space for kubectl-ate and generated certificates, removed on exit.
@@ -259,6 +292,159 @@ unpatch_gateway_trust() {
   kubectl -n "${SYSTEM_NAMESPACE}" delete configmap "${GATEWAY_CA_CONFIGMAP}" --ignore-not-found >/dev/null
 }
 
+# replace_line prints a file with each line that is exactly the placeholder
+# replaced by a value, which may span lines and hold any character.
+replace_line() {
+  VALUE="$3" awk -v placeholder="$2" '$0 == placeholder { print ENVIRON["VALUE"]; next } { print }' "$1"
+}
+
+# campaign_script appends the runner's output to campaign.log on the PVC, so
+# it outlives the Pod.
+campaign_script() {
+  local owner="--context ${KUBE_CONTEXT}" out="/out${CAMPAIGN_ID:+/${CAMPAIGN_ID}}"
+  if [[ -n "${KUBECONFIG_FILE}" ]]; then
+    owner="--kubeconfig ${KUBECONFIG_FILE} ${owner}"
+  fi
+  if [[ -n "${SCRIPTS_DIR}" ]]; then
+    # Quoted, so the Pod's shell leaves a laptop ~ alone.
+    owner="${owner} --scripts-dir '${SCRIPTS_DIR}'"
+  fi
+  cat <<EOF
+mkdir -p ${out}
+{
+  python3 /work/campaign/campaign.py --in-cluster ${owner} \\
+    --driver /work/egress-tests --out ${out} --ref-dir /work/ref \\
+    --base-check-ref "/work/ref/\$(cat /work/ref/base-check-ref)"
+  echo "campaign.py exited \$?"
+} 2>&1 | tee -a ${out}/campaign.log
+echo "sleeping so kubectl cp and exec keep working"
+exec sleep infinity
+EOF
+}
+
+# rehearsal_script runs the driver twice, the second run resuming actors 0-9
+# from their own snapshots.
+rehearsal_script() {
+  cat <<'EOF'
+mkdir -p /out/rehearsal
+{
+for r in r1 r2; do
+  /work/egress-tests run --api-endpoint api.ate-system.svc:443 --api-token-file /var/run/ateapi/token \
+    --router-url http://atenet-router.ate-system.svc --actors 1000 --parallel 10 --endpoints 10 \
+    --duration 60s --pick first --request-interval 100ms --progress-interval "${PROGRESS_INTERVAL}" \
+    --resources --resources-cgreader --resources-verify \
+    --output "/out/rehearsal/${r}.json" >"/out/rehearsal/${r}.txt" 2>&1
+  rc=$?
+  cat "/out/rehearsal/${r}.txt"
+  echo "rehearsal ${r} exited ${rc}"
+done
+} 2>&1 | tee -a /out/rehearsal/rehearsal.log
+echo "rehearsal done; sleeping so kubectl cp and exec keep working"
+exec sleep infinity
+EOF
+}
+
+# render_campaign_pod prints the Pod named $1 running script $2.
+render_campaign_pod() {
+  local name="$1" script="$2"
+  # shellcheck disable=SC2016 # the placeholder is literal
+  replace_line "${MANIFEST_DIR}/campaign-pod.yaml.tmpl" '${SCRIPT}' "      ${script//$'\n'/$'\n'      }" \
+    | sed -e "s|\${POD_NAME}|${name}|g" -e "s|\${IMAGE}|${CAMPAIGN_IMAGE}|g" \
+      -e "s|\${CAMPAIGN_POOL}|${CAMPAIGN_POOL}|g" -e "s|\${PROGRESS_INTERVAL}|${PROGRESS_INTERVAL}|g"
+}
+
+campaign_pod() {
+  if [[ "${REHEARSAL}" == true ]]; then
+    render_campaign_pod "${REHEARSAL_POD}" "$(rehearsal_script)"
+  else
+    render_campaign_pod "${CAMPAIGN_POD}" "$(campaign_script)"
+  fi
+}
+
+check_campaign_context() {
+  if [[ -z "${KUBE_CONTEXT}" ]]; then
+    echo "Error: --campaign and --delete-campaign need --context, the owner's kubeconfig context." >&2
+    exit 1
+  fi
+  if ! [[ "${KUBE_CONTEXT}" =~ ^[A-Za-z0-9_.:@/-]+$ ]]; then
+    echo "Error: --context '${KUBE_CONTEXT}' holds characters the Pod's script cannot pass through." >&2
+    exit 1
+  fi
+  if ! [[ "${CAMPAIGN_ID}" =~ ^[A-Za-z0-9._-]*$ && "${CAMPAIGN_ID}" != .* ]]; then
+    echo "Error: --campaign-id '${CAMPAIGN_ID}' must be letters, digits, '.', '_' or '-', not starting with '.'." >&2
+    exit 1
+  fi
+  if ! [[ "${SCRIPTS_DIR}" =~ ^[A-Za-z0-9_.:@/~-]*$ ]]; then
+    echo "Error: --scripts-dir '${SCRIPTS_DIR}' holds characters the Pod's script cannot pass through." >&2
+    exit 1
+  fi
+  if ! [[ "${KUBECONFIG_FILE}" =~ ^[A-Za-z0-9_.:@/-]*$ ]]; then
+    echo "Error: --kubeconfig '${KUBECONFIG_FILE}' holds characters the Pod's script cannot pass through." >&2
+    exit 1
+  fi
+}
+
+campaign() {
+  check_campaign_context
+  if [[ -z "${CAMPAIGN_IMAGE}" ]]; then
+    if [[ -z "${KO_DOCKER_REPO:-}" ]]; then
+      echo "Error: pass --image, or set KO_DOCKER_REPO (see .ate-dev-env.sh)." >&2
+      exit 1
+    fi
+    CAMPAIGN_IMAGE="${KO_DOCKER_REPO}/egress-campaign:$(git rev-parse --short=8 HEAD)"
+  fi
+  if ! [[ "${CAMPAIGN_POOL}" =~ ^[a-z0-9-]+$ ]]; then
+    echo "Error: --campaign-pool '${CAMPAIGN_POOL}' is not a node pool name." >&2
+    exit 1
+  fi
+  if ! [[ "${PROGRESS_INTERVAL}" =~ ^[0-9]+(ms|s|m)$ ]]; then
+    echo "Error: --progress-interval '${PROGRESS_INTERVAL}' is not a duration such as 5s." >&2
+    exit 1
+  fi
+  if [[ "${DRY_RUN}" == true ]]; then
+    cat "${MANIFEST_DIR}/campaign.yaml.tmpl"
+    echo "---"
+    cat "${MANIFEST_DIR}/campaign-pvc.yaml.tmpl"
+    if [[ "${NO_START}" != true ]]; then
+      echo "---"
+      campaign_pod
+    fi
+    return 0
+  fi
+
+  echo "Applying the egress-campaign ServiceAccount, RBAC and PVC..."
+  kubectl apply -f "${MANIFEST_DIR}/campaign.yaml.tmpl" -f "${MANIFEST_DIR}/campaign-pvc.yaml.tmpl"
+  if [[ "${NO_START}" == true ]]; then
+    return 0
+  fi
+  local pod="${CAMPAIGN_POD}" other="${REHEARSAL_POD}"
+  if [[ "${REHEARSAL}" == true ]]; then
+    pod="${REHEARSAL_POD}"
+    other="${CAMPAIGN_POD}"
+  fi
+  # Both mount the ReadWriteOnce PVC and write to it.
+  if kubectl -n "${POOL_NAMESPACE}" get pod "${other}" &>/dev/null; then
+    echo "Error: Pod ${POOL_NAMESPACE}/${other} exists; delete it first." >&2
+    exit 1
+  fi
+  echo "Creating Pod ${POOL_NAMESPACE}/${pod} from ${CAMPAIGN_IMAGE}..."
+  campaign_pod | kubectl create -f -
+  echo "Follow it with: kubectl ${CLUSTER_ARGS[*]} -n ${POOL_NAMESPACE} logs -f ${pod}"
+}
+
+delete_campaign() {
+  check_campaign_context
+  echo "Deleting the campaign Pods, the RBAC and the ServiceAccount..."
+  kubectl -n "${POOL_NAMESPACE}" delete pod "${CAMPAIGN_POD}" "${REHEARSAL_POD}" --ignore-not-found
+  kubectl delete -f "${MANIFEST_DIR}/campaign.yaml.tmpl" --ignore-not-found
+  if [[ "${PURGE}" != true ]]; then
+    echo "Kept PVC ${POOL_NAMESPACE}/egress-campaign-out with the output; --purge deletes it."
+    return 0
+  fi
+  echo "Deleting PVC ${POOL_NAMESPACE}/egress-campaign-out and its disk..."
+  kubectl delete -f "${MANIFEST_DIR}/campaign-pvc.yaml.tmpl" --ignore-not-found
+}
+
 deploy() {
   if [[ -z "${BUCKET_NAME:-}" || -z "${KO_DOCKER_REPO:-}" ]]; then
     echo "Error: BUCKET_NAME and KO_DOCKER_REPO must be set (see .ate-dev-env.sh)." >&2
@@ -400,12 +586,65 @@ while [[ "$#" -gt 0 ]]; do
     --kubeconfig=*)
       KUBECONFIG_FILE="${1#*=}"
       ;;
+    --campaign)
+      action="campaign"
+      ;;
+    --delete-campaign)
+      action="delete-campaign"
+      ;;
     --context)
       shift
       KUBE_CONTEXT="$1"
       ;;
     --context=*)
       KUBE_CONTEXT="${1#*=}"
+      ;;
+    --image)
+      shift
+      CAMPAIGN_IMAGE="$1"
+      ;;
+    --image=*)
+      CAMPAIGN_IMAGE="${1#*=}"
+      ;;
+    --no-start)
+      NO_START=true
+      ;;
+    --progress-interval)
+      shift
+      PROGRESS_INTERVAL="$1"
+      ;;
+    --progress-interval=*)
+      PROGRESS_INTERVAL="${1#*=}"
+      ;;
+    --campaign-pool)
+      shift
+      CAMPAIGN_POOL="$1"
+      ;;
+    --campaign-pool=*)
+      CAMPAIGN_POOL="${1#*=}"
+      ;;
+    --campaign-id)
+      shift
+      CAMPAIGN_ID="$1"
+      ;;
+    --campaign-id=*)
+      CAMPAIGN_ID="${1#*=}"
+      ;;
+    --scripts-dir)
+      shift
+      SCRIPTS_DIR="$1"
+      ;;
+    --scripts-dir=*)
+      SCRIPTS_DIR="${1#*=}"
+      ;;
+    --purge)
+      PURGE=true
+      ;;
+    --rehearsal)
+      REHEARSAL=true
+      ;;
+    --dry-run)
+      DRY_RUN=true
       ;;
     -h|--help)
       usage
@@ -442,6 +681,8 @@ case "${action}" in
   delete) delete ;;
   patch-gateway) patch_gateway_trust ;;
   unpatch-gateway) unpatch_gateway_trust ;;
+  campaign) campaign ;;
+  delete-campaign) delete_campaign ;;
   *)
     usage
     exit 1

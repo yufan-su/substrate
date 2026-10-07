@@ -451,6 +451,123 @@ Record the `atenet-egress` replica count with each result. The default is 1.
   every request, so keep high-rate runs short. The kubelet also rotates the
   log quickly: at about 800 req/s, only the last ~25 seconds survive.
 
+## Running a campaign in the cluster
+
+`campaign/campaign.py` runs a sequence of runs with owner steps between
+them; see its docstring. From a laptop, every actor call and every sampler
+read crosses the laptop's network, and a stall there shows up in the
+measurements. `deploy.sh --campaign` runs the runner and the driver in one
+Pod in `egress-tests` instead:
+- The driver dials `api.ate-system.svc:443` with the Pod's projected token
+  (`--api-token-file`) and `http://atenet-router.ate-system.svc`, with no
+  port-forwards.
+- The samplers still read through the API server's pod and node proxies.
+- ServiceAccount `egress-campaign` can only read, and only what the driver
+  and the runner read. `TestCampaignRBACCoversTheDriver` fails when the code
+  makes a Kubernetes call the manifest does not grant.
+- Output goes to PVC `egress-campaign-out`, mounted at `/out`.
+- The Pod runs on its own node pool, `campaign` by default
+  (`--campaign-pool`), which must carry the taint
+  `ate.dev/campaign=true:NoSchedule` so that neither workers nor the gateway
+  land beside the driver. The runner refuses a run while the gateway pod is
+  on its node. On GKE:
+  ```bash
+  gcloud container node-pools create campaign --cluster <cluster> --zone <zone> \
+    --machine-type c3-standard-4 --num-nodes 1 --node-taints ate.dev/campaign=true:NoSchedule
+  ```
+
+Build the image. It holds the driver built for linux/amd64, `campaign.py`,
+`plot/fit.py` with numpy, kubectl, and the reference JSONs under
+`/work/ref`:
+
+```bash
+KO_DOCKER_REPO=gcr.io/<project>/<repo> tools/egress-tests/campaign/image/build.sh [--push | --cloud-build] [--ref-dir DIR]
+```
+
+Without `--push` it builds locally and pushes nothing. `--push` and
+`--cloud-build` refuse a dirty tree, so the tag names the exact commit.
+`BASE_CHECK_REF=<path>` names the B=100 C=10 run the base check compares
+with, `<ref-dir>/t3-b100-c10.json` by default. The image keeps it under its
+own name in `/work/ref`, names it in `/work/ref/base-check-ref`, and the Pod
+passes it to `--base-check-ref`; `base-check.json` records which it was.
+The image also takes whichever of the four provisional rows' JSONs are in
+`--ref-dir`, and the fit leaves out the rest.
+
+Deploy and start, from the owner's laptop:
+
+```bash
+tools/egress-tests/deploy.sh --campaign --context <ctx> --image <image> --dry-run   # review
+tools/egress-tests/deploy.sh --campaign --context <ctx> --image <image> --no-start  # SA, RBAC, PVC
+tools/egress-tests/deploy.sh --campaign --context <ctx> --image <image>             # and the Pod
+kubectl --context <ctx> -n egress-tests logs -f egress-campaign
+```
+
+The driver polls progress every 5 s after the warm-up, set by the Pod's
+`PROGRESS_INTERVAL`; `--progress-interval` changes it. The warm-up's two
+halves always poll at 1 s and 5 s.
+
+`--campaign-id ID` makes the runner write to `/out/ID`, so one PVC holds
+several campaigns and a fresh id starts from the top; the go files and
+`campaign.log` move with it. `--scripts-dir DIR` names the owner's directory
+of `e0-apply.sh` and `e0-revert.sh` in the printed E0 commands.
+
+Pass `--kubeconfig <file>` too when the context lives in its own file: every
+deploy.sh call uses both, and the runner prints both in its owner commands
+and go lines, so nothing falls back to the current context.
+
+`--context` is also the context the runner prints in owner commands. At
+each owner step the runner waits for a go file, and prints the line that
+creates it:
+
+```bash
+kubectl --context <ctx> -n egress-tests exec egress-campaign -- touch /out/go/<NN-step>
+```
+
+At the fit stop the runner fits the run JSONs itself, prints the
+coefficients and writes `/out/predictions.json`, then waits like any owner
+step.
+
+The runner's output also goes to `/out/campaign.log`, appended to by every
+Pod, so a resume keeps the earlier attempts' lines.
+
+When the runner exits, the Pod sleeps, so `kubectl cp` and `exec` still
+work. To resume after a refusal, delete the Pod and run
+`deploy.sh --campaign` again: the runner skips the runs whose JSON exists.
+It still refuses a block's next run when the gateway pod differs from the
+one in `/out/block-gateway-pod`; delete that file to accept the new pod for
+the rest of the block. At the end:
+
+```bash
+kubectl --context <ctx> -n egress-tests cp egress-campaign:/out ./campaign-out
+tools/egress-tests/deploy.sh --delete-campaign --context <ctx>           # keeps the PVC
+tools/egress-tests/deploy.sh --delete-campaign --purge --context <ctx>   # and deletes it, with its disk
+```
+
+### Rehearsal
+
+Before the campaign, `--rehearsal` creates Pod `egress-campaign-rehearsal`
+from the same image, ServiceAccount and PVC. It runs the driver twice,
+B=10 C=10 for 60 s, with `--resources --resources-cgreader
+--resources-verify`, writing `/out/rehearsal/r1.json` and `r2.json`, and its
+output to `/out/rehearsal/rehearsal.log`. Run 1 creates the 1000 actors if
+they do not exist. Run 2 resumes actors 0-9 from their own snapshots.
+
+```bash
+tools/egress-tests/deploy.sh --campaign --rehearsal --context <ctx> --image <image>
+kubectl --context <ctx> -n egress-tests logs -f egress-campaign-rehearsal
+kubectl --context <ctx> -n egress-tests cp egress-campaign-rehearsal:/out/rehearsal ./rehearsal
+kubectl --context <ctx> -n egress-tests delete pod egress-campaign-rehearsal
+```
+
+Check both runs before the campaign:
+- every sampler source has rows;
+- `verify` passes;
+- each cgroup reader's clock offset is within a few ms of zero;
+- every run 2 actor has `resumeSource` `own`.
+
+`deploy.sh --campaign` refuses while the rehearsal Pod exists, because both
+mount the ReadWriteOnce PVC.
+
 ## Cleanup
 
 ```bash
