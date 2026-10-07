@@ -20,6 +20,7 @@ Run from this directory: python3 -m unittest test_fit
 from __future__ import annotations
 
 import contextlib
+import csv
 import io
 import json
 import tempfile
@@ -285,6 +286,24 @@ class ExtractTest(unittest.TestCase):
                     self.assertEqual(got, want, err.getvalue())
                     if want:
                         self.assertIn("runs mix schemes", err.getvalue())
+
+    def test_skips_files_that_are_not_run_reports(self):
+        with tempfile.TemporaryDirectory() as d:
+            gate = Path(d) / "A-c010-b010.gate.json"
+            gate.write_text(json.dumps({"waited_s": 0, "residual": 0, "ok": True, "reads": 1, "gatewayPod": "gw"}))
+            csv_path = Path(d) / "runs.csv"
+            for name, args in [
+                ("a fitting run", [str(FIXTURE), str(gate)]),
+                ("a provisional row", [str(FIXTURE), "--provisional", str(gate)]),
+                ("a holdout", [str(FIXTURE), "--holdout", str(gate)]),
+            ]:
+                with self.subTest(name):
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+                        got = fit.main([*args, "--csv", str(csv_path)])
+                    self.assertEqual(got, 0, err.getvalue())
+                    self.assertEqual(err.getvalue(), f"skipped {gate}: not a run report\n")
+                    with open(csv_path) as f:
+                        self.assertEqual([r["run"] for r in csv.DictReader(f)], ["run-b10.json"])
 
     def test_no_settled_p99_without_the_driver_field(self):
         self.assertIsNone(fit.extract(FIXTURE)["p99_settled_ms"])

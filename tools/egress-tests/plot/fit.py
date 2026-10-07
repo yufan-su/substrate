@@ -372,6 +372,18 @@ def print_fits(fits: dict[str, Fit], out=sys.stdout, rows: list[dict] = ()) -> N
             print(f"  {t:>3} {f.coef[i]: .5g}  [{lo:.5g}, {hi:.5g}]", file=out)
 
 
+def extract_reports(paths: list[str], base: str) -> list[dict]:
+    """extract over paths, skipping files that are not run reports, such as
+    the campaign's .gate.json files a glob picks up."""
+    rows = []
+    for f in paths:
+        try:
+            rows.append(extract(f, base))
+        except rr.NotAReport:
+            print(f"skipped {f}: not a run report", file=sys.stderr)
+    return rows
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("runs", nargs="+", help="--output JSON files of the fitting runs")
@@ -382,10 +394,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--holdout", nargs="*", default=[], help="JSONs to score against the fit")
     p.add_argument("--predict", nargs=2, type=int, metavar=("B", "C"))
     args = p.parse_args(argv)
-    rows = [r for r in (extract(f, args.base) for f in args.runs) if not r["warmup"]]
-    for f in args.provisional:
-        rows.append(extract(f, args.base) | {"provisional": True})
-    holdouts = [extract(h, args.base) for h in args.holdout]
+    rows = [r for r in extract_reports(args.runs, args.base) if not r["warmup"]]
+    rows += [r | {"provisional": True} for r in extract_reports(args.provisional, args.base)]
+    holdouts = extract_reports(args.holdout, args.base)
     try:
         scheme = one_scheme(rows + holdouts)
     except ValueError as e:

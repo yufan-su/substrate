@@ -82,9 +82,15 @@ def run_label(report: dict) -> str:
     return f"B={c['parallel']} C={c['endpoints']} {c['connMode']}"
 
 
+class NotAReport(ValueError):
+    """The file is JSON, but not a driver --output report."""
+
+
 def load_run(path: str | Path) -> Run:
     p = Path(path)
     report = json.loads(p.read_text())
+    if not isinstance(report, dict) or "config" not in report:
+        raise NotAReport(f"{p}: not a run report")
     phases = {ph["name"]: (parse_time(ph["start"]), parse_time(ph["end"])) for ph in report.get("phases") or []}
     if "steady" not in phases:
         raise ValueError(f"{p}: no steady phase; the run never started its loops")
