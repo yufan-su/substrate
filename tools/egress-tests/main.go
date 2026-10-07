@@ -129,6 +129,7 @@ func runCmd(ctx context.Context, args []string) error {
 	fs.DurationVar(&cfg.ResumeTimeout, "resume-timeout", 5*time.Minute, "Per actor: how long to keep resuming (a full pool is retried) and waiting for it to answer.")
 	fs.DurationVar(&cfg.ProgressInterval, "progress-interval", 30*time.Second, "How often to print progress; 0 turns it off.")
 	fs.StringVar(&cfg.Template, "template", "egress-tests-actor", "Actor template the actors are created from.")
+	fs.StringVar(&cfg.Pick, "pick", pickFirst, "Which B of the A actors to resume: first, the same ones every run so a warm-up covers them, or random.")
 	fs.StringVar(&cfg.Scheme, "scheme", egressapi.SchemeHTTP, "Scheme the loops request endpoints over: http, or https through the gateway's TLS interception (needs deploy.sh --https).")
 	routerURL := fs.String("router-url", "", "atenet router base URL. Empty port-forwards to the atenet-router Service.")
 	output := fs.String("output", "", "If set, write the report as JSON to this file.")

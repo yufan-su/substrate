@@ -262,8 +262,8 @@ func formatCounts[V int | int64](counts map[string]V) string {
 // print writes the human-readable summary of the run.
 func (rep *report) print(w io.Writer) {
 	c := rep.Config
-	fmt.Fprintf(w, "\n== egress-tests: actors=%d parallel=%d endpoints=%d scheme=%s conn-mode=%s request-interval=%v duration=%v\n",
-		c.Actors, c.Parallel, c.Endpoints, c.Scheme, c.ConnMode, c.RequestInterval, c.Duration)
+	fmt.Fprintf(w, "\n== egress-tests: actors=%d parallel=%d endpoints=%d scheme=%s pick=%s conn-mode=%s request-interval=%v duration=%v\n",
+		c.Actors, c.Parallel, c.Endpoints, c.Scheme, c.Pick, c.ConnMode, c.RequestInterval, c.Duration)
 	if rep.Interrupted {
 		fmt.Fprintln(w, "!! interrupted: the numbers below cover only part of the run")
 	}

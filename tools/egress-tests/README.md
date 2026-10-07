@@ -97,7 +97,8 @@ go run ./tools/egress-tests run --actors 1000 --parallel 10 --endpoints 10 --dur
 | Flag | Default | Meaning |
 |---|---|---|
 | `--actors` | 1000 | **A**: actors to create. Actors are named `egress-<i>`. A rerun reuses the ones that already exist. |
-| `--parallel` | 1 | **B**: actors to resume, all running their loops at the same time. Each run picks them at random from the A actors. |
+| `--parallel` | 1 | **B**: actors to resume, all running their loops at the same time. Each run picks them from the A actors as `--pick` says. |
+| `--pick` | `first` | Which B actors to resume: `first`, egress-0 up to egress-<B-1> every run, so one warm-up run gives them all their own snapshots; or `random`, a new random set each run. |
 | `--endpoints` | 10 | **C**: endpoints each loop calls, in order, round and round. At most 256. |
 | `--duration` | 5m | How long the loops run once they have all started. |
 | `--scheme` | `http` | `http`, or `https` through the gateway's TLS interception. HTTPS needs `deploy.sh --https`; see [HTTPS](#https). |
@@ -128,7 +129,7 @@ until latency and errors climb.
 The run goes through these phases:
 1. **Preflight**: checks that the C endpoint Services exist.
 2. **Create**: creates the A actors and their policies.
-3. **Resume**: resumes B actors, picked at random from the A, and waits until each one answers through the
+3. **Resume**: resumes B actors, picked from the A per `--pick`, and waits until each one answers through the
    router.
 4. **Start**: starts all the loops at the same moment.
 5. **Run**: waits `--duration`, printing progress.
@@ -379,9 +380,11 @@ before reaching the server, counts as created, not reused.
 Resume and ready latency are measured by the driver. Resume latency runs
 from the first `ResumeActor` attempt until it succeeds, retries included.
 Ready latency runs from then until the actor first answers through the router.
-Because each run picks its B actors at random, they usually mix actors that
-never ran, which restore from the template's golden snapshot, with actors an
-earlier run suspended, which restore from their own snapshot.
+Actors that never ran restore from the template's golden snapshot, and actors
+an earlier run suspended restore from their own snapshot. With `--pick first`
+a run of B=100 resumes the same actors every time, so one warm-up run makes
+every later run of B ≤ 100 restore from own snapshots. `--pick random`
+usually mixes the two.
 
 ## Suggested matrix
 

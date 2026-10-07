@@ -40,6 +40,16 @@ const (
 	connModeNewConn   = "new-conn"
 )
 
+// How a run picks the B actors it resumes from the A it created.
+const (
+	// pickFirst takes the first B, so a warm-up run of B actors gives every
+	// later run of at most B actors their own snapshots.
+	pickFirst = "first"
+	// pickRandom takes B at random, so successive runs also reach actors
+	// that never ran.
+	pickRandom = "random"
+)
+
 // runConfig is what one run does. It is echoed into the report.
 type runConfig struct {
 	Actors            int           `json:"actors"`
@@ -55,6 +65,7 @@ type runConfig struct {
 	Atespace          string        `json:"atespace"`
 	Template          string        `json:"template"`
 	Scheme            string        `json:"scheme"`
+	Pick              string        `json:"pick"`
 }
 
 func (c *runConfig) validate() error {
@@ -81,6 +92,8 @@ func (c *runConfig) validate() error {
 		return fmt.Errorf("--progress-interval cannot be negative, got %v", c.ProgressInterval)
 	case c.Scheme != egressapi.SchemeHTTP && c.Scheme != egressapi.SchemeHTTPS:
 		return fmt.Errorf("--scheme must be %s or %s, got %q", egressapi.SchemeHTTP, egressapi.SchemeHTTPS, c.Scheme)
+	case c.Pick != pickFirst && c.Pick != pickRandom:
+		return fmt.Errorf("--pick must be %s or %s, got %q", pickFirst, pickRandom, c.Pick)
 	case c.Atespace == "" || c.Template == "":
 		return errors.New("--atespace and --template are required")
 	}
@@ -369,10 +382,9 @@ func (r *runner) ensurePolicy(ctx context.Context, name string, want *ateapipb.E
 	return changed, nil
 }
 
-// pickActors returns the names of Parallel actors chosen at random among the
-// created ones, or of all of them if fewer were created. Picking at random
-// spreads runs over the whole population instead of always resuming the same
-// first actors, so successive runs also resume actors that never ran.
+// pickActors returns the names of Parallel actors among the created ones, in
+// index order: the first ones, or ones chosen at random with --pick random.
+// It returns all of them if fewer were created.
 func (r *runner) pickActors(created []bool) []string {
 	var idx []int
 	for i, ok := range created {
@@ -380,7 +392,9 @@ func (r *runner) pickActors(created []bool) []string {
 			idx = append(idx, i)
 		}
 	}
-	r.rand.Shuffle(len(idx), func(i, j int) { idx[i], idx[j] = idx[j], idx[i] })
+	if r.cfg.Pick == pickRandom {
+		r.rand.Shuffle(len(idx), func(i, j int) { idx[i], idx[j] = idx[j], idx[i] })
+	}
 	idx = idx[:min(len(idx), r.cfg.Parallel)]
 	slices.Sort(idx)
 	names := make([]string, len(idx))

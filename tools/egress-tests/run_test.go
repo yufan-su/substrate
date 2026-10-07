@@ -406,6 +406,7 @@ func testConfig() runConfig {
 		Atespace:          "egress-tests",
 		Template:          "egress-tests-actor",
 		Scheme:            egressapi.SchemeHTTP,
+		Pick:              pickFirst,
 	}
 }
 
@@ -433,37 +434,15 @@ func wantHosts(n int) []string {
 	return hosts
 }
 
-// sourcesLine is how the report prints resume sources: "none 1, own 2".
-func sourcesLine(sources map[string]int) string {
-	var parts []string
-	for _, k := range slices.Sorted(maps.Keys(sources)) {
-		parts = append(parts, fmt.Sprintf("%s %d", k, sources[k]))
-	}
-	return strings.Join(parts, ", ")
-}
-
 func TestRun(t *testing.T) {
 	for _, mode := range []string{connModeKeepAlive, connModeNewConn} {
 		t.Run(mode, func(t *testing.T) {
 			cfg := testConfig()
 			cfg.ConnMode = mode
 			api := newFakeAPI()
-			// The run resumes actors at random, so every actor gets a source:
-			// its own snapshot, the golden tag, or none, by index mod 3.
-			wantSource := map[string]string{}
-			api.snapshots = map[string]string{}
-			for i := range cfg.Actors {
-				name := actorName(i)
-				switch i % 3 {
-				case 0:
-					api.snapshots[name] = "gs://b/r/atespaces/egress-tests/actors/uid-" + name + "/snapshots/s"
-					wantSource[name] = resumeFromOwn
-				case 1:
-					api.snapshots[name] = "gs://b/r/atespaces/ate-golden/tags/golden"
-					wantSource[name] = resumeFromTag
-				default:
-					wantSource[name] = resumeFromNone
-				}
+			api.snapshots = map[string]string{
+				"egress-0": "gs://b/r/atespaces/egress-tests/actors/uid-egress-0/snapshots/s",
+				"egress-1": "gs://b/r/atespaces/ate-golden/tags/golden",
 			}
 			r, fr, out := newTestRunner(t, cfg, api, cfg.Endpoints)
 
@@ -471,15 +450,16 @@ func TestRun(t *testing.T) {
 			if err != nil {
 				t.Fatalf("run: %v\n%s", err, out)
 			}
-			wantSources := map[string]int{}
-			for _, a := range rep.Actors {
-				wantSources[wantSource[a.Name]]++
-				if a.ResumeSource != wantSource[a.Name] {
-					t.Errorf("%s resumed from %q, want %q", a.Name, a.ResumeSource, wantSource[a.Name])
-				}
+			if raw, err := json.Marshal(rep); err != nil || !strings.Contains(string(raw), `"pick":"first"`) {
+				t.Errorf("report JSON lacks config.pick (err %v)", err)
 			}
-			if len(rep.Actors) != cfg.Parallel || !maps.Equal(rep.Resume.Sources, wantSources) {
-				t.Errorf("resume sources = %v over %d actors, want %v over %d", rep.Resume.Sources, len(rep.Actors), wantSources, cfg.Parallel)
+			if want := map[string]int{resumeFromOwn: 1, resumeFromTag: 1, resumeFromNone: 1}; !maps.Equal(rep.Resume.Sources, want) {
+				t.Errorf("resume sources = %v, want %v", rep.Resume.Sources, want)
+			}
+			for _, a := range rep.Actors {
+				if want := map[string]string{"egress-0": resumeFromOwn, "egress-1": resumeFromTag, "egress-2": resumeFromNone}[a.Name]; a.ResumeSource != want {
+					t.Errorf("%s resumed from %q, want %q", a.Name, a.ResumeSource, want)
+				}
 			}
 
 			if got := api.callCount("CreateActor"); got != cfg.Actors {
@@ -545,8 +525,8 @@ func TestRun(t *testing.T) {
 
 			var printed bytes.Buffer
 			rep.print(&printed)
-			for _, want := range []string{"scheme=http ", "request-interval=0s", "300 requests", "timeout=3", "egress-target-0 (3/300)",
-				"resumed from: " + sourcesLine(wantSources)} {
+			for _, want := range []string{"scheme=http pick=first ", "request-interval=0s", "300 requests", "timeout=3", "egress-target-0 (3/300)",
+				"resumed from: none 1, own 1, tag 1"} {
 				if !strings.Contains(printed.String(), want) {
 					t.Errorf("printed report lacks %q:\n%s", want, printed.String())
 				}
@@ -740,9 +720,35 @@ func TestRunFailsWhenActorsAreLeftRunning(t *testing.T) {
 	}
 }
 
-func TestPickActorsAtRandom(t *testing.T) {
+func TestPickActorsFirst(t *testing.T) {
 	cfg := testConfig()
 	cfg.Actors, cfg.Parallel = 20, 5
+	for _, tc := range []struct {
+		name    string
+		created func(i int) bool
+		want    []string
+	}{
+		{"all created", func(int) bool { return true }, []string{"egress-0", "egress-1", "egress-2", "egress-3", "egress-4"}},
+		{"egress-3 not created", func(i int) bool { return i != 3 }, []string{"egress-0", "egress-1", "egress-2", "egress-4", "egress-5"}},
+		{"fewer created than wanted", func(i int) bool { return i == 7 || i == 11 }, []string{"egress-7", "egress-11"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			created := make([]bool, cfg.Actors)
+			for i := range created {
+				created[i] = tc.created(i)
+			}
+			for run := range 3 {
+				if got := newRunner(cfg, nil, nil, nil, io.Discard).pickActors(created); !slices.Equal(got, tc.want) {
+					t.Errorf("run %d picked %v, want %v", run, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestPickActorsAtRandom(t *testing.T) {
+	cfg := testConfig()
+	cfg.Actors, cfg.Parallel, cfg.Pick = 20, 5, pickRandom
 	created := make([]bool, cfg.Actors)
 	for i := range created {
 		created[i] = i != 3 // egress-3 failed to create
@@ -984,6 +990,8 @@ func TestConfigValidate(t *testing.T) {
 		"zero duration":         func(c *runConfig) { c.Duration = 0 },
 		"negative interval":     func(c *runConfig) { c.RequestInterval = -time.Second },
 		"bad scheme":            func(c *runConfig) { c.Scheme = "ftp" },
+		"bad pick":              func(c *runConfig) { c.Pick = "last" },
+		"no pick":               func(c *runConfig) { c.Pick = "" },
 		"sub-ms interval":       func(c *runConfig) { c.RequestInterval = 500 * time.Microsecond },
 		"fractional interval":   func(c *runConfig) { c.RequestInterval = 1500 * time.Microsecond },
 		"sub-ms timeout":        func(c *runConfig) { c.RequestTimeout = 500 * time.Microsecond },
