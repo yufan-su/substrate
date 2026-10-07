@@ -108,6 +108,41 @@ class PlanTest(unittest.TestCase):
                 self.assertEqual(args[args.index(flag) + 1], want)
 
 
+class LadderPlanTest(unittest.TestCase):
+    def test_rungs(self):
+        steps = cp.ladder_plan(CTX)
+        runs = [s for s in steps if s.kind == "run"]
+        self.assertEqual([(s.name, s.B, s.C, s.duration, s.progress_interval, s.measured) for s in runs], [
+            ("warmup", 1000, 10, "2m", "15s", False),
+            # First round 0.13 C + 0.0017 B C, plus 3 min, rounded up to a minute.
+            ("L1-c1000-b0100", 100, 1000, "8m", "", True),
+            ("L2-c1000-b0300", 300, 1000, "14m", "15s", True),
+            ("L3-c0300-b1000", 1000, 300, "13m", "15s", True),
+            ("L4-c1000-b1000", 1000, 1000, "34m", "15s", True),
+        ])
+        owners = [s for s in steps if s.kind == "owner"]
+        self.assertEqual([s.name for s in owners], ["start", "before-rung2", "before-rung3", "before-rung4"])
+        self.assertTrue(all(s.restarts for s in owners))
+        self.assertEqual(["44 x 7Gi" in s.note for s in owners], [False, False, False, True])
+        self.assertFalse(any(s.base_check or s.holdout or s.fit for s in steps))
+
+    def test_a_step_interval_overrides_the_env(self):
+        step = cp.run("L2-c1000-b0300", 300, 1000, progress_interval="15s")
+        args = cp.driver_args("egress-tests", CTX, step, Path("/o"), {"PROGRESS_INTERVAL": "5s"})
+        self.assertEqual(args[args.index("--progress-interval") + 1], "15s")
+        self.assertEqual(args[args.index("--duration") + 1], "3m")
+
+    def test_main_runs_the_ladder_without_a_base_check_ref(self):
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(cp.Runner, "walk") as walk:
+            argv = ["--context", CTX, "--driver", "egress-tests", "--out", d, "--ref-dir", d + "/none"]
+            self.assertEqual(cp.main(argv + ["--plan", "ladder"]), 0)
+            self.assertEqual([s.name for s in walk.call_args.args[0]], [s.name for s in cp.ladder_plan(CTX)])
+            walk.reset_mock()
+            self.assertEqual(cp.main(argv), 1, "the tunnel-cap plan needs its base check ref")
+            walk.assert_not_called()
+
+
 class KubectlTest(unittest.TestCase):
     def test_argv(self):
         for name, in_cluster, kubeconfig, want in [

@@ -66,6 +66,7 @@ PURGE=false
 REHEARSAL=false
 # --campaign-id: the runner writes to /out/<id>, so one PVC holds several campaigns.
 CAMPAIGN_ID=""
+CAMPAIGN_PLAN=""
 SCRIPTS_DIR=""
 
 usage() {
@@ -110,6 +111,8 @@ usage() {
   echo "  --rehearsal             With --campaign, create the rehearsal Pod ${REHEARSAL_POD} instead"
   echo "  --dry-run               With --campaign, print what it would apply; change nothing"
   echo "  --campaign-id ID        With --campaign, write to /out/ID instead of /out"
+  echo "  --campaign-plan PLAN    With --campaign, the runner's --plan: tunnel-cap or ladder"
+  echo "                          (default: the runner's, tunnel-cap)"
   echo "  --scripts-dir DIR       The owner's directory of E0 scripts, for the runner's printed commands"
   echo "  --purge                 With --delete-campaign, also delete the output PVC and its disk"
   echo "                          (kubectl cp /out first)"
@@ -305,6 +308,9 @@ campaign_script() {
   if [[ -n "${KUBECONFIG_FILE}" ]]; then
     owner="--kubeconfig ${KUBECONFIG_FILE} ${owner}"
   fi
+  if [[ -n "${CAMPAIGN_PLAN}" ]]; then
+    owner="${owner} --plan ${CAMPAIGN_PLAN}"
+  fi
   if [[ -n "${SCRIPTS_DIR}" ]]; then
     # Quoted, so the Pod's shell leaves a laptop ~ alone.
     owner="${owner} --scripts-dir '${SCRIPTS_DIR}'"
@@ -372,6 +378,10 @@ check_campaign_context() {
   fi
   if ! [[ "${CAMPAIGN_ID}" =~ ^[A-Za-z0-9._-]*$ && "${CAMPAIGN_ID}" != .* ]]; then
     echo "Error: --campaign-id '${CAMPAIGN_ID}' must be letters, digits, '.', '_' or '-', not starting with '.'." >&2
+    exit 1
+  fi
+  if ! [[ "${CAMPAIGN_PLAN}" =~ ^(tunnel-cap|ladder)?$ ]]; then
+    echo "Error: --campaign-plan '${CAMPAIGN_PLAN}' is not tunnel-cap or ladder." >&2
     exit 1
   fi
   if ! [[ "${SCRIPTS_DIR}" =~ ^[A-Za-z0-9_.:@/~-]*$ ]]; then
@@ -629,6 +639,13 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --campaign-id=*)
       CAMPAIGN_ID="${1#*=}"
+      ;;
+    --campaign-plan)
+      shift
+      CAMPAIGN_PLAN="$1"
+      ;;
+    --campaign-plan=*)
+      CAMPAIGN_PLAN="${1#*=}"
       ;;
     --scripts-dir)
       shift

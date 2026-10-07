@@ -351,6 +351,17 @@ func TestCampaignPods(t *testing.T) {
 			},
 		},
 		{
+			name: "ladder campaign",
+			args: []string{"--context", "gke_p_z_c", "--image", "gcr.io/p/egress-campaign:abc",
+				"--campaign-plan", "ladder"},
+			wantPod:   "egress-campaign",
+			wantPool:  "campaign",
+			wantPolls: "5s",
+			wantScript: []string{
+				"python3 /work/campaign/campaign.py --in-cluster --context gke_p_z_c --plan ladder \\\n",
+			},
+		},
+		{
 			name: "rehearsal on another pool",
 			args: []string{"--context", "gke_p_z_c", "--image", "gcr.io/p/egress-campaign:abc", "--rehearsal",
 				"--campaign-pool", "bench", "--progress-interval", "2s"},
@@ -425,19 +436,31 @@ func TestCampaignPods(t *testing.T) {
 	}
 }
 
-func TestCampaignNeedsAContext(t *testing.T) {
+func TestCampaignRefusals(t *testing.T) {
 	t.Parallel()
 	repo := filepath.Join(t.TempDir(), "repo")
 	writeFile(t, filepath.Join(repo, "tools/egress-tests/deploy.sh"), readFile(t, "deploy.sh"), 0o755)
 	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	cmd := exec.Command("bash", "tools/egress-tests/deploy.sh", "--campaign", "--dry-run", "--image", "img")
-	cmd.Dir = repo
-	cmd.Env = append(os.Environ(), "PATH=/usr/bin:/bin:"+filepath.Dir(mustLookPath(t, "git")))
-	out, err := cmd.CombinedOutput()
-	if err == nil || !strings.Contains(string(out), "need --context") {
-		t.Errorf("deploy.sh --campaign without --context: got %v\n%s, want a refusal", err, out)
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no context", nil, "need --context"},
+		{"unknown plan", []string{"--context", "c", "--campaign-plan", "grid"}, "is not tunnel-cap or ladder"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := exec.Command("bash", append([]string{"tools/egress-tests/deploy.sh", "--campaign", "--dry-run", "--image", "img"}, tc.args...)...)
+			cmd.Dir = repo
+			cmd.Env = append(os.Environ(), "PATH=/usr/bin:/bin:"+filepath.Dir(mustLookPath(t, "git")))
+			out, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(out), tc.want) {
+				t.Errorf("deploy.sh --campaign %v: got %v\n%s, want a refusal containing %q", tc.args, err, out, tc.want)
+			}
+		})
 	}
 }
 

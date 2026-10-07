@@ -537,6 +537,11 @@ halves always poll at 1 s and 5 s.
 several campaigns and a fresh id starts from the top; the go files and
 `campaign.log` move with it. `--scripts-dir DIR` names the owner's directory
 of `e0-apply.sh` and `e0-revert.sh` in the printed E0 commands.
+`--campaign-plan ladder` runs the scale ladder instead of the tunnel-cap
+campaign: B x C = 100 x 1000, 300 x 1000, 1000 x 300 and 1000 x 1000 after a
+warm-up of all 1000 actors. Each rung lasts its predicted first round plus
+3 min, and rungs with B >= 300 poll progress every 15 s. The owner step
+before 1000 x 1000 also reshapes the workers to 44 x 7Gi.
 
 Pass `--kubeconfig <file>` too when the context lives in its own file: every
 deploy.sh call uses both, and the runner prints both in its owner commands

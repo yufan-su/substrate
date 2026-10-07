@@ -18,7 +18,7 @@ replicates, holdouts, E0 and the edge runs, one after another on one cluster.
 
 Usage:
   python3 campaign.py --context CTX [--kubeconfig FILE] --driver PATH --out DIR
-                      [--ref-dir DIR] [--base-check-ref T3.json]
+                      [--plan tunnel-cap|ladder] [--ref-dir DIR] [--base-check-ref T3.json]
                       [--no-provisional] [--in-cluster] [--dry-run]
 
 Run it with a Python that has numpy (plot/requirements.txt): the base check
@@ -68,6 +68,14 @@ Measured runs pass --pre-idle and --wait-for-cleartext-idle to the driver.
 DRIVER_HAS_PREIDLE=0 drops them, for a driver built before those flags.
 PROGRESS_INTERVAL overrides the 1s polls of every run but the warm-up,
 whose halves always poll at 1 s and 5 s; the campaign Pod sets it to 5s.
+
+--plan ladder runs the scale ladder instead: a warm-up of all 1000 actors,
+then B x C = 100 x 1000, 300 x 1000, 1000 x 300 and 1000 x 1000, with a
+gateway restart between rungs, and a worker reshape to 44 x 7Gi before
+the last. Each rung runs for its first round, from the
+campaign's fit, plus 3 min to settle, and rungs with B >= 300 poll progress
+every 15 s, since each poll asks all B actors at once. It has no base check,
+fit or holdouts.
 """
 
 from __future__ import annotations
@@ -132,6 +140,8 @@ class Step:
     restarts: bool = False
     # fit: the commands are the fit, built when the step is reached.
     fit: bool = False
+    # progress_interval, when set, overrides PROGRESS_INTERVAL for this run.
+    progress_interval: str = ""
 
 
 def owner(name: str, note: str, *commands: str, restarts: bool = False, fit: bool = False) -> Step:
@@ -184,6 +194,51 @@ def plan(ctx: str, kubeconfig: str = "", scripts: str = SCRIPTS_PLACEHOLDER) -> 
     return steps
 
 
+# The scale ladder's rungs, (B, C).
+LADDER = ((100, 1000), (300, 1000), (1000, 300), (1000, 1000))
+LADDER_SETTLE_S = 180
+LADDER_SLOW_POLLS_FROM_B = 300
+LADDER_SLOW_POLLS = "15s"
+# Above this many tunnels the 16-pod worker shape runs out of source ports.
+LADDER_RESHAPE_ABOVE = 300_000
+
+
+def first_round_s(b: int, c: int) -> float:
+    """The first round's length, from the campaign's fit (B <= 100):
+    0.13 s per Service plus 0.0017 s per tunnel."""
+    return 0.13 * c + 0.0017 * b * c
+
+
+def ladder_duration(b: int, c: int) -> str:
+    """The first round plus the settle time, rounded up to a whole minute."""
+    return f"{-(-int(first_round_s(b, c) + LADDER_SETTLE_S) // 60)}m"
+
+
+def ladder_plan(ctx: str, kubeconfig: str = "", scripts: str = SCRIPTS_PLACEHOLDER) -> list[Step]:
+    del scripts  # the ladder has no E0
+    k = shlex.join(["kubectl", *cluster_args(ctx, kubeconfig)])
+    restart_gw = (f"{k} -n ate-system rollout restart deploy/atenet-egress && "
+                  f"{k} -n ate-system rollout status deploy/atenet-egress --timeout=300s")
+    roll_workers = (f"{k} -n egress-tests rollout restart deploy/egress-tests && "
+                    f"{k} -n egress-tests rollout status deploy/egress-tests --timeout=600s")
+    steps = [owner("start", "ladder start: restart the gateway and roll the workers", restart_gw, roll_workers,
+                   restarts=True),
+             run("warmup", ACTORS, 10, duration="2m", measured=False, progress_interval=LADDER_SLOW_POLLS)]
+    for i, (b, c) in enumerate(LADDER, start=1):
+        if i > 1:
+            note = f"before rung {i} (B={b} C={c}): restart the gateway"
+            if b * c > LADDER_RESHAPE_ABOVE:
+                note = (f"before rung {i} (B={b} C={c}): reshape the workers to 44 x 7Gi for the worker pods' "
+                        "source ports, then restart the gateway")
+            steps += [owner(f"before-rung{i}", note, restart_gw, restarts=True)]
+        steps += [run(f"L{i}-c{c:04d}-b{b:04d}", b, c, duration=ladder_duration(b, c),
+                      progress_interval=LADDER_SLOW_POLLS if b >= LADDER_SLOW_POLLS_FROM_B else "")]
+    return steps
+
+
+PLANS = {"tunnel-cap": plan, "ladder": ladder_plan}
+
+
 def driver_args(driver: str, ctx: str, step: Step, out: Path, env: dict, in_cluster: bool = False,
                 kubeconfig: str = "") -> list[str]:
     where = (["--api-endpoint", IN_CLUSTER_API, "--api-token-file", IN_CLUSTER_TOKEN, "--router-url", IN_CLUSTER_ROUTER]
@@ -191,7 +246,7 @@ def driver_args(driver: str, ctx: str, step: Step, out: Path, env: dict, in_clus
     args = [driver, "run", *where, "--actors", str(ACTORS), "--pick", "first",
             "--parallel", str(step.B), "--endpoints", str(step.C), "--duration", step.duration,
             "--request-interval", "100ms",
-            "--progress-interval", env.get("PROGRESS_INTERVAL", "1s")]
+            "--progress-interval", step.progress_interval or env.get("PROGRESS_INTERVAL", "1s")]
     # The warm-up's halves compare the two intervals whatever the override.
     if step.name in ("warmup-1s", "warmup-5s"):
         args[-1] = step.name.removeprefix("warmup-")
@@ -551,6 +606,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="the owner's kubeconfig, for kubectl and the driver on a laptop and the printed commands")
     p.add_argument("--driver", required=True, help="egress-tests binary")
     p.add_argument("--out", required=True, help="directory for the run JSONs")
+    p.add_argument("--plan", choices=sorted(PLANS), default="tunnel-cap", help="which campaign to run")
     p.add_argument("--ref-dir", default=REF_DIR, help="directory holding the base check's and provisional rows' JSONs")
     p.add_argument("--base-check-ref",
                    help=f"the B=100 C=10 run the base check compares with (default: REF_DIR/{BASE_CHECK_FILE})")
@@ -563,7 +619,8 @@ def main(argv: list[str] | None = None) -> int:
     out = Path(args.out)
     ref_dir = Path(args.ref_dir)
     ref = Path(args.base_check_ref) if args.base_check_ref else ref_dir / BASE_CHECK_FILE
-    if not args.dry_run and not ref.exists():
+    steps = PLANS[args.plan](args.context, args.kubeconfig, args.scripts_dir)
+    if not args.dry_run and any(s.base_check for s in steps) and not ref.exists():
         print(f"refused: --base-check-ref {ref} does not exist", file=sys.stderr)
         return 1
     out.mkdir(parents=True, exist_ok=True)
@@ -573,7 +630,7 @@ def main(argv: list[str] | None = None) -> int:
                base_ref=ref, provisional=provisional_files(ref_dir, not args.no_provisional),
                in_cluster=args.in_cluster, kubeconfig=args.kubeconfig)
     try:
-        r.walk(plan(args.context, args.kubeconfig, args.scripts_dir))
+        r.walk(steps)
     except Refused as e:
         print(f"refused: {e}", file=sys.stderr)
         return 1
