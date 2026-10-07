@@ -110,7 +110,7 @@ type runner struct {
 	cleanupTimeout time.Duration
 	// rand picks which actors a run resumes.
 	rand *rand.Rand
-	// res samples the components' CPU and memory; nil when --resources is off.
+	// res samples the components' CPU and memory; nil when --usage is off.
 	res *resourceSampler
 }
 
