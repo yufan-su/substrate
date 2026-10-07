@@ -98,6 +98,66 @@ type clockOffset struct {
 type cgreaderReport struct {
 	Nodes   map[string]*cgNode `json:"nodes"`
 	Samples []cgSample         `json:"samples,omitempty"`
+	// LeafStride, when above 1, is how thinLeafRows cut the actor leaves'
+	// rows: one reader round in LeafStride kept.
+	LeafStride int `json:"leafStride,omitempty"`
+}
+
+const (
+	// Runs with more actors than thinActorsAbove have their actor leaves'
+	// rows thinned to about thinLeafRowBudget, half a 100-actor run's, so a
+	// report stays near 60 MB.
+	thinActorsAbove   = 200
+	thinLeafRowBudget = 100_000
+)
+
+// thinLeafRows bounds the report of a run with many actors once the checks
+// have read every row. Per container with leaves it keeps the actor leaves'
+// rows of one round in LeafStride, and the last round, whole, so a kept
+// round still sums. It also keeps each leaf's first and last row and every
+// gone row. Other rows stay.
+func thinLeafRows(cg *cgreaderReport) {
+	actors, rows := map[string]bool{}, 0
+	for _, s := range cg.Samples {
+		if a := actorOf(s.Leaf); a != s.Leaf {
+			actors[a] = true
+			rows++
+		}
+	}
+	if len(actors) <= thinActorsAbove || rows <= thinLeafRowBudget {
+		return
+	}
+	stride := (rows + thinLeafRowBudget - 1) / thinLeafRowBudget
+	keep := make([]bool, len(cg.Samples))
+	last := map[string]int{}
+	for i, s := range cg.Samples {
+		k := s.key()
+		if _, seen := last[k]; !seen || s.Gone || actorOf(s.Leaf) == s.Leaf {
+			keep[i] = true
+		}
+		last[k] = i
+	}
+	for _, i := range last {
+		keep[i] = true
+	}
+	for _, rounds := range leafRounds(cg.Samples) {
+		for r, round := range rounds {
+			if r%stride == 0 || r == len(rounds)-1 {
+				for _, i := range round {
+					keep[i] = true
+				}
+			}
+		}
+	}
+	n := 0
+	for i, s := range cg.Samples {
+		if keep[i] {
+			cg.Samples[n] = s
+			n++
+		}
+	}
+	cg.Samples = slices.Clip(cg.Samples[:n])
+	cg.LeafStride = stride
 }
 
 // cgreaderState is the sampler's view of the readers.

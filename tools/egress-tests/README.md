@@ -301,6 +301,9 @@ a round, the driver credits it what the container used beyond its other
 cgroups, as `inferredCpuSeconds` on the gone row. `--resources-verify` adds checks: no rows lost,
 node clocks steady, the leaves summing to their container, the readings
 agreeing with cAdvisor within 2%, and each reader under 0.02 core.
+With more than 200 actors' cgroups, the report keeps their rows from one
+round in `leafStride`, about 100k rows, plus each cgroup's first, last and
+gone rows; the summaries and checks read every row before that.
 `deploy.sh --delete` removes the DaemonSet.
 
 Before a real measurement, run a short smoke test:

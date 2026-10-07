@@ -21,6 +21,7 @@ import (
 	"maps"
 	"math"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -317,6 +318,94 @@ func TestCheckLeafSums(t *testing.T) {
 		case r.InferredCPUSeconds != nil:
 			t.Errorf("row %s inferred %v, want only the gone _pause row", r.Leaf, *r.InferredCPUSeconds)
 		}
+	}
+}
+
+func TestThinLeafRows(t *testing.T) {
+	t.Parallel()
+	// One worker container over 250 rounds: the container row, the ateom
+	// leaf, and each actor's _pause and actor leaves. The last actor is
+	// removed at round 100.
+	shape := func(actors int) []cgSample {
+		var out []cgSample
+		for i := range 250 {
+			at := time.Unix(int64(1000+i), 0)
+			row := func(leaf string, gone bool) cgSample {
+				return cgSample{T: at, Node: "n", Component: "workers", Pod: "w", Container: "ateom", Leaf: leaf, CPUSeconds: float64(i), Gone: gone}
+			}
+			out = append(out, row("", false), row("ateom", false))
+			for a := range actors {
+				if a == actors-1 && i > 100 {
+					continue
+				}
+				uid := fmt.Sprintf("a%d", a)
+				out = append(out, row(uid+"-_pause", a == actors-1 && i == 100), row(uid+"-actor", false))
+			}
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name       string
+		actors     int
+		wantStride int
+	}{
+		{"few actors: untouched", 100, 0},
+		{"at the actor threshold: untouched", thinActorsAbove, 0},
+		{"many actors: one round in two", 210, 2},
+		{"more actors: one round in three", 401, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rows := shape(tc.actors)
+			cg := &cgreaderReport{Samples: slices.Clone(rows)}
+			thinLeafRows(cg)
+			if cg.LeafStride != tc.wantStride {
+				t.Fatalf("LeafStride = %d, want %d", cg.LeafStride, tc.wantStride)
+			}
+			if tc.wantStride == 0 {
+				if len(cg.Samples) != len(rows) {
+					t.Errorf("kept %d rows, want all %d", len(cg.Samples), len(rows))
+				}
+				return
+			}
+			kept := map[string]map[time.Time]bool{}
+			leafRows := 0
+			for _, s := range cg.Samples {
+				if kept[s.key()] == nil {
+					kept[s.key()] = map[time.Time]bool{}
+				}
+				kept[s.key()][s.T] = true
+				if actorOf(s.Leaf) != s.Leaf {
+					leafRows++
+				}
+			}
+			if leafRows > thinLeafRowBudget+4*tc.actors {
+				t.Errorf("kept %d actor leaf rows, want at most %d", leafRows, thinLeafRowBudget+4*tc.actors)
+			}
+			first, last := map[string]time.Time{}, map[string]time.Time{}
+			for _, s := range rows {
+				if _, ok := first[s.key()]; !ok {
+					first[s.key()] = s.T
+				}
+				last[s.key()] = s.T
+			}
+			for _, s := range rows {
+				k := s.key()
+				r := int(s.T.Unix() - 1000)
+				wholeRound := r%tc.wantStride == 0 || r == 249
+				if want := actorOf(s.Leaf) == s.Leaf || s.Gone || wholeRound; want && !kept[k][s.T] {
+					t.Errorf("row %s at round %d dropped, want kept", k, r)
+				}
+				if !wholeRound && actorOf(s.Leaf) != s.Leaf && !s.Gone && kept[k][s.T] && first[k] != s.T && last[k] != s.T {
+					t.Errorf("row %s at round %d kept, want dropped", k, r)
+				}
+			}
+			for k, at := range last {
+				if !kept[k][at] {
+					t.Errorf("last row of %s dropped, want kept", k)
+				}
+			}
+		})
 	}
 }
 

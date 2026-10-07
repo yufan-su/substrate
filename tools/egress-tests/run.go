@@ -653,6 +653,9 @@ func (r *runner) finishResources(rep *report) {
 	}
 	rep.Resources = res
 	summarizeResources(rep)
+	if res.Cgreader != nil {
+		thinLeafRows(res.Cgreader)
+	}
 }
 
 // pollStats merges the live stats of every running loop; actors that do not
