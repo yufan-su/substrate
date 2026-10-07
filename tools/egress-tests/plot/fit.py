@@ -17,6 +17,7 @@
 Usage:
   python3 fit.py runs/*.json [--provisional old.json ...] [--csv runs.csv]
                  [--base SHA] [--holdout h1.json ...] [--predict B C]
+                 [--json fit.json]
 
 Each response is a linear form in B (active actors), T = B x C (open
 tunnels) and C (Services per actor), fitted by least squares over the
@@ -42,6 +43,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime
+import hashlib
+import json
 import math
 import sys
 from dataclasses import dataclass, field
@@ -76,6 +80,8 @@ BASELINE_S = 10.0
 # Above this pre-idle working set the gateway pod is at its high-water mark,
 # and gateway_ws_mib is informational.
 WS_PINNED_MIB = 500.0
+
+CLEARTEXT_ACTIVE = "cluster.egress_forward_proxy_cleartext.upstream_cx_active"
 
 # Two-sided 97.5% t quantiles by degrees of freedom; 1.96 beyond 30.
 T975 = [0, 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
@@ -149,14 +155,14 @@ def ws_delta_mib(run: rr.Run, component: str, lo: float, hi: float) -> float | N
     return total / 2**20
 
 
-def heap_delta_mib(run: rr.Run, lo: float, hi: float) -> float | None:
-    """Envoy's allocated heap from /memory: the max over [lo, hi] minus the
-    pre-idle max, summed over the gateway pods."""
+def envoy_heap_mib(run: rr.Run, lo: float, hi: float) -> tuple[float | None, float | None]:
+    """Envoy's allocated heap from /memory, summed over the gateway pods: the
+    max over [lo, hi] minus the pre-idle max, and the pre-idle max itself."""
     by_pod: dict[str, list[tuple[float, float]]] = {}
     for m in (run.report.get("resources") or {}).get("envoyMemory") or []:
         by_pod.setdefault(m["pod"], []).append((rr.parse_time(m["t"]), m["allocatedBytes"]))
     pre = run.phases.get("pre-idle")
-    total, found = 0.0, False
+    delta, floor, found = 0.0, 0.0, False
     for pts in by_pod.values():
         steady = [v for t, v in pts if lo <= t <= hi]
         if pre:
@@ -165,9 +171,21 @@ def heap_delta_mib(run: rr.Run, lo: float, hi: float) -> float | None:
             start = min(t for t, _ in pts)
             base = min((v for t, v in pts if t <= start + BASELINE_S), default=None)
         if steady and base is not None:
-            total += max(steady) - base
+            delta += max(steady) - base
+            floor += base
             found = True
-    return total / 2**20 if found else None
+    return (delta / 2**20, floor / 2**20) if found else (None, None)
+
+
+def cleartext_active_max(run: rr.Run, lo: float, hi: float) -> float | None:
+    """The gateway-to-target pool's largest open-connection count over
+    [lo, hi], summed over the gateway pods' maxima."""
+    by_pod: dict[str, float] = {}
+    for r in run.series(CLEARTEXT_ACTIVE, ("envoy",)):
+        if lo <= rr.parse_time(r["t"]) <= hi:
+            pod = r.get("pod", "")
+            by_pod[pod] = max(by_pod.get(pod, 0.0), r["value"])
+    return sum(by_pod.values()) if by_pod else None
 
 
 def extract(path: str | Path, base: str = "") -> dict:
@@ -202,7 +220,8 @@ def extract(path: str | Path, base: str = "") -> dict:
     gw_base = (res.get("baseline") or {}).get("gateway") or {}
     row["gateway_ws_base_mib"] = (gw_base["workingSetBytes"] / 2**20
                                   if gw_base.get("workingSetBytes") and not gw_base.get("insufficient") else None)
-    row["envoy_heap_mib"] = heap_delta_mib(run, lo, s1)
+    row["envoy_heap_mib"], row["envoy_heap_floor_mib"] = envoy_heap_mib(run, lo, s1)
+    row["cleartext_active_max"] = cleartext_active_max(run, s0, s1)
     row["worker_ws_mib"] = ws_delta_mib(run, "workers", s0, s1)
     # Only the plateau rule measures the first round; the fallback and the
     # floor set the start by rule.
@@ -340,7 +359,8 @@ def score(fits: dict[str, Fit], holdout: dict) -> list[tuple[str, float, float, 
 # ---- output ---------------------------------------------------------------
 
 CSV_FIELDS = ["run", "provisional", "B", "C", "T", "scheme", "R_measured", "interval_ms", "base", "breakers", "warmup",
-              "policies_updated", "cleartext_active_at_start", "settled_rule", "gateway_ws_base_mib", *FORMS]
+              "policies_updated", "cleartext_active_at_start", "cleartext_active_max", "settled_rule",
+              "gateway_ws_base_mib", "envoy_heap_floor_mib", *FORMS]
 
 
 def one_scheme(rows: list[dict]) -> str:
@@ -372,6 +392,84 @@ def print_fits(fits: dict[str, Fit], out=sys.stdout, rows: list[dict] = ()) -> N
             print(f"  {t:>3} {f.coef[i]: .5g}  [{lo:.5g}, {hi:.5g}]", file=out)
 
 
+# The gateway pod's working set over Envoy's live heap at the 12,800-tunnel
+# high-water mark, 1.1 GiB over 1.0 GiB: allocator retention, ext-proc and
+# sdsmint. The pod's working set has no fit of its own once it ratchets.
+RSS_OVER_HEAP = 1.1
+
+# (B, C) points at which --json records Fit.predict, so a consumer that
+# re-implements the prediction can check itself.
+CHECK_POINTS = [(10, 10), (50, 128), (100, 160)]
+
+JSON_SCHEMA = 1
+
+
+def fit_record(f: Fit) -> dict:
+    return {"terms": f.terms, "coef": f.coef.tolist(), "cov": f.cov.tolist(), "sigma2": f.sigma2,
+            "df": f.df, "n": f.n, "t975": t975(f.df), "dropped": f.dropped}
+
+
+def sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def span(vals: list[float]) -> list[float] | None:
+    return [min(vals), max(vals)] if vals else None
+
+
+def fit_document(rows: list[dict], fits: dict[str, Fit], holdouts: list[dict] = (),
+                 inputs: list[str] = (), fit_at: str = "") -> dict:
+    """Everything a reader of the fit needs without the run JSONs: each fit's
+    coefficients and covariance, the rows it came from, the holdout scores,
+    and the per-actor rate, heap floor and pool-per-Service figures that
+    turn (B, C) into absolute numbers."""
+    fitting = [r for r in rows if not r.get("provisional")]
+    rates = [r["R_measured"] / r["B"] for r in fitting if r.get("R_measured") and r["B"]]
+    floors = [r["envoy_heap_floor_mib"] for r in fitting if r.get("envoy_heap_floor_mib") is not None]
+    pools = [r["cleartext_active_max"] / r["C"] for r in fitting if r.get("cleartext_active_max") and r["C"]]
+    keep = ["run", "provisional", "B", "C", "T", "R_measured", "cleartext_active_max", *FORMS]
+    scored = []
+    for h in holdouts:
+        responses = {resp: {"predicted": pred, "halfWidth": half, "measured": meas, "ok": ok}
+                     for resp, pred, half, meas, ok in score(fits, h)}
+        scored.append({k: h.get(k) for k in ("run", "B", "C", "T")} | {"responses": responses})
+    checks = []
+    for b, c in CHECK_POINTS:
+        for resp, f in fits.items():
+            pred, half = f.predict({"B": b, "C": c, "T": b * c})
+            checks.append({"B": b, "C": c, "response": resp, "predicted": pred, "halfWidth": half})
+    return {
+        "schema": JSON_SCHEMA,
+        "provenance": {
+            "fitAt": fit_at or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "base": sorted({r["base"] for r in rows if r.get("base")}),
+            "scheme": one_scheme(rows),
+            "intervalMs": sorted({r["interval_ms"] for r in rows if r.get("interval_ms")}),
+            "runs": len(fitting),
+            "provisional": len(rows) - len(fitting),
+            "inputs": [{"name": Path(p).name, "sha256": sha256(p)} for p in inputs],
+        },
+        "ratePerActor": sum(rates) / len(rates) if rates else None,
+        "floors": {"envoy_heap_mib": rr.median(floors) if floors else None},
+        "rssOverHeap": RSS_OVER_HEAP,
+        "poolPerService": {"lo": min(pools), "hi": max(pools)} if pools else None,
+        "measured": {"B": span([r["B"] for r in fitting]), "C": span([r["C"] for r in fitting]),
+                     "T": span([r["T"] for r in fitting])},
+        "fits": {resp: fit_record(f) for resp, f in fits.items()},
+        "rows": [{k: r.get(k) for k in keep} for r in rows],
+        "holdouts": scored,
+        "checks": checks,
+    }
+
+
+def write_json(doc: dict, path: str) -> None:
+    Path(path).write_text(json.dumps(doc, indent=1, allow_nan=False) + "\n")
+
+
 def extract_reports(paths: list[str], base: str) -> list[dict]:
     """extract over paths, skipping files that are not run reports, such as
     the campaign's .gate.json files a glob picks up."""
@@ -393,6 +491,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--base", default="", help="base commit, when the JSONs do not carry one")
     p.add_argument("--holdout", nargs="*", default=[], help="JSONs to score against the fit")
     p.add_argument("--predict", nargs=2, type=int, metavar=("B", "C"))
+    p.add_argument("--json", default="", help="also write the fit, its rows and holdout scores as JSON, "
+                   "the input of predictor.py")
     args = p.parse_args(argv)
     rows = [r for r in extract_reports(args.runs, args.base) if not r["warmup"]]
     rows += [r | {"provisional": True} for r in extract_reports(args.provisional, args.base)]
@@ -417,6 +517,12 @@ def main(argv: list[str] | None = None) -> int:
         for resp, f in fits.items():
             pred, half = f.predict(q)
             print(f"  {resp:16} {pred:.4g} ± {half:.2g}")
+    if args.json:
+        used = {r["run"] for r in rows + holdouts}
+        inputs = [f for f in [*args.runs, *args.provisional, *args.holdout] if Path(f).name in used]
+        doc = fit_document(rows, fits, holdouts, inputs=inputs)
+        write_json(doc, args.json)
+        print(f"wrote {args.json}")
     missed = False
     for row in holdouts:
         print(f"holdout {row['run']} B={row['B']} C={row['C']}:")

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import csv
+import hashlib
 import io
 import json
 import tempfile
@@ -172,6 +173,69 @@ class ProvisionalTest(unittest.TestCase):
             self.assertEqual(line.split(",")[1], "True")
 
 
+class JsonDocumentTest(unittest.TestCase):
+    def setUp(self):
+        self.rows = synthetic(GRID + REPLICATES, seed=1)
+        for i, r in enumerate(self.rows):
+            r |= {"run": f"r{i}.json", "scheme": "http", "base": "47ed2247", "interval_ms": 100.0,
+                  "R_measured": 9.7 * r["B"], "cleartext_active_max": (12 if r["C"] == 10 else 6) * r["C"],
+                  "envoy_heap_floor_mib": 11.0 + i % 3}
+        self.rows.append({"run": "p.json", "provisional": True, "scheme": "http", "B": 200, "C": 10, "T": 2000,
+                          "R_measured": 1.0, "cleartext_active_max": 1.0, "gateway_cores": 1.8})
+        self.fits = fit.fit_all(self.rows)
+        self.holdout = synthetic([(80, 160)], seed=3, noise=0.0)[0] | {"run": "h.json", "scheme": "http"}
+
+    def test_document(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "r0.json"
+            src.write_text("{}")
+            doc = fit.fit_document(self.rows, self.fits, [self.holdout], inputs=[str(src)], fit_at="2026-10-07T17:00:00Z")
+            out = Path(d) / "fit.json"
+            fit.write_json(doc, str(out))
+            got = json.loads(out.read_text())
+        prov = got["provenance"]
+        self.assertEqual((prov["fitAt"], prov["base"], prov["scheme"], prov["intervalMs"], prov["runs"], prov["provisional"]),
+                         ("2026-10-07T17:00:00Z", ["47ed2247"], "http", [100.0], len(GRID + REPLICATES), 1))
+        self.assertEqual(prov["inputs"], [{"name": "r0.json", "sha256": hashlib.sha256(b"{}").hexdigest()}])
+        # The provisional row enters neither the rate, the pool nor the measured ranges.
+        self.assertAlmostEqual(got["ratePerActor"], 9.7)
+        self.assertEqual(got["poolPerService"], {"lo": 6, "hi": 12})
+        self.assertEqual(got["floors"]["envoy_heap_mib"], 12.0)
+        self.assertEqual(got["measured"], {"B": [10, 100], "C": [10, 256], "T": [100, 12800]})
+        self.assertEqual(got["rssOverHeap"], fit.RSS_OVER_HEAP)
+        self.assertEqual(len(got["rows"]), len(self.rows))
+        self.assertEqual(set(got["fits"]), set(self.fits))
+        f = got["fits"]["gateway_cores"]
+        self.assertEqual(f["terms"], self.fits["gateway_cores"].terms)
+        self.assertEqual(f["t975"], fit.t975(f["df"]))
+        self.assertEqual(len(got["checks"]), len(fit.CHECK_POINTS) * len(self.fits))
+        for c in got["checks"]:
+            with self.subTest(check=(c["response"], c["B"], c["C"])):
+                pred, half = self.fits[c["response"]].predict({"B": c["B"], "C": c["C"], "T": c["B"] * c["C"]})
+                self.assertEqual((c["predicted"], c["halfWidth"]), (pred, half))
+        h = got["holdouts"][0]
+        self.assertEqual((h["run"], h["B"], h["C"]), ("h.json", 80, 160))
+        self.assertTrue(all(r["ok"] for r in h["responses"].values()), h)
+
+    def test_no_pool_or_heap_readings(self):
+        for r in self.rows:
+            r["cleartext_active_max"] = r["envoy_heap_floor_mib"] = None
+        doc = fit.fit_document(self.rows, self.fits)
+        self.assertIsNone(doc["poolPerService"])
+        self.assertIsNone(doc["floors"]["envoy_heap_mib"])
+
+    def test_main_writes_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "fit.json"
+            with contextlib.redirect_stdout(io.StringIO()) as so:
+                got = fit.main([str(FIXTURE), "--csv", str(Path(d) / "runs.csv"), "--json", str(out)])
+            self.assertEqual(got, 0)
+            self.assertIn(f"wrote {out}", so.getvalue())
+            doc = json.loads(out.read_text())
+        self.assertEqual(doc["schema"], fit.JSON_SCHEMA)
+        self.assertEqual([i["name"] for i in doc["provenance"]["inputs"]], ["run-b10.json"])
+
+
 class AcceptTest(unittest.TestCase):
     def test_rules(self):
         cases = [
@@ -249,6 +313,30 @@ class ExtractTest(unittest.TestCase):
                     self.assertIsNone(got)
                 else:
                     self.assertAlmostEqual(got, want)
+
+    def test_envoy_heap_floor_and_cleartext_max(self):
+        report = json.loads(FIXTURE.read_text())
+        steady = next(p for p in report["phases"] if p["name"] == "steady")
+        pre_start, pre_end = "2020-01-01T00:00:00Z", "2020-01-01T00:00:30Z"
+        report["phases"].insert(0, {"name": "pre-idle", "start": pre_start, "end": pre_end})
+        report["resources"]["envoyMemory"] = [
+            {"t": t, "pod": pod, "allocatedBytes": mib * 2**20}
+            for t, pod, mib in [(pre_end, "gw-a", 11), (steady["end"], "gw-a", 50), (pre_end, "gw-b", 9), (steady["end"], "gw-b", 20)]]
+
+        def active(t, pod, v):
+            return {"t": t, "source": "envoy", "component": "gateway", "pod": pod, "container": "envoy",
+                    "metric": fit.CLEARTEXT_ACTIVE, "value": v}
+        report["resources"]["series"] += [active(pre_end, "gw-a", 999), active(steady["start"], "gw-a", 70),
+                                          active(steady["end"], "gw-a", 40), active(steady["end"], "gw-b", 30)]
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "r.json"
+            p.write_text(json.dumps(report))
+            row = fit.extract(p)
+        self.assertAlmostEqual(row["envoy_heap_mib"], 50)
+        self.assertAlmostEqual(row["envoy_heap_floor_mib"], 20)
+        # The per-pod maxima over steady, summed; the pre-idle reading is outside.
+        self.assertEqual(row["cleartext_active_max"], 100)
+        self.assertIsNone(fit.extract(FIXTURE)["cleartext_active_max"])
 
     def test_resume_p50_counts_own_snapshots_only(self):
         report = json.loads(FIXTURE.read_text())
