@@ -408,6 +408,23 @@ def print_fits(fits: dict[str, Fit], out=sys.stdout, rows: list[dict] = ()) -> N
             print(f"  {t:>3} {f.coef[i]: .5g}  [{lo:.5g}, {hi:.5g}]", file=out)
 
 
+def extract_reports(paths: list[str], base: str, skip: bool) -> list[dict]:
+    """extract over paths. With skip, files that are not run reports, such
+    as the campaign's .gate.json files a glob picks up, are skipped with a
+    line on stderr; without it they are an error. Only the positional runs
+    come from globs; a --holdout or --provisional path is named on purpose,
+    and skipping it would turn a typo into a passed check."""
+    rows = []
+    for f in paths:
+        try:
+            rows.append(extract(f, base))
+        except rr.NotAReport:
+            if not skip:
+                raise
+            print(f"skipped {f}: not a run report", file=sys.stderr)
+    return rows
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("runs", nargs="+", help="--output JSON files of the fitting runs")
@@ -418,11 +435,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--holdout", nargs="*", default=[], help="JSONs to score against the fit")
     p.add_argument("--predict", nargs=2, type=int, metavar=("B", "C"))
     args = p.parse_args(argv)
-    rows = [r for r in (extract(f, args.base) for f in args.runs) if not r["warmup"]]
-    for f in args.provisional:
-        rows.append(extract(f, args.base) | {"provisional": True})
-    holdouts = [extract(h, args.base) for h in args.holdout]
     try:
+        rows = [r for r in extract_reports(args.runs, args.base, skip=True) if not r["warmup"]]
+        if not rows:
+            raise ValueError("no run report among the runs to fit")
+        rows += [r | {"provisional": True} for r in extract_reports(args.provisional, args.base, skip=False)]
+        holdouts = extract_reports(args.holdout, args.base, skip=False)
         scheme = one_scheme(rows + holdouts)
     except ValueError as e:
         print(f"fit.py: {e}", file=sys.stderr)
