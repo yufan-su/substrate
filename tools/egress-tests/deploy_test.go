@@ -29,7 +29,8 @@ cat >/dev/null
 `
 
 // goShim stands in for go build: it writes a logging kubectl-ate to -o,
-// which reports a ready golden snapshot when asked for the template.
+// which reports a ready golden snapshot when asked for the template, after
+// any --kubeconfig and --context.
 const goShim = `#!/bin/bash
 echo "go $*" >>"${SHIM_LOG}"
 while [[ $# -gt 0 ]]; do
@@ -37,6 +38,9 @@ while [[ $# -gt 0 ]]; do
     cat >"$2" <<'SHIM'
 #!/bin/bash
 echo "kubectl-ate $*" >>"${SHIM_LOG}"
+while [[ "$1" == "--kubeconfig" || "$1" == "--context" ]]; do
+  shift 2
+done
 if [[ "$1 $2" == "get actor-template" ]]; then
   echo '{"status":{"goldenSnapshotStatus":{"goldenTag":{"name":"golden"}}}}'
 fi
@@ -73,6 +77,12 @@ func TestDeployScript(t *testing.T) {
 		env     []string
 		want    []string
 		notWant []string
+		// dir, when set, is the directory under the repository the script
+		// runs from.
+		dir string
+		// cluster, when set, must reach every kubectl, kubectl-ate and ko
+		// call. "{repo}" stands for the scratch repository's path.
+		cluster string
 	}{
 		{
 			name: "delete without the env file",
@@ -100,10 +110,38 @@ func TestDeployScript(t *testing.T) {
 			env:  []string{"BUCKET_NAME=b", "KO_DOCKER_REPO=r"},
 			want: []string{"kubectl rollout status daemonset/egress-tests-cgreader --namespace=egress-tests --timeout=300s"},
 		},
+		{
+			name:    "deploy to a named cluster",
+			args:    []string{"--deploy", "--endpoints", "2", "--cgreader", "--kubeconfig", "/k/c 2", "--context", "ctx"},
+			env:     []string{"BUCKET_NAME=b", "KO_DOCKER_REPO=r"},
+			want:    []string{"run-tool.sh ko apply -f - -- --kubeconfig /k/c 2 --context ctx"},
+			cluster: "--kubeconfig /k/c 2 --context ctx",
+		},
+		{
+			name:    "delete from a named context",
+			args:    []string{"--delete", "--context=ctx"},
+			want:    []string{"run-tool.sh ko delete --ignore-not-found -f - --context ctx"},
+			cluster: "--context ctx",
+		},
+		{
+			name:    "unpatch the gateway in a named context",
+			args:    []string{"--unpatch-gateway", "--context", "ctx"},
+			want:    []string{"kubectl --context ctx -n ate-system delete configmap egress-tests-target-ca --ignore-not-found"},
+			cluster: "--context ctx",
+		},
+		{
+			// The script changes to the repository root, so a relative
+			// kubeconfig must be resolved against the caller's directory.
+			name:    "relative kubeconfig from a subdirectory",
+			args:    []string{"--delete", "--kubeconfig", "kc.yaml"},
+			dir:     "tools/egress-tests",
+			cluster: "--kubeconfig {repo}/tools/egress-tests/kc.yaml",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			logged, tmpdir := runDeployScript(t, tc.args, tc.env)
+			logged, tmpdir, repo := runDeployScript(t, tc.dir, tc.args, tc.env)
+			tc.cluster = strings.ReplaceAll(tc.cluster, "{repo}", repo)
 			for _, want := range tc.want {
 				if !strings.Contains(logged, want) {
 					t.Errorf("deploy.sh did not run %q; ran:\n%s", want, logged)
@@ -112,6 +150,22 @@ func TestDeployScript(t *testing.T) {
 			for _, nw := range tc.notWant {
 				if strings.Contains(logged, nw) {
 					t.Errorf("deploy.sh ran %q; ran:\n%s", nw, logged)
+				}
+			}
+			if tc.cluster != "" {
+				for _, line := range strings.Split(strings.TrimSpace(logged), "\n") {
+					tool, rest, _ := strings.Cut(line, " ")
+					switch {
+					case tool == "kubectl" || tool == "kubectl-ate":
+						if !strings.HasPrefix(rest, tc.cluster+" ") {
+							t.Errorf("%s call without %q first: %s", tool, tc.cluster, line)
+						}
+					case strings.HasPrefix(line, "run-tool.sh ko resolve"):
+					case strings.HasPrefix(line, "run-tool.sh ko"):
+						if !strings.HasSuffix(line, " "+tc.cluster) {
+							t.Errorf("ko call without %q last: %s", tc.cluster, line)
+						}
+					}
 				}
 			}
 			left, err := os.ReadDir(tmpdir)
@@ -125,12 +179,18 @@ func TestDeployScript(t *testing.T) {
 	}
 }
 
-// runDeployScript runs deploy.sh with args and returns the shims' log and
-// the TMPDIR it used.
-func runDeployScript(t *testing.T, args, env []string) (logged, tmpdir string) {
+// runDeployScript runs deploy.sh with args from dir under a scratch
+// repository and returns the shims' log, the TMPDIR it used and the
+// repository's path.
+func runDeployScript(t *testing.T, dir string, args, env []string) (logged, tmpdir, repo string) {
 	t.Helper()
 	tmp := t.TempDir()
-	repo := filepath.Join(tmp, "repo")
+	// The script's $PWD has symlinks resolved, as on macOS's /var.
+	tmp, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo = filepath.Join(tmp, "repo")
 	shims := filepath.Join(tmp, "shims")
 	tmpdir = filepath.Join(tmp, "with space")
 	log := filepath.Join(tmp, "shim.log")
@@ -152,8 +212,8 @@ func runDeployScript(t *testing.T, args, env []string) (logged, tmpdir string) {
 	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	cmd := exec.Command("bash", append([]string{"tools/egress-tests/deploy.sh"}, args...)...)
-	cmd.Dir = repo
+	cmd := exec.Command("bash", append([]string{filepath.Join(repo, "tools/egress-tests/deploy.sh")}, args...)...)
+	cmd.Dir = filepath.Join(repo, dir)
 	cmd.Env = append([]string{
 		"PATH=" + shims + ":" + filepath.Dir(mustLookPath(t, "git")) + ":" + filepath.Dir(mustLookPath(t, "jq")) + ":/usr/bin:/bin",
 		"HOME=" + tmp,
@@ -164,7 +224,7 @@ func runDeployScript(t *testing.T, args, env []string) (logged, tmpdir string) {
 	if err != nil {
 		t.Fatalf("deploy.sh %v: %v\n%s", args, err, out)
 	}
-	return readFile(t, log), tmpdir
+	return readFile(t, log), tmpdir, repo
 }
 
 func readFile(t *testing.T, path string) string {
