@@ -310,6 +310,9 @@ cgroups, as `inferredCpuSeconds` on the gone row. `--usage-verify` adds
 checks: no rows lost, every requested container cgroup answered, node
 clocks steady, the leaves summing to their container, the readings
 agreeing with cAdvisor within 2%, and each reader under 0.02 core.
+With more than 200 actors' cgroups, the report keeps their rows from one
+round in `leafStride`, about 100k rows, plus each cgroup's first, last and
+gone rows; the summaries and checks read every row before that.
 `deploy.sh --delete` removes the DaemonSet.
 
 The reader answers on its pod IP without authentication, so while it runs

@@ -677,6 +677,12 @@ func (r *runner) finishResources(rep *report) {
 	}
 	rep.Resources = res
 	summarizeResources(rep)
+	// Last, once every check and summary above has read every row: the
+	// thinning changes what the JSON carries, and must not change a verdict
+	// or a figure. Keep it after anything that reads Cgreader.Samples.
+	if res.Cgreader != nil {
+		thinLeafRows(res.Cgreader)
+	}
 }
 
 // pollStats merges the live stats of every running loop; actors that do not
