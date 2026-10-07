@@ -29,7 +29,8 @@ cat >/dev/null
 `
 
 // goShim stands in for go build: it writes a logging kubectl-ate to -o,
-// which reports a ready golden snapshot when asked for the template.
+// which reports a ready golden snapshot when asked for the template, after
+// any --kubeconfig and --context.
 const goShim = `#!/bin/bash
 echo "go $*" >>"${SHIM_LOG}"
 while [[ $# -gt 0 ]]; do
@@ -37,6 +38,9 @@ while [[ $# -gt 0 ]]; do
     cat >"$2" <<'SHIM'
 #!/bin/bash
 echo "kubectl-ate $*" >>"${SHIM_LOG}"
+while [[ "$1" == "--kubeconfig" || "$1" == "--context" ]]; do
+  shift 2
+done
 if [[ "$1 $2" == "get actor-template" ]]; then
   echo '{"status":{"goldenSnapshotStatus":{"goldenTag":{"name":"golden"}}}}'
 fi
@@ -63,6 +67,8 @@ func TestDeployScript(t *testing.T) {
 		env     []string
 		want    []string
 		notWant []string
+		// cluster, when set, must reach every kubectl, kubectl-ate and ko call.
+		cluster string
 	}{
 		{
 			name: "delete without the env file",
@@ -90,6 +96,19 @@ func TestDeployScript(t *testing.T) {
 			env:  []string{"BUCKET_NAME=b", "KO_DOCKER_REPO=r"},
 			want: []string{"kubectl rollout status daemonset/egress-tests-cgreader --namespace=egress-tests --timeout=300s"},
 		},
+		{
+			name:    "deploy to a named cluster",
+			args:    []string{"--deploy", "--endpoints", "2", "--cgreader", "--kubeconfig", "/k/c 2", "--context", "ctx"},
+			env:     []string{"BUCKET_NAME=b", "KO_DOCKER_REPO=r"},
+			want:    []string{"run-tool.sh ko apply -f - -- --kubeconfig /k/c 2 --context ctx"},
+			cluster: "--kubeconfig /k/c 2 --context ctx",
+		},
+		{
+			name:    "delete from a named context",
+			args:    []string{"--delete", "--context=ctx"},
+			want:    []string{"run-tool.sh ko delete --ignore-not-found -f - --context ctx"},
+			cluster: "--context ctx",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -102,6 +121,22 @@ func TestDeployScript(t *testing.T) {
 			for _, nw := range tc.notWant {
 				if strings.Contains(logged, nw) {
 					t.Errorf("deploy.sh ran %q; ran:\n%s", nw, logged)
+				}
+			}
+			if tc.cluster != "" {
+				for _, line := range strings.Split(strings.TrimSpace(logged), "\n") {
+					tool, rest, _ := strings.Cut(line, " ")
+					switch {
+					case tool == "kubectl" || tool == "kubectl-ate":
+						if !strings.HasPrefix(rest, tc.cluster+" ") {
+							t.Errorf("%s call without %q first: %s", tool, tc.cluster, line)
+						}
+					case strings.HasPrefix(line, "run-tool.sh ko resolve"):
+					case strings.HasPrefix(line, "run-tool.sh ko"):
+						if !strings.HasSuffix(line, " "+tc.cluster) {
+							t.Errorf("ko call without %q last: %s", tc.cluster, line)
+						}
+					}
 				}
 			}
 			left, err := os.ReadDir(tmpdir)

@@ -49,6 +49,10 @@ WAIT_TIMEOUT_SECS=300
 HTTPS=false
 SKIP_TEMPLATE=false
 CGREADER=false
+KUBECONFIG_FILE=""
+KUBE_CONTEXT=""
+# --kubeconfig and --context, for every kubectl, kubectl-ate and ko call.
+CLUSTER_ARGS=()
 
 usage() {
   echo "Usage: $0 --deploy|--delete|--patch-gateway|--unpatch-gateway [options]"
@@ -73,6 +77,9 @@ usage() {
   echo "                          egress-target-<C-1> (default: ${ENDPOINTS}, at most ${MAX_ENDPOINTS})"
   echo "  --wait-timeout SECONDS  How long to wait for each rollout and the golden snapshot (default: ${WAIT_TIMEOUT_SECS})"
   echo "  --cgreader              Also deploy the cgroup reader DaemonSet for run --resources-cgreader"
+  echo "  --kubeconfig FILE       Kubeconfig for every kubectl, kubectl-ate and ko call"
+  echo "                          (default: the usual loading rules)"
+  echo "  --context CTX           Kubeconfig context for every call (default: the current context)"
 }
 
 # Scratch space for kubectl-ate and generated certificates, removed on exit.
@@ -88,7 +95,27 @@ build_kubectl_ate() {
 }
 
 run_kubectl_ate() {
-  "${KUBECTL_ATE_BIN}" "$@"
+  "${KUBECTL_ATE_BIN}" ${CLUSTER_ARGS[@]+"${CLUSTER_ARGS[@]}"} "$@"
+}
+
+# Every kubectl call in this script goes through here, so none falls back to
+# the current context when --context is given.
+kubectl() {
+  command kubectl ${CLUSTER_ARGS[@]+"${CLUSTER_ARGS[@]}"} "$@"
+}
+
+# ko apply passes what follows -- to kubectl apply; ko delete passes all of
+# its arguments to kubectl delete.
+ko_apply() {
+  if ((${#CLUSTER_ARGS[@]})); then
+    hack/run-tool.sh ko apply -f - -- "${CLUSTER_ARGS[@]}"
+  else
+    hack/run-tool.sh ko apply -f -
+  fi
+}
+
+ko_delete() {
+  hack/run-tool.sh ko delete --ignore-not-found -f - ${CLUSTER_ARGS[@]+"${CLUSTER_ARGS[@]}"}
 }
 
 sha256_file() {
@@ -244,7 +271,7 @@ deploy() {
   build_kubectl_ate
 
   echo "Deploying the worker pool (workers=${WORKER_COUNT}, worker_memory=${WORKER_MEMORY:-unset})..."
-  substitute "${MANIFEST_DIR}/workerpool.yaml.tmpl" | hack/run-tool.sh ko apply -f -
+  substitute "${MANIFEST_DIR}/workerpool.yaml.tmpl" | ko_apply
   kubectl wait --for=create deployment/egress-tests \
     --namespace="${POOL_NAMESPACE}" --timeout="${WAIT_TIMEOUT_SECS}s"
   kubectl rollout status deployment/egress-tests \
@@ -270,7 +297,7 @@ deploy() {
 
   ensure_target_tls_secret
   echo "Deploying ${ENDPOINTS} endpoints in ${TARGET_NAMESPACE}..."
-  hack/run-tool.sh ko apply -f - <"${MANIFEST_DIR}/targets.yaml.tmpl"
+  ko_apply <"${MANIFEST_DIR}/targets.yaml.tmpl"
   render_services | kubectl apply -f - >/dev/null
   kubectl rollout status deployment/egress-target \
     --namespace="${TARGET_NAMESPACE}" --timeout="${WAIT_TIMEOUT_SECS}s"
@@ -283,7 +310,7 @@ deploy() {
 
   if [[ "${CGREADER}" == "true" ]]; then
     echo "Deploying the cgroup reader DaemonSet..."
-    hack/run-tool.sh ko apply -f - <"${MANIFEST_DIR}/cgreader.yaml.tmpl"
+    ko_apply <"${MANIFEST_DIR}/cgreader.yaml.tmpl"
     kubectl rollout status daemonset/egress-tests-cgreader \
       --namespace="${POOL_NAMESPACE}" --timeout="${WAIT_TIMEOUT_SECS}s"
   fi
@@ -299,7 +326,7 @@ delete() {
   kubectl delete namespace "${TARGET_NAMESPACE}" --ignore-not-found
   kubectl delete daemonset egress-tests-cgreader --namespace="${POOL_NAMESPACE}" --ignore-not-found
   # The pool manifest has ko:// image references, so it goes through ko.
-  substitute "${MANIFEST_DIR}/workerpool.yaml.tmpl" | hack/run-tool.sh ko delete --ignore-not-found -f -
+  substitute "${MANIFEST_DIR}/workerpool.yaml.tmpl" | ko_delete
 }
 
 if [[ "$#" -eq 0 ]]; then
@@ -366,6 +393,20 @@ while [[ "$#" -gt 0 ]]; do
     --cgreader)
       CGREADER=true
       ;;
+    --kubeconfig)
+      shift
+      KUBECONFIG_FILE="$1"
+      ;;
+    --kubeconfig=*)
+      KUBECONFIG_FILE="${1#*=}"
+      ;;
+    --context)
+      shift
+      KUBE_CONTEXT="$1"
+      ;;
+    --context=*)
+      KUBE_CONTEXT="${1#*=}"
+      ;;
     -h|--help)
       usage
       exit 0
@@ -388,6 +429,12 @@ done
 if ((ENDPOINTS < 1 || ENDPOINTS > MAX_ENDPOINTS)); then
   echo "Error: --endpoints must be between 1 and ${MAX_ENDPOINTS}, got ${ENDPOINTS}" >&2
   exit 1
+fi
+if [[ -n "${KUBECONFIG_FILE}" ]]; then
+  CLUSTER_ARGS+=(--kubeconfig "${KUBECONFIG_FILE}")
+fi
+if [[ -n "${KUBE_CONTEXT}" ]]; then
+  CLUSTER_ARGS+=(--context "${KUBE_CONTEXT}")
 fi
 
 case "${action}" in
