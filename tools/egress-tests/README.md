@@ -115,6 +115,7 @@ go run ./tools/egress-tests run --actors 1000 --parallel 10 --endpoints 10 --dur
 | `--output` | | Write the full report, including per-actor stats, as JSON to this file. Durations are in nanoseconds. |
 | `--kubeconfig`, `--context` | | Which cluster to use. |
 | `--api-endpoint`, `--router-url` | | When left empty, the driver port-forwards to the `api` and `atenet-router` Services. |
+| `--api-token-file` | | With `--api-endpoint`, authenticate to ateapi with the token in this file, re-read on every call, such as a projected ServiceAccount token with audience `api.ate-system.svc`. When left empty, the driver mints an `ate-client` token. `cleanup` takes it too. |
 
 ### Pacing
 
