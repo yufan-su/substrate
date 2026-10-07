@@ -23,7 +23,8 @@ tunnels) and C (Services per actor), fitted by least squares over the
 settled window. Terms whose 95% interval includes zero are dropped one at
 a time. Holdouts are scored against the fit: CPU within 15% or 0.02 core,
 whichever is larger; memory within 15%; settled p99 within two histogram
-buckets. Exits 1 when a holdout misses.
+buckets. Exits 1 when a holdout misses, and 2 when the runs, provisional
+rows and holdouts do not all share one --scheme.
 
 gateway_ws_mib is informational once a run starts with the gateway pod's
 working set above 500 MiB: Envoy keeps the memory it has had, so the pod's
@@ -180,6 +181,8 @@ def extract(path: str | Path, base: str = "") -> dict:
     elapsed = loop.get("elapsed", 0) / 1e9
     row = {
         "run": Path(path).name, "B": B, "C": C, "T": B * C,
+        # Reports from before --scheme existed were all HTTP.
+        "scheme": cfg.get("scheme") or "http",
         "R_measured": rep.get("loopReqPerS") or (loop.get("requests", 0) / elapsed if elapsed else 0.0),
         "interval_ms": cfg.get("requestInterval", 0) / 1e6,
         "base": base or rep.get("base", ""),
@@ -336,8 +339,18 @@ def score(fits: dict[str, Fit], holdout: dict) -> list[tuple[str, float, float, 
 
 # ---- output ---------------------------------------------------------------
 
-CSV_FIELDS = ["run", "provisional", "B", "C", "T", "R_measured", "interval_ms", "base", "breakers", "warmup",
+CSV_FIELDS = ["run", "provisional", "B", "C", "T", "scheme", "R_measured", "interval_ms", "base", "breakers", "warmup",
               "policies_updated", "cleartext_active_at_start", "settled_rule", "gateway_ws_base_mib", *FORMS]
+
+
+def one_scheme(rows: list[dict]) -> str:
+    """The scheme every row shares. HTTP and HTTPS runs have different cost
+    structures, so one fit never mixes them."""
+    schemes = sorted({r["scheme"] for r in rows})
+    if len(schemes) > 1:
+        by = {s: [r["run"] for r in rows if r["scheme"] == s] for s in schemes}
+        raise ValueError("runs mix schemes: " + "; ".join(f"{s}: {', '.join(n)}" for s, n in by.items()))
+    return schemes[0] if schemes else "http"
 
 
 def write_csv(rows: list[dict], path: str) -> None:
@@ -372,6 +385,13 @@ def main(argv: list[str] | None = None) -> int:
     rows = [r for r in (extract(f, args.base) for f in args.runs) if not r["warmup"]]
     for f in args.provisional:
         rows.append(extract(f, args.base) | {"provisional": True})
+    holdouts = [extract(h, args.base) for h in args.holdout]
+    try:
+        scheme = one_scheme(rows + holdouts)
+    except ValueError as e:
+        print(f"fit.py: {e}", file=sys.stderr)
+        return 2
+    print(f"scheme: {scheme}")
     write_csv(rows, args.csv)
     fits = fit_all(rows)
     if args.provisional:
@@ -387,8 +407,7 @@ def main(argv: list[str] | None = None) -> int:
             pred, half = f.predict(q)
             print(f"  {resp:16} {pred:.4g} ± {half:.2g}")
     missed = False
-    for h in args.holdout:
-        row = extract(h, args.base)
+    for row in holdouts:
         print(f"holdout {row['run']} B={row['B']} C={row['C']}:")
         for resp, pred, half, meas, ok in score(fits, row):
             missed |= not ok
