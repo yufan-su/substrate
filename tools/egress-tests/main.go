@@ -78,16 +78,18 @@ func main() {
 
 // clusterFlags select the cluster and how to reach ateapi.
 type clusterFlags struct {
-	kubeconfig  string
-	kubeContext string
-	apiEndpoint string
-	atespace    string
+	kubeconfig   string
+	kubeContext  string
+	apiEndpoint  string
+	apiTokenFile string
+	atespace     string
 }
 
 func (f *clusterFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.kubeconfig, "kubeconfig", "", "Path to the kubeconfig. Empty uses the default loading rules.")
 	fs.StringVar(&f.kubeContext, "context", "", "Kubeconfig context. Empty uses the current context.")
 	fs.StringVar(&f.apiEndpoint, "api-endpoint", "", "ateapi address. Empty port-forwards to the api Service.")
+	fs.StringVar(&f.apiTokenFile, "api-token-file", "", "File holding the bearer token for ateapi, re-read on every call, such as a projected ServiceAccount token. Needs --api-endpoint. Empty mints an ate-client token.")
 	fs.StringVar(&f.atespace, "atespace", "egress-tests", "Atespace of the actor template and the actors.")
 }
 
@@ -97,7 +99,13 @@ type connection struct {
 	k8s kubernetes.Interface
 }
 
+// newATEClient is replaced in tests.
+var newATEClient = ateclient.NewClient
+
 func (f *clusterFlags) connect(ctx context.Context) (*connection, error) {
+	if f.apiTokenFile != "" && f.apiEndpoint == "" {
+		return nil, errors.New("--api-token-file needs --api-endpoint")
+	}
 	cfg, err := ateclient.LoadKubeConfig(f.kubeconfig, f.kubeContext)
 	if err != nil {
 		return nil, fmt.Errorf("loading kubeconfig: %w", err)
@@ -106,7 +114,7 @@ func (f *clusterFlags) connect(ctx context.Context) (*connection, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating Kubernetes client: %w", err)
 	}
-	api, err := ateclient.NewClient(ctx, f.kubeconfig, f.kubeContext, f.apiEndpoint, "", false)
+	api, err := newATEClient(ctx, f.kubeconfig, f.kubeContext, f.apiEndpoint, f.apiTokenFile, false)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to ateapi: %w", err)
 	}
