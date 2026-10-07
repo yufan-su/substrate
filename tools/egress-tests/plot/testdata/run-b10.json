@@ -4,7 +4,7 @@
   "parallel": 10,
   "endpoints": 10,
   "duration": 60000000000,
-  "connMode": "keepalive",
+  "scheme": "http", "connMode": "keepalive",
   "requestInterval": 100000000
  },
  "phases": [

@@ -19,6 +19,7 @@ Run from this directory: python3 -m unittest test_fit
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import tempfile
@@ -336,6 +337,38 @@ class ExtractTest(unittest.TestCase):
                     self.assertIsNone(got)
                 else:
                     self.assertAlmostEqual(got, want)
+
+    def test_requires_a_scheme(self):
+        self.assertEqual(fit.extract(FIXTURE)["scheme"], "http")
+        report = json.loads(FIXTURE.read_text())
+        del report["config"]["scheme"]
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "r.json"
+            p.write_text(json.dumps(report))
+            with self.assertRaises(KeyError):
+                fit.extract(p)
+
+    def test_refuses_mixed_schemes(self):
+        report = json.loads(FIXTURE.read_text())
+        with tempfile.TemporaryDirectory() as d:
+            http, https = Path(d) / "http.json", Path(d) / "https.json"
+            report["config"]["scheme"] = "http"
+            http.write_text(json.dumps(report))
+            report["config"]["scheme"] = "https"
+            https.write_text(json.dumps(report))
+            csv_path = str(Path(d) / "runs.csv")
+            for name, runs, extra, want in [
+                ("one scheme", [http, FIXTURE], [], 0),
+                ("mixed in the fit", [http, https], [], 2),
+                ("mixed through a provisional row", [http], ["--provisional", str(https)], 2),
+                ("mixed through a holdout", [http], ["--holdout", str(https)], 2),
+            ]:
+                with self.subTest(name):
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+                        got = fit.main([*map(str, runs), *extra, "--csv", csv_path])
+                    self.assertEqual(got, want, err.getvalue())
+                    if want:
+                        self.assertIn("runs mix schemes", err.getvalue())
 
     def test_no_settled_p99_without_the_driver_field(self):
         self.assertIsNone(fit.extract(FIXTURE)["p99_settled_ms"])
