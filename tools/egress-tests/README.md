@@ -107,8 +107,8 @@ go run ./tools/egress-tests run --actors 1000 --parallel 10 --endpoints 10 --dur
 | `--create-concurrency` | 32 | How many actors are created at the same time. |
 | `--resume-timeout` | 5m | Per actor: how long to keep resuming, then waiting for it to answer. |
 | `--progress-interval` | 30s | How often to print progress. 0 turns it off. |
-| `--resources` | off | Sample the CPU and memory of the components on the egress path. See [Resource sampling](#resource-sampling). |
-| `--resources-live-interval` | 1s | How often `--resources` reads the Go process counters and Envoy's stats. |
+| `--usage` | off | Sample the CPU and memory of the components on the egress path. See [Usage sampling](#usage-sampling). |
+| `--usage-live-interval` | 1s | How often `--usage` reads the Go process counters and Envoy's stats. |
 | `--output` | | Write the full report, including per-actor stats, as JSON to this file. Durations are in nanoseconds. |
 | `--kubeconfig`, `--context` | | Which cluster to use. |
 | `--api-endpoint`, `--router-url` | | When left empty, the driver port-forwards to the `api` and `atenet-router` Services. |
