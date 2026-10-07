@@ -22,10 +22,14 @@ import (
 	"testing"
 )
 
-// logShim logs its name and arguments to $SHIM_LOG and drains stdin.
+// logShim logs its name and arguments to $SHIM_LOG and drains stdin. No
+// campaign Pod exists.
 const logShim = `#!/bin/bash
 echo "$(basename "$0") $*" >>"${SHIM_LOG}"
 cat >/dev/null
+if [[ "$*" == *"get pod egress-campaign"* ]]; then
+  exit 1
+fi
 `
 
 // goShim stands in for go build: it writes a logging kubectl-ate to -o,
@@ -136,6 +140,47 @@ func TestDeployScript(t *testing.T) {
 			args:    []string{"--delete", "--kubeconfig", "kc.yaml"},
 			dir:     "tools/egress-tests",
 			cluster: "--kubeconfig {repo}/tools/egress-tests/kc.yaml",
+		},
+		{
+			name: "campaign",
+			args: []string{"--campaign", "--kubeconfig", "/k/c", "--context", "ctx", "--image", "img"},
+			want: []string{
+				"kubectl --kubeconfig /k/c --context ctx apply -f tools/egress-tests/manifests/campaign.yaml.tmpl -f tools/egress-tests/manifests/campaign-pvc.yaml.tmpl",
+				"kubectl --kubeconfig /k/c --context ctx -n egress-tests get pod egress-campaign-rehearsal",
+				"kubectl --kubeconfig /k/c --context ctx create -f -",
+			},
+			cluster: "--kubeconfig /k/c --context ctx",
+		},
+		{
+			name:    "campaign without the Pod",
+			args:    []string{"--campaign", "--context", "ctx", "--image", "img", "--no-start"},
+			want:    []string{"kubectl --context ctx apply -f tools/egress-tests/manifests/campaign.yaml.tmpl"},
+			notWant: []string{"create -f -"},
+		},
+		{
+			name: "rehearsal",
+			args: []string{"--campaign", "--rehearsal", "--context", "ctx", "--image", "img"},
+			want: []string{
+				"kubectl --context ctx -n egress-tests get pod egress-campaign\n",
+				"kubectl --context ctx create -f -",
+			},
+		},
+		{
+			name: "delete the campaign",
+			args: []string{"--delete-campaign", "--context", "ctx"},
+			want: []string{
+				"kubectl --context ctx -n egress-tests delete pod egress-campaign egress-campaign-rehearsal --ignore-not-found",
+				"kubectl --context ctx delete -f tools/egress-tests/manifests/campaign.yaml.tmpl --ignore-not-found",
+			},
+			notWant: []string{"kubectl-ate", "ko delete", "campaign-pvc.yaml.tmpl"},
+		},
+		{
+			name: "purge the campaign",
+			args: []string{"--delete-campaign", "--purge", "--context", "ctx"},
+			want: []string{
+				"kubectl --context ctx delete -f tools/egress-tests/manifests/campaign.yaml.tmpl --ignore-not-found",
+				"kubectl --context ctx delete -f tools/egress-tests/manifests/campaign-pvc.yaml.tmpl --ignore-not-found",
+			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

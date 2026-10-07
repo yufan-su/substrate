@@ -1,0 +1,216 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# What the in-cluster campaign runs as: ServiceAccount egress-campaign, with
+# get and list on exactly what the driver and campaign.py read, plus the
+# pod and node proxies they read through. deploy.sh --campaign applies it
+# with campaign-pvc.yaml.tmpl; the Pod is in campaign-pod.yaml.tmpl. The
+# grants are checked against the driver's Kubernetes calls by
+# TestCampaignRBACCoversTheDriver.
+#
+# Not every grant is read-only in effect. nodes/proxy get reaches every
+# kubelet endpoint over GET, and the kubelet's exec and attach start as a
+# GET that upgrades, so whoever holds this token can run commands in any
+# pod on any node. Anyone who can exec into the campaign Pod holds it.
+# Reading cAdvisor from the kubelet's port directly would need only
+# nodes/metrics; until then, treat the Pod as privileged.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: egress-campaign
+  namespace: egress-tests
+  labels:
+    app.kubernetes.io/part-of: egress-tests
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: egress-campaign
+  labels:
+    app.kubernetes.io/part-of: egress-tests
+rules:
+# cAdvisor, read through the API server's node proxy. See the note above:
+# this is the one grant that is more than a read.
+- apiGroups: [""]
+  resources: ["nodes/proxy"]
+  verbs: ["get"]
+# The roots of ateapi's serving certificate, v1 or v1beta1.
+- apiGroups: ["certificates.k8s.io"]
+  resources: ["clustertrustbundles"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: egress-campaign
+  labels:
+    app.kubernetes.io/part-of: egress-tests
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: egress-campaign
+subjects:
+- kind: ServiceAccount
+  name: egress-campaign
+  namespace: egress-tests
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: egress-campaign
+  namespace: ate-system
+  labels:
+    app.kubernetes.io/part-of: egress-tests
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+# The live :9090 counters and the gateway Envoy's envoy_metrics listener
+# on :15090; its admin API is loopback-only.
+- apiGroups: [""]
+  resources: ["pods/proxy"]
+  verbs: ["get"]
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["pods"]
+  verbs: ["list"]
+# The HTTPS preflight.
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["egress-tests-target-ca"]
+  verbs: ["get"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  resourceNames: ["atenet-egress"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: egress-campaign
+  namespace: egress-tests
+  labels:
+    app.kubernetes.io/part-of: egress-tests
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+# The cgroup readers.
+- apiGroups: [""]
+  resources: ["pods/proxy"]
+  verbs: ["get"]
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["pods"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: egress-campaign
+  namespace: egress-tests-targets
+  labels:
+    app.kubernetes.io/part-of: egress-tests
+rules:
+- apiGroups: [""]
+  resources: ["services", "pods"]
+  verbs: ["list"]
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["pods"]
+  verbs: ["list"]
+# The HTTPS preflight.
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["egress-target-tls"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: egress-campaign
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/part-of: egress-tests
+rules:
+# The DNS pods, a cAdvisor target.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["pods"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: egress-campaign
+  namespace: ate-system
+  labels:
+    app.kubernetes.io/part-of: egress-tests
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: egress-campaign
+subjects:
+- kind: ServiceAccount
+  name: egress-campaign
+  namespace: egress-tests
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: egress-campaign
+  namespace: egress-tests
+  labels:
+    app.kubernetes.io/part-of: egress-tests
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: egress-campaign
+subjects:
+- kind: ServiceAccount
+  name: egress-campaign
+  namespace: egress-tests
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: egress-campaign
+  namespace: egress-tests-targets
+  labels:
+    app.kubernetes.io/part-of: egress-tests
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: egress-campaign
+subjects:
+- kind: ServiceAccount
+  name: egress-campaign
+  namespace: egress-tests
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: egress-campaign
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/part-of: egress-tests
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: egress-campaign
+subjects:
+- kind: ServiceAccount
+  name: egress-campaign
+  namespace: egress-tests
