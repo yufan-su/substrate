@@ -328,6 +328,30 @@ python3 -m venv /tmp/egress-plot && /tmp/egress-plot/bin/pip install -r tools/eg
 /tmp/egress-plot/bin/python tools/egress-tests/plot/verify.py b*.json
 ```
 
+### Predicting cost
+
+`plot/fit.py --json fit.json` writes the fit as JSON: each response's terms,
+coefficients, covariance and residual variance, the rows it came from, the
+holdout scores, and the per-actor request rate, Envoy's pre-idle heap and the
+gateway-to-target connections per Service measured across the runs.
+`plot/predictor.py` turns that into one offline HTML page: sliders for B and
+C, each component's predicted cores, cores per 1000 req/s, Envoy heap, the
+gateway's high-water working set, worker memory, p99 and first round, all with
+95% prediction intervals, and the measured runs on the B × C plane.
+
+The page enforces both gateway breakers, with a campaign preset (16384 and
+16384) and a stock-install preset (1024 and 1024). B × C stays within
+`mitm_internal`'s max_connections. The largest measured connections per
+Service × C stays within `egress_forward_proxy_cleartext`'s. Each slider stops
+at the first breaker to bind and names it. `?B=50&C=128&M=16384&P=16384`
+opens a point. The page checks its own predictions against the ones fit.py
+recorded, and shows nothing else if they differ.
+
+```bash
+/tmp/egress-plot/bin/python tools/egress-tests/plot/fit.py A-*.json C-*.json --json fit.json
+/tmp/egress-plot/bin/python tools/egress-tests/plot/predictor.py fit.json -o predictor.html
+```
+
 ## Reading the report
 
 This is a real run: `--actors 100 --parallel 1 --endpoints 10 --duration 2m

@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<!--
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+Rendered by tools/egress-tests/plot/predictor.py from fit.py --json.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Egress path cost predictor</title>
+<style>
+.viz-root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface-1: #fcfcfb;
+  --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+  --seq-lo: #9ec5f4; --seq-hi: #104281;
+  --infeasible: #e1e0d9; --hatch: #c3c2b7;
+  --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface-1: #1a1a19;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --seq-lo: #1c5cab; --seq-hi: #cde2fb;
+    --infeasible: #2c2c2a; --hatch: #52514e;
+  }
+}
+:root[data-theme="dark"] .viz-root {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface-1: #1a1a19;
+  --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+  --seq-lo: #1c5cab; --seq-hi: #cde2fb;
+  --infeasible: #2c2c2a; --hatch: #52514e;
+}
+body { margin: 0; }
+.viz-root {
+  background: var(--page); color: var(--text-primary); min-height: 100vh;
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 16px 24px;
+}
+h1 { font-size: 18px; margin: 0 0 4px; }
+.prov { color: var(--text-secondary); font-size: 12px; margin-bottom: 12px; }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
+.controls { display: grid; grid-template-columns: 110px minmax(200px, 1fr) 90px auto; gap: 8px 12px; align-items: center; }
+.controls label { color: var(--text-secondary); }
+.controls .derived { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 8px; border-radius: 4px; margin: 0; }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--series-1); border: 2px solid var(--surface-1); box-shadow: 0 0 0 1px var(--axis); cursor: pointer; }
+input[type=range]::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%;
+  background: var(--series-1); border: 2px solid var(--surface-1); box-shadow: 0 0 0 1px var(--axis); cursor: pointer; }
+input[type=range]:focus-visible { outline: 2px solid var(--series-1); outline-offset: 4px; }
+input[type=number] { width: 80px; font: inherit; color: var(--text-primary); background: var(--surface-1);
+  border: 1px solid var(--axis); border-radius: 4px; padding: 2px 4px; }
+.breakers { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-top: 10px; }
+.breakers button { font: inherit; color: var(--text-primary); background: var(--surface-1);
+  border: 1px solid var(--axis); border-radius: 4px; padding: 2px 10px; cursor: pointer; }
+.breakers button[aria-pressed=true] { border-color: var(--series-1); box-shadow: inset 0 0 0 1px var(--series-1); }
+.binding { margin-top: 8px; color: var(--text-secondary); }
+.binding strong { color: var(--text-primary); font-weight: 600; }
+.grid { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)) minmax(240px, 1.3fr); gap: 12px; margin-top: 12px; }
+.tile .name { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 12px; }
+.tile .swatch { width: 10px; height: 10px; border-radius: 2px; }
+.tile .value { font-size: 22px; font-weight: 600; margin-top: 2px; }
+.tile .pm { font-size: 13px; color: var(--text-secondary); font-weight: 400; }
+.tile .sub { color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.validity { grid-row: span 2; }
+.validity h2, .plane h2 { font-size: 13px; margin: 0 0 6px; color: var(--text-secondary); font-weight: 600; }
+.validity ul { list-style: none; margin: 0; padding: 0; }
+.validity li { display: grid; grid-template-columns: 18px 1fr; gap: 4px; margin: 4px 0; font-size: 12px; }
+.icon { font-weight: 700; }
+.icon.ok { color: var(--good); } .icon.warn { color: var(--warning); } .icon.stop { color: var(--critical); }
+.icon.info { color: var(--text-muted); }
+.mem { grid-column: span 2; } .lat { grid-column: span 2; }
+.plane { margin-top: 12px; }
+.plane svg { width: 100%; height: auto; display: block; }
+.plane text { fill: var(--text-muted); font-size: 12px; }
+.plane .label { fill: var(--text-secondary); }
+.legend { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; color: var(--text-secondary); font-size: 12px; margin-top: 6px; }
+.ramp { width: 120px; height: 10px; border-radius: 2px; background: linear-gradient(90deg, var(--seq-lo), var(--seq-hi)); }
+#tip { position: fixed; pointer-events: none; background: var(--surface-1); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15); display: none; max-width: 320px; }
+details { margin-top: 12px; }
+table { border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; margin: 8px 0; }
+th, td { border-bottom: 1px solid var(--grid); padding: 3px 8px; text-align: right; }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--text-secondary); font-weight: 600; }
+.banner { background: var(--surface-1); border: 2px solid var(--critical); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+@media (max-width: 900px) { .grid { grid-template-columns: repeat(2, 1fr); } .validity { grid-row: auto; grid-column: span 2; } }
+</style>
+</head>
+<body>
+<div class="viz-root">
+<script type="application/json" id="fit">__FIT_JSON__</script>
+<h1>Egress path cost predictor</h1>
+<div class="prov" id="prov"></div>
+<div id="banner"></div>
+<div id="app">
+<div class="card">
+  <div class="controls">
+    <label for="b-range">B active actors</label>
+    <input type="range" id="b-range" min="1" max="200" step="1">
+    <input type="number" id="b-num" min="1" max="200" step="1" aria-label="B active actors">
+    <span class="derived" id="b-derived"></span>
+    <label for="c-range">C Services</label>
+    <input type="range" id="c-range" min="1" max="512" step="1">
+    <input type="number" id="c-num" min="1" max="512" step="1" aria-label="C Services">
+    <span class="derived" id="c-derived"></span>
+  </div>
+  <div class="breakers">
+    <label for="m-num">mitm_internal max_connections M</label>
+    <input type="number" id="m-num" min="1" step="1">
+    <label for="p-num">cleartext max_connections P</label>
+    <input type="number" id="p-num" min="1" step="1">
+    <button type="button" data-preset="campaign" aria-pressed="false">campaign 16384 / 16384</button>
+    <button type="button" data-preset="stock" aria-pressed="false">stock install 1024 / 1024</button>
+  </div>
+  <div class="binding" id="binding"></div>
+  <div class="sr" id="live" aria-live="polite"></div>
+</div>
+<div class="grid">
+  <div class="card tile" id="t-gateway_cores"></div>
+  <div class="card tile" id="t-envoy_cores"></div>
+  <div class="card tile" id="t-extproc_cores"></div>
+  <div class="card tile" id="t-worker_cores"></div>
+  <div class="card validity"><h2>Validity</h2><ul id="validity"></ul></div>
+  <div class="card tile mem" id="t-mem"></div>
+  <div class="card tile lat" id="t-lat"></div>
+</div>
+<div class="card plane">
+  <h2>B × C plane: the shaded area is feasible under both breakers; click to move the point</h2>
+  <svg id="plane" viewBox="0 0 1200 460" role="img" aria-label="Feasible region and measured runs on the B by C plane"></svg>
+  <div class="legend">
+    <span>● measured run, fill = gateway cores</span>
+    <span class="ramp" aria-hidden="true"></span><span id="ramp-range"></span>
+    <span>□ provisional row</span><span>○ holdout</span><span>✚ selected point</span>
+    <span>hatched = beyond a breaker</span>
+  </div>
+</div>
+<details>
+  <summary>Table view</summary>
+  <div id="tables"></div>
+</details>
+</div>
+<div id="tip" role="tooltip"></div>
+</div>
+<script>
+"use strict";
+const FIT = JSON.parse(document.getElementById("fit").textContent);
+const PRESETS = { campaign: { M: 16384, P: 16384 }, stock: { M: 1024, P: 1024 } };
+// On build 47ed2247 the mitm_internal breaker counts overflow but does not
+// refuse (E0, 2026-10-07). The page clamps at M anyway: no run beyond it is measured.
+const MITM_LABEL = "configured limit: overflow counted, not refused on build 47ed2247 (E0, 2026-10-07)";
+const CLEARTEXT_LABEL = "configured limit";
+// Report section 4, used only when the fit carries no cleartext pool readings.
+const POOL_FALLBACK = { lo: 6, hi: 12 };
+const SLIDER = { B: [1, 200], C: [1, 512] };
+const NODE_ALLOC_MIB = 13 * 1024; // c3-standard-4 allocatable
+const COMPONENTS = [
+  ["gateway_cores", "gateway pod", "--series-1"],
+  ["envoy_cores", "envoy", "--series-2"],
+  ["extproc_cores", "ext-proc", "--series-3"],
+  ["worker_cores", "workers", "--series-4"],
+];
+
+const pool = FIT.poolPerService || POOL_FALLBACK;
+const poolFromFit = !!FIT.poolPerService;
+const rate = FIT.ratePerActor || 9.7;
+const state = { B: 50, C: 128, M: PRESETS.campaign.M, P: PRESETS.campaign.P };
+
+function predict(f, B, C) {
+  const row = { B: B, C: C, T: B * C };
+  const x = f.terms.map(t => t === "1" ? 1 : t === "BC" ? B * C : row[t]);
+  let mean = 0, quad = 0;
+  for (let i = 0; i < x.length; i++) {
+    mean += x[i] * f.coef[i];
+    for (let j = 0; j < x.length; j++) quad += x[i] * f.cov[i][j] * x[j];
+  }
+  return [mean, f.t975 * Math.sqrt(Math.max(f.sigma2 + quad, 0))];
+}
+
+function selfCheck() {
+  const bad = [];
+  for (const c of FIT.checks || []) {
+    const f = FIT.fits[c.response];
+    if (!f) { bad.push(c.response + ": no fit"); continue; }
+    const [m, h] = predict(f, c.B, c.C);
+    const close = (a, b) => Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(b));
+    if (!close(m, c.predicted) || !close(h, c.halfWidth)) bad.push(`${c.response} at B=${c.B} C=${c.C}`);
+  }
+  return bad;
+}
+
+const fmtInt = n => Math.round(n).toLocaleString("en-US");
+function fmt(n, d) { return n === null || n === undefined || !isFinite(n) ? "–" : n.toFixed(d); }
+function mib(n) { return n >= 1024 ? fmt(n / 1024, 2) + " GiB" : fmt(n, 0) + " MiB"; }
+
+function cMaxMitm(B) { return Math.floor(state.M / B); }
+function cMaxPool() { return Math.floor(state.P / pool.hi); }
+function cMax(B) { return Math.min(SLIDER.C[1], cMaxMitm(B), cMaxPool()); }
+function bMax(C) { return Math.min(SLIDER.B[1], Math.floor(state.M / C)); }
+function feasible(B, C) { return B >= 1 && C >= 1 && B * C <= state.M && pool.hi * C <= state.P; }
+
+const $ = id => document.getElementById(id);
+
+function announce(msg) { $("live").textContent = msg; }
+
+function setB(v) {
+  v = Math.max(SLIDER.B[0], Math.min(Math.round(v) || 1, bMax(state.C)));
+  state.B = Math.max(1, v);
+}
+function setC(v) {
+  v = Math.max(SLIDER.C[0], Math.min(Math.round(v) || 1, cMax(state.B)));
+  state.C = Math.max(1, v);
+}
+
+// After a breaker change, lower C to the new stop, then B if C cannot reach 1.
+function reproject() {
+  const before = [state.B, state.C];
+  if (cMaxPool() < 1) { render(); return; }
+  if (state.C > cMax(state.B)) state.C = Math.max(1, cMax(state.B));
+  if (state.B * state.C > state.M) state.B = Math.max(1, bMax(state.C));
+  if (before[0] !== state.B || before[1] !== state.C) {
+    announce(`Moved to B ${state.B}, C ${state.C}: the old point was beyond a breaker.`);
+  }
+  render();
+}
+
+function track(el, max, stop) {
+  const pct = 100 * (Math.max(stop, 0) - (+el.min)) / (max - (+el.min));
+  el.style.background = `linear-gradient(90deg, var(--axis) 0 ${pct}%, transparent ${pct}% 100%), ` +
+    `repeating-linear-gradient(45deg, var(--hatch) 0 2px, var(--infeasible) 2px 6px)`;
+}
+
+function bindingText() {
+  const cm = cMaxMitm(state.B), cp = cMaxPool();
+  const parts = [];
+  if (cp < 1) {
+    return `<strong>No feasible C:</strong> the cleartext pool needs ≈${fmt(pool.hi, 1)} connections per Service, above P = ${fmtInt(state.P)}.`;
+  }
+  if (Math.min(cm, cp) > SLIDER.C[1]) {
+    parts.push(`C runs to the slider's ${SLIDER.C[1]} before either breaker binds (mitm_internal at C=${fmtInt(cm)}, cleartext at C=${fmtInt(cp)})`);
+  } else if (cm <= cp) {
+    parts.push(`<strong>C stops at ${fmtInt(cm)}:</strong> mitm_internal ${fmtInt(state.M)} at B=${state.B} · cleartext would bind at C=${fmtInt(cp)}`);
+  } else {
+    parts.push(`<strong>C stops at ${fmtInt(cp)}:</strong> cleartext pool ${fmt(pool.hi, 1)}×C vs ${fmtInt(state.P)} · mitm_internal would bind at C=${fmtInt(cm)} for B=${state.B}`);
+  }
+  const bm = Math.floor(state.M / state.C);
+  parts.push(bm >= SLIDER.B[1] ? `B runs to the slider's ${SLIDER.B[1]} (mitm_internal at B=${fmtInt(bm)})`
+    : `<strong>B stops at ${fmtInt(bm)}:</strong> mitm_internal ${fmtInt(state.M)} at C=${state.C}`);
+  return parts.join("<br>");
+}
+
+function componentTile(key, name, color) {
+  const f = FIT.fits[key];
+  const head = `<div class="name"><span class="swatch" style="background:var(${color})"></span>${name} CPU</div>`;
+  if (!f) return head + `<div class="value">not fitted</div>`;
+  const [m, h] = predict(f, state.B, state.C);
+  const krps = rate * state.B / 1000;
+  let sub = `${fmt(m / krps, 2)} cores per 1000 req/s`;
+  const i1 = f.terms.indexOf("1");
+  if (i1 >= 0) {
+    sub += `<br>fixed ${fmt(f.coef[i1], 3)} cores + marginal ${fmt((m - f.coef[i1]) / krps, 2)} cores per 1000 req/s`;
+  }
+  return head + `<div class="value">${fmt(m, 2)} cores <span class="pm">± ${fmt(h, 2)}</span></div><div class="sub">${sub}</div>`;
+}
+
+function memTile() {
+  const hf = FIT.fits.envoy_heap_mib, wf = FIT.fits.worker_ws_mib, floor = FIT.floors.envoy_heap_mib;
+  let heap = "not fitted", rss = "–", ws = "not fitted";
+  if (hf && floor !== null) {
+    const [m, h] = predict(hf, state.B, state.C);
+    const total = floor + m;
+    heap = `${mib(total)} <span class="pm">± ${mib(h)}</span>`;
+    const r = total * FIT.rssOverHeap;
+    rss = `${mib(r)}, ${fmt(100 * r / NODE_ALLOC_MIB, 0)}% of a c3-standard-4's 13 GiB allocatable`;
+  }
+  if (wf) {
+    const [m, h] = predict(wf, state.B, state.C);
+    ws = `+${mib(m)} <span class="pm">± ${mib(h)}</span>`;
+  }
+  return `<div class="name">Memory</div>
+    <div class="value">Envoy heap ${heap}</div>
+    <div class="sub">gateway pod working set, high-water estimate (heap × ${FIT.rssOverHeap}, not fitted): ${rss}</div>
+    <div class="sub">worker working set added by the workload, 8 pods: ${ws}</div>`;
+}
+
+function latTile() {
+  const pf = FIT.fits.p99_settled_ms, ff = FIT.fits.first_round_s;
+  const p = pf ? predict(pf, state.B, state.C) : null, f = ff ? predict(ff, state.B, state.C) : null;
+  return `<div class="name">Latency and startup</div>
+    <div class="value">p99 ${p ? fmt(p[0], 1) + " ms" : "not fitted"} ${p ? `<span class="pm">± ${fmt(p[1], 1)} ms</span>` : ""}</div>
+    <div class="sub">settled window · first round ${f ? fmt(f[0], 0) + " s ± " + fmt(f[1], 0) + " s" : "not fitted"}</div>`;
+}
+
+function validity() {
+  const ms = FIT.measured, T = state.B * state.C, items = [];
+  const range = (v, r) => r && v >= r[0] && v <= r[1];
+  const li = (cls, icon, text) => items.push(`<li><span class="icon ${cls}" aria-hidden="true">${icon}</span><span><span class="sr">${cls}: </span>${text}</span></li>`);
+  range(state.B, ms.B) ? li("ok", "✓", `B ${state.B} inside measured ${ms.B[0]}–${ms.B[1]}`)
+    : li("warn", "⚠", `B ${state.B} outside measured ${ms.B ? ms.B.join("–") : "?"}: extrapolated`);
+  range(state.C, ms.C) ? li("ok", "✓", `C ${state.C} inside measured ${ms.C[0]}–${ms.C[1]}`)
+    : li("warn", "⚠", `C ${state.C} outside measured ${ms.C ? ms.C.join("–") : "?"}: extrapolated`);
+  ms.T && T <= ms.T[1] ? li("ok", "✓", `T ${fmtInt(T)} tunnels ≤ ${fmtInt(ms.T[1])}, the largest measured`)
+    : li("warn", "⚠", `T ${fmtInt(T)} tunnels beyond the largest measured ${ms.T ? fmtInt(ms.T[1]) : "?"}: within M, beyond data`);
+  li(T <= state.M ? "ok" : "stop", T <= state.M ? "✓" : "✕",
+    `T ${fmtInt(T)} ≤ mitm_internal M ${fmtInt(state.M)} (${MITM_LABEL})`);
+  const lo = pool.lo * state.C, hi = pool.hi * state.C;
+  li(hi <= state.P ? "ok" : "stop", hi <= state.P ? "✓" : "✕",
+    `cleartext pool ≈${fmtInt(lo)}–${fmtInt(hi)} connections (${fmt(pool.lo, 1)}–${fmt(pool.hi, 1)} per Service${poolFromFit ? "" : ", report §4: no pool readings in this fit"}) vs P ${fmtInt(state.P)} (${CLEARTEXT_LABEL})`);
+  li("info", "ⓘ", "T and C are confounded at fixed B on this grid; a per-Service form fits equally well (report §8)");
+  li("info", "ⓘ", `request rate ${fmt(rate, 2)} req/s per actor, measured at ${FIT.provenance.intervalMs.join(", ") || "?"} ms pacing`);
+  return items.join("");
+}
+
+// ---- B x C plane ----------------------------------------------------------
+const PL = { w: 1200, h: 460, l: 56, r: 16, t: 14, b: 40 };
+const px = c => PL.l + (c / SLIDER.C[1]) * (PL.w - PL.l - PL.r);
+const py = b => PL.h - PL.b - (b / SLIDER.B[1]) * (PL.h - PL.t - PL.b);
+const NS = "http://www.w3.org/2000/svg";
+function el(tag, attrs, text) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+function mix(a, b, t) {
+  const p = s => [1, 3, 5].map(i => parseInt(s.slice(i, i + 2), 16));
+  const [x, y] = [p(a), p(b)];
+  return "#" + x.map((v, i) => Math.round(v + (y[i] - v) * t).toString(16).padStart(2, "0")).join("");
+}
+
+function drawPlane() {
+  const svg = $("plane");
+  svg.replaceChildren();
+  const css = getComputedStyle(document.querySelector(".viz-root"));
+  const v = n => css.getPropertyValue(n).trim();
+  const defs = el("defs", {});
+  const pat = el("pattern", { id: "hatch", width: 6, height: 6, patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)" });
+  pat.append(el("rect", { width: 6, height: 6, fill: v("--infeasible") }), el("line", { x1: 0, y1: 0, x2: 0, y2: 6, stroke: v("--hatch"), "stroke-width": 2 }));
+  defs.append(pat);
+  svg.append(defs);
+  const x0 = px(0), x1 = px(SLIDER.C[1]), y0 = py(0), y1 = py(SLIDER.B[1]);
+  svg.append(el("rect", { x: x0, y: y1, width: x1 - x0, height: y0 - y1, fill: "url(#hatch)" }));
+  // Feasible: B <= M/C and C <= P/k_hi.
+  const cEdge = Math.min(SLIDER.C[1], state.P / pool.hi);
+  if (cEdge >= 1) {
+    const pts = [[0, 0], [0, Math.min(SLIDER.B[1], state.M)]];
+    for (let i = 0; i <= 240; i++) {
+      const c = Math.max(0.5, cEdge * i / 240);
+      pts.push([c, Math.min(SLIDER.B[1], state.M / c)]);
+    }
+    pts.push([cEdge, 0]);
+    svg.append(el("polygon", { points: pts.map(([c, b]) => `${px(c)},${py(b)}`).join(" "), fill: v("--surface-1") }));
+  }
+  for (const c of [0, 128, 256, 384, 512]) {
+    svg.append(el("line", { x1: px(c), x2: px(c), y1: y0, y2: y1, stroke: v("--grid"), "stroke-width": 1, "stroke-opacity": 0.6 }));
+    svg.append(el("text", { x: px(c), y: y0 + 16, "text-anchor": "middle" }, String(c)));
+  }
+  for (const b of [0, 50, 100, 150, 200]) {
+    svg.append(el("line", { x1: x0, x2: x1, y1: py(b), y2: py(b), stroke: v("--grid"), "stroke-width": 1, "stroke-opacity": 0.6 }));
+    svg.append(el("text", { x: x0 - 6, y: py(b) + 4, "text-anchor": "end" }, String(b)));
+  }
+  svg.append(el("line", { x1: x0, x2: x1, y1: y0, y2: y0, stroke: v("--axis") }));
+  svg.append(el("text", { x: (x0 + x1) / 2, y: PL.h - 6, "text-anchor": "middle", class: "label" }, "C Services"));
+  svg.append(el("text", { x: 14, y: (y0 + y1) / 2, "text-anchor": "middle", class: "label", transform: `rotate(-90 14 ${(y0 + y1) / 2})` }, "B active actors"));
+  // mitm_internal boundary B = M / C.
+  const hyp = [];
+  for (let i = 0; i <= 240; i++) {
+    const c = SLIDER.C[1] * i / 240;
+    if (c > 0 && state.M / c <= SLIDER.B[1]) hyp.push(`${px(c)},${py(state.M / c)}`);
+  }
+  if (hyp.length > 1) {
+    svg.append(el("polyline", { points: hyp.join(" "), fill: "none", stroke: v("--text-secondary"), "stroke-width": 2 }));
+    const cl = SLIDER.C[1] * 0.72;
+    if (state.M / cl <= SLIDER.B[1]) {
+      svg.append(el("text", { x: px(cl), y: py(state.M / cl) - 10, class: "label" }, `mitm_internal B×C = ${fmtInt(state.M)}`));
+    }
+  }
+  const cHi = state.P / pool.hi, cLo = state.P / pool.lo;
+  if (cHi <= SLIDER.C[1]) {
+    svg.append(el("line", { x1: px(cHi), x2: px(cHi), y1: y0, y2: y1, stroke: v("--text-secondary"), "stroke-width": 2 }));
+    svg.append(el("text", { x: px(cHi) + 4, y: y1 + 12, class: "label" }, `cleartext ${fmt(pool.hi, 1)}×C = ${fmtInt(state.P)}`));
+  }
+  if (cLo <= SLIDER.C[1]) {
+    svg.append(el("line", { x1: px(cLo), x2: px(cLo), y1: y0, y2: y1, stroke: v("--text-secondary"), "stroke-width": 1, "stroke-dasharray": "4 4" }));
+    svg.append(el("text", { x: px(cLo) + 4, y: y1 + 26, class: "label" }, `${fmt(pool.lo, 1)}×C: overflow certain`));
+  }
+  // Measured runs.
+  const cores = FIT.rows.map(r => r.gateway_cores).filter(x => x !== null && x !== undefined);
+  const [lo, hi] = cores.length ? [Math.min(...cores), Math.max(...cores)] : [0, 1];
+  $("ramp-range").textContent = cores.length ? `${fmt(lo, 2)}–${fmt(hi, 2)} cores` : "";
+  const surface = v("--surface-1");
+  const add = (shape, row, extra) => {
+    shape.addEventListener("mousemove", e => showTip(e, row, extra));
+    shape.addEventListener("mouseleave", hideTip);
+    svg.append(shape);
+  };
+  for (const r of FIT.rows) {
+    const t = hi > lo && r.gateway_cores !== null ? (r.gateway_cores - lo) / (hi - lo) : 0.5;
+    const fill = mix(v("--seq-lo"), v("--seq-hi"), t);
+    if (r.provisional) {
+      add(el("rect", { x: px(r.C) - 5, y: py(r.B) - 5, width: 10, height: 10, fill: "none", stroke: v("--text-secondary"), "stroke-width": 2 }), r, "provisional row (CPU fits only)");
+    } else {
+      add(el("circle", { cx: px(r.C), cy: py(r.B), r: 6, fill: fill, stroke: surface, "stroke-width": 2 }), r, "fitting run");
+    }
+  }
+  for (const h of FIT.holdouts || []) {
+    const miss = Object.values(h.responses).some(x => !x.ok);
+    add(el("circle", { cx: px(h.C), cy: py(h.B), r: 7, fill: "none", stroke: v("--text-primary"), "stroke-width": 2 }), h, miss ? "holdout: MISS" : "holdout: pass");
+  }
+  const cx = px(state.C), cy = py(state.B);
+  svg.append(el("line", { x1: cx - 9, x2: cx + 9, y1: cy, y2: cy, stroke: v("--text-primary"), "stroke-width": 2 }));
+  svg.append(el("line", { x1: cx, x2: cx, y1: cy - 9, y2: cy + 9, stroke: v("--text-primary"), "stroke-width": 2 }));
+}
+
+function showTip(e, row, kind) {
+  const lines = [`<strong>${row.run}</strong> · ${kind}`, `B ${row.B}, C ${row.C}, T ${fmtInt(row.B * row.C)}`];
+  const pairs = row.responses
+    ? Object.entries(row.responses).map(([k, x]) => [k, x.measured])
+    : ["gateway_cores", "envoy_heap_mib", "worker_cores", "p99_settled_ms"].map(k => [k, row[k]]);
+  for (const [k, meas] of pairs) {
+    const f = FIT.fits[k];
+    if (!f || meas === null || meas === undefined) continue;
+    const [m, h] = predict(f, row.B, row.C);
+    lines.push(`${k}: measured ${fmt(meas, 3)}, model ${fmt(m, 3)} ± ${fmt(h, 3)}, residual ${fmt(meas - m, 3)}`);
+  }
+  const tip = $("tip");
+  tip.innerHTML = lines.join("<br>");
+  tip.style.display = "block";
+  tip.style.left = Math.min(e.clientX + 12, window.innerWidth - 330) + "px";
+  tip.style.top = (e.clientY + 12) + "px";
+}
+function hideTip() { $("tip").style.display = "none"; }
+
+function tables() {
+  const outs = Object.entries(FIT.fits).map(([k, f]) => {
+    const [m, h] = predict(f, state.B, state.C);
+    return `<tr><td>${k}</td><td>${fmt(m, 4)}</td><td>${fmt(h, 4)}</td><td>${f.terms.map((t, i) => `${t}: ${f.coef[i].toPrecision(4)}`).join(", ")}</td><td>${f.n}</td></tr>`;
+  }).join("");
+  const keys = ["gateway_cores", "envoy_cores", "extproc_cores", "worker_cores", "envoy_heap_mib", "worker_ws_mib", "p99_settled_ms", "cleartext_active_max"];
+  const rows = FIT.rows.map(r => `<tr><td>${r.run}${r.provisional ? " (provisional)" : ""}</td><td>${r.B}</td><td>${r.C}</td><td>${fmtInt(r.T)}</td>` +
+    keys.map(k => `<td>${r[k] === null || r[k] === undefined ? "–" : fmt(r[k], 3)}</td>`).join("") + "</tr>").join("");
+  return `<table><caption>Predictions at B ${state.B}, C ${state.C}</caption><tr><th>response</th><th>predicted</th><th>± 95%</th><th>coefficients</th><th>n</th></tr>${outs}</table>` +
+    `<table><caption>Measured rows</caption><tr><th>run</th><th>B</th><th>C</th><th>T</th>${keys.map(k => `<th>${k}</th>`).join("")}</tr>${rows}</table>`;
+}
+
+function render() {
+  for (const [key, name, color] of COMPONENTS) $("t-" + key).innerHTML = componentTile(key, name, color);
+  $("t-mem").innerHTML = memTile();
+  $("t-lat").innerHTML = latTile();
+  $("validity").innerHTML = validity();
+  $("binding").innerHTML = bindingText();
+  const T = state.B * state.C;
+  $("b-range").value = $("b-num").value = state.B;
+  $("c-range").value = $("c-num").value = state.C;
+  $("m-num").value = state.M;
+  $("p-num").value = state.P;
+  $("b-derived").textContent = `${fmtInt(rate * state.B)} req/s at ${fmt(rate, 1)} per actor`;
+  $("c-derived").textContent = `T = ${fmtInt(T)} tunnels`;
+  $("b-range").setAttribute("aria-valuetext", `B ${state.B} actors, ${fmtInt(rate * state.B)} requests per second`);
+  $("c-range").setAttribute("aria-valuetext", `C ${state.C} Services, ${fmtInt(T)} tunnels`);
+  track($("b-range"), SLIDER.B[1], bMax(state.C));
+  track($("c-range"), SLIDER.C[1], cMax(state.B));
+  for (const btn of document.querySelectorAll("[data-preset]")) {
+    const p = PRESETS[btn.dataset.preset];
+    btn.setAttribute("aria-pressed", String(p.M === state.M && p.P === state.P));
+  }
+  drawPlane();
+  $("tables").innerHTML = tables();
+}
+
+function init() {
+  const p = FIT.provenance;
+  $("prov").textContent = `fit ${p.fitAt} · base ${p.base.join(", ") || "?"} · ${p.scheme.toUpperCase()} · ` +
+    `${p.runs} runs${p.provisional ? ` + ${p.provisional} provisional (CPU only)` : ""} · ` +
+    `${(FIT.holdouts || []).length} holdouts · one gateway replica`;
+  const bad = selfCheck();
+  if (bad.length) {
+    $("banner").innerHTML = `<div class="banner" role="alert"><strong>✕ Prediction self-check failed</strong>: this page disagrees with fit.py at ${bad.join("; ")}. Do not use its numbers.</div>`;
+    $("app").hidden = true;
+    return;
+  }
+  $("b-range").addEventListener("input", e => { setB(+e.target.value); render(); });
+  $("b-num").addEventListener("change", e => { setB(+e.target.value); render(); });
+  $("c-range").addEventListener("input", e => { setC(+e.target.value); render(); });
+  $("c-num").addEventListener("change", e => { setC(+e.target.value); render(); });
+  $("m-num").addEventListener("change", e => { state.M = Math.max(1, Math.round(+e.target.value) || 1); reproject(); });
+  $("p-num").addEventListener("change", e => { state.P = Math.max(1, Math.round(+e.target.value) || 1); reproject(); });
+  for (const btn of document.querySelectorAll("[data-preset]")) {
+    btn.addEventListener("click", () => { Object.assign(state, PRESETS[btn.dataset.preset]); reproject(); });
+  }
+  $("plane").addEventListener("click", e => {
+    const svg = $("plane"), pt = svg.createSVGPoint();
+    pt.x = e.clientX; pt.y = e.clientY;
+    const q = pt.matrixTransform(svg.getScreenCTM().inverse());
+    const c = (q.x - PL.l) / (PL.w - PL.l - PL.r) * SLIDER.C[1];
+    const b = (PL.h - PL.b - q.y) / (PL.h - PL.t - PL.b) * SLIDER.B[1];
+    if (c < 1 || b < 1) return;
+    state.B = Math.max(1, Math.min(Math.round(b), SLIDER.B[1]));
+    setC(c);
+    if (state.B * state.C > state.M) state.B = Math.max(1, bMax(state.C));
+    render();
+  });
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawPlane);
+  // ?B=..&C=..&M=..&P=.. opens a shared point; it is clamped like any other.
+  const q = new URLSearchParams(location.search);
+  for (const k of ["M", "P"]) if (+q.get(k) >= 1) state[k] = Math.round(+q.get(k));
+  if (+q.get("B") >= 1) state.B = Math.min(Math.round(+q.get("B")), SLIDER.B[1]);
+  if (+q.get("C") >= 1) state.C = Math.min(Math.round(+q.get("C")), SLIDER.C[1]);
+  reproject();
+}
+init();
+</script>
+</body>
+</html>
