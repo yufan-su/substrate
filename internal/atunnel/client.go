@@ -172,7 +172,7 @@ func (c *Client) DialContext(ctx context.Context, destination string) (net.Conn,
 			return nil, err
 		}
 		if h1Conn != nil {
-			return c.connectH1(h1Conn, destination)
+			return c.connectH1(ctx, h1Conn, destination)
 		}
 		conn, retry, err := c.connectH2(ctx, h2Conn, wasVerified, destination)
 		if retry {
@@ -410,28 +410,47 @@ func (c *Client) removeH2Conn(target *h2ClientConn) {
 	}
 }
 
-func (c *Client) connectH1(tlsConn *tls.Conn, destination string) (net.Conn, error) {
+// aLongTimeAgo is a deadline already in the past: setting it fails any read or
+// write on the connection at once, including one already blocked.
+var aLongTimeAgo = time.Unix(1, 0)
+
+// connectH1 sends CONNECT over an HTTP/1.1 connection to the gateway. ctx
+// bounds the exchange, up to the gateway's answer: if it ends first, the
+// connection is closed, which also withdraws the CONNECT from the gateway. It
+// has no hold on the tunnel connectH1 returns.
+func (c *Client) connectH1(ctx context.Context, tlsConn *tls.Conn, destination string) (net.Conn, error) {
+	// Writing the CONNECT and waiting for its answer don't watch ctx, so ctx
+	// ending expires the deadline under them.
+	stop := context.AfterFunc(ctx, func() { _ = tlsConn.SetDeadline(aLongTimeAgo) })
+	fail := func(err error) (net.Conn, error) {
+		stop()
+		_ = tlsConn.Close()
+		return nil, err
+	}
+
 	req := &http.Request{
 		Method: http.MethodConnect,
 		URL:    &url.URL{Host: destination},
 		Host:   destination,
 	}
 	if err := req.Write(tlsConn); err != nil {
-		_ = tlsConn.Close()
-		return nil, connectExchangeError("writing CONNECT request", err)
+		return fail(exchangeError(ctx, "writing CONNECT request", err))
 	}
 
 	reader := bufio.NewReader(tlsConn)
 	resp, err := http.ReadResponse(reader, req)
 	if err != nil {
-		_ = tlsConn.Close()
-		return nil, connectExchangeError("reading CONNECT response", err)
+		return fail(exchangeError(ctx, "reading CONNECT response", err))
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		_ = resp.Body.Close()
-		_ = tlsConn.Close()
-		return nil, newConnectRejectedError(resp, body)
+		return fail(newConnectRejectedError(resp, body))
+	}
+	if !stop() {
+		// ctx ended as the answer arrived, so the deadline under the tunnel may
+		// already be expired.
+		return fail(fmt.Errorf("atunnel: reading CONNECT response: %w", ctx.Err()))
 	}
 
 	// Return wrapped net.Conn including the reader that was used for CONNECT handshake.
@@ -988,6 +1007,16 @@ func isClosedChan(c <-chan struct{}) bool {
 	default:
 		return false
 	}
+}
+
+// exchangeError is connectExchangeError, except that ctx ending is reported as
+// itself rather than as whatever the expired deadline made the read or write
+// return.
+func exchangeError(ctx context.Context, op string, err error) error {
+	if ctx.Err() != nil {
+		return fmt.Errorf("atunnel: %s: %w", op, ctx.Err())
+	}
+	return connectExchangeError(op, err)
 }
 
 // connectExchangeError wraps a failure that happened after the TLS handshake
