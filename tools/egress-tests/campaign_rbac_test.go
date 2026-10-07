@@ -327,6 +327,11 @@ func TestCampaignPods(t *testing.T) {
 		wantPool   string
 		wantPolls  string
 		wantScript []string
+		// wantMemory, wantRequest and wantGoMemLimit default to the
+		// tunnel-cap campaign's.
+		wantMemory     string
+		wantRequest    string
+		wantGoMemLimit string
 	}{
 		{
 			name:      "campaign",
@@ -365,6 +370,31 @@ func TestCampaignPods(t *testing.T) {
 				"--out /out/20261008-et1 --ref-dir /work/ref",
 				"} 2>&1 | tee -a /out/20261008-et1/campaign.log\n",
 			},
+		},
+		{
+			name: "ladder campaign",
+			args: []string{"--context", "gke_p_z_c", "--image", "gcr.io/p/egress-campaign:abc",
+				"--campaign-plan", "ladder"},
+			wantPod:   "egress-campaign",
+			wantPool:  "campaign",
+			wantPolls: "5s",
+			wantScript: []string{
+				"python3 /work/campaign/campaign.py --in-cluster --context gke_p_z_c --plan ladder \\\n",
+			},
+			wantMemory:     "48Gi",
+			wantRequest:    "8Gi",
+			wantGoMemLimit: "43200MiB",
+		},
+		{
+			name: "ladder campaign with its own memory",
+			args: []string{"--context", "gke_p_z_c", "--image", "gcr.io/p/egress-campaign:abc",
+				"--campaign-plan", "ladder", "--campaign-memory", "24Gi", "--campaign-memory-request", "12Gi"},
+			wantPod:        "egress-campaign",
+			wantPool:       "campaign",
+			wantPolls:      "5s",
+			wantMemory:     "24Gi",
+			wantRequest:    "12Gi",
+			wantGoMemLimit: "21600MiB",
 		},
 		{
 			name: "rehearsal on another pool",
@@ -433,6 +463,16 @@ func TestCampaignPods(t *testing.T) {
 			if i := slices.IndexFunc(c.Env, func(e corev1.EnvVar) bool { return e.Name == "PROGRESS_INTERVAL" }); i < 0 || c.Env[i].Value != tc.wantPolls {
 				t.Errorf("got env %+v, want PROGRESS_INTERVAL=%s", c.Env, tc.wantPolls)
 			}
+			wantMemory, wantRequest, wantGoMemLimit := tc.wantMemory, tc.wantRequest, tc.wantGoMemLimit
+			if wantMemory == "" {
+				wantMemory, wantRequest, wantGoMemLimit = "2Gi", "2Gi", "1800MiB"
+			}
+			if got := c.Resources.Limits.Memory().String(); got != wantMemory || c.Resources.Requests.Memory().String() != wantRequest {
+				t.Errorf("got memory request %s limit %s, want %s and %s", c.Resources.Requests.Memory(), got, wantRequest, wantMemory)
+			}
+			if i := slices.IndexFunc(c.Env, func(e corev1.EnvVar) bool { return e.Name == "GOMEMLIMIT" }); i < 0 || c.Env[i].Value != wantGoMemLimit {
+				t.Errorf("got env %+v, want GOMEMLIMIT=%s", c.Env, wantGoMemLimit)
+			}
 			wantToleration := corev1.Toleration{Key: "ate.dev/campaign", Operator: corev1.TolerationOpEqual, Value: "true", Effect: corev1.TaintEffectNoSchedule}
 			if !slices.Equal(p.Spec.Tolerations, []corev1.Toleration{wantToleration}) {
 				t.Errorf("got tolerations %+v, want only %+v", p.Spec.Tolerations, wantToleration)
@@ -441,19 +481,33 @@ func TestCampaignPods(t *testing.T) {
 	}
 }
 
-func TestCampaignNeedsAContext(t *testing.T) {
+func TestCampaignRefusals(t *testing.T) {
 	t.Parallel()
 	repo := filepath.Join(t.TempDir(), "repo")
 	writeFile(t, filepath.Join(repo, "tools/egress-tests/deploy.sh"), readFile(t, "deploy.sh"), 0o755)
 	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	cmd := exec.Command("bash", "tools/egress-tests/deploy.sh", "--campaign", "--dry-run", "--image", "img")
-	cmd.Dir = repo
-	cmd.Env = append(os.Environ(), "PATH=/usr/bin:/bin:"+filepath.Dir(mustLookPath(t, "git")))
-	out, err := cmd.CombinedOutput()
-	if err == nil || !strings.Contains(string(out), "need --context") {
-		t.Errorf("deploy.sh --campaign without --context: got %v\n%s, want a refusal", err, out)
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no context", nil, "need --context"},
+		{"unknown plan", []string{"--context", "c", "--campaign-plan", "grid"}, "is not tunnel-cap or ladder"},
+		{"memory not in Gi", []string{"--context", "c", "--campaign-memory", "512Mi"}, "must be whole Gi"},
+		{"request above the limit", []string{"--context", "c", "--campaign-memory", "4Gi", "--campaign-memory-request", "8Gi"}, "is above --campaign-memory"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := exec.Command("bash", append([]string{"tools/egress-tests/deploy.sh", "--campaign", "--dry-run", "--image", "img"}, tc.args...)...)
+			cmd.Dir = repo
+			cmd.Env = append(os.Environ(), "PATH=/usr/bin:/bin:"+filepath.Dir(mustLookPath(t, "git")))
+			out, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(out), tc.want) {
+				t.Errorf("deploy.sh --campaign %v: got %v\n%s, want a refusal containing %q", tc.args, err, out, tc.want)
+			}
+		})
 	}
 }
 

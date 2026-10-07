@@ -80,12 +80,19 @@ ${SCRIPT}
     # --progress-interval).
     - name: PROGRESS_INTERVAL
       value: "${PROGRESS_INTERVAL}"
+    # A tenth below the memory limit, so the Go runtime collects before the
+    # kernel kills the driver at the end of a long rung.
+    - name: GOMEMLIMIT
+      value: "${GOMEMLIMIT}"
+    # deploy.sh --campaign-memory-request and --campaign-memory. The limit
+    # may exceed the request: the driver's memory peaks once, at the end of
+    # a long rung, when it summarizes every row it kept.
     resources:
       requests:
         cpu: "2"
-        memory: 512Mi
+        memory: ${MEMORY_REQUEST}
       limits:
-        memory: 2Gi
+        memory: ${MEMORY}
     securityContext:
       allowPrivilegeEscalation: false
       readOnlyRootFilesystem: true

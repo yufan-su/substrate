@@ -68,6 +68,19 @@ PURGE=false
 REHEARSAL=false
 # --campaign-id: the runner writes to /out/<id>, so one PVC holds several campaigns.
 CAMPAIGN_ID=""
+CAMPAIGN_PLAN=""
+# --campaign-memory and --campaign-memory-request: the Pod's memory limit
+# and request. The driver holds every cgroup reader row until the end of a
+# run, about 180 bytes per actor per second, so the ladder's 1000 actors
+# over 40 minutes need far more than the tunnel-cap campaign's 100: at 2Gi
+# the driver was killed while writing rung 2's report. The ladder's defaults
+# are what that run then used.
+CAMPAIGN_MEMORY=""
+CAMPAIGN_MEMORY_REQUEST=""
+CAMPAIGN_MEMORY_DEFAULT="2Gi"
+CAMPAIGN_MEMORY_REQUEST_DEFAULT="2Gi"
+LADDER_MEMORY_DEFAULT="48Gi"
+LADDER_MEMORY_REQUEST_DEFAULT="8Gi"
 SCRIPTS_DIR=""
 
 usage() {
@@ -113,6 +126,14 @@ usage() {
   echo "  --rehearsal             With --campaign, create the rehearsal Pod ${REHEARSAL_POD} instead"
   echo "  --dry-run               With --campaign, print what it would apply; change nothing"
   echo "  --campaign-id ID        With --campaign, write to /out/ID instead of /out"
+  echo "  --campaign-plan PLAN    With --campaign, the runner's --plan: tunnel-cap or ladder"
+  echo "                          (default: the runner's, tunnel-cap)"
+  echo "  --campaign-memory MEM   With --campaign, the Pod's memory limit, in whole Gi; the driver's"
+  echo "                          GOMEMLIMIT is set a tenth below (default: ${CAMPAIGN_MEMORY_DEFAULT},"
+  echo "                          ${LADDER_MEMORY_DEFAULT} for the ladder)"
+  echo "  --campaign-memory-request MEM"
+  echo "                          With --campaign, the Pod's memory request, in whole Gi (default:"
+  echo "                          ${CAMPAIGN_MEMORY_REQUEST_DEFAULT}, ${LADDER_MEMORY_REQUEST_DEFAULT} for the ladder)"
   echo "  --scripts-dir DIR       The owner's directory of E0 scripts, for the runner's printed commands"
   echo "  --purge                 With --delete-campaign, also delete the output PVC and its disk"
   echo "                          (kubectl cp /out first)"
@@ -309,6 +330,9 @@ campaign_script() {
   if [[ -n "${KUBECONFIG_FILE}" ]]; then
     owner="--kubeconfig ${KUBECONFIG_FILE} ${owner}"
   fi
+  if [[ -n "${CAMPAIGN_PLAN}" ]]; then
+    owner="${owner} --plan ${CAMPAIGN_PLAN}"
+  fi
   if [[ -n "${SCRIPTS_DIR}" ]]; then
     # Quoted, so the Pod's shell leaves a laptop ~ alone.
     owner="${owner} --scripts-dir '${SCRIPTS_DIR}'"
@@ -359,7 +383,9 @@ render_campaign_pod() {
   # shellcheck disable=SC2016 # the placeholder is literal
   replace_line "${MANIFEST_DIR}/campaign-pod.yaml.tmpl" '${SCRIPT}' "      ${script//$'\n'/$'\n'      }" \
     | sed -e "s|\${POD_NAME}|${name}|g" -e "s|\${IMAGE}|${CAMPAIGN_IMAGE}|g" \
-      -e "s|\${CAMPAIGN_POOL}|${CAMPAIGN_POOL}|g" -e "s|\${PROGRESS_INTERVAL}|${PROGRESS_INTERVAL}|g"
+      -e "s|\${CAMPAIGN_POOL}|${CAMPAIGN_POOL}|g" -e "s|\${PROGRESS_INTERVAL}|${PROGRESS_INTERVAL}|g" \
+      -e "s|\${MEMORY}|${CAMPAIGN_MEMORY}|g" -e "s|\${MEMORY_REQUEST}|${CAMPAIGN_MEMORY_REQUEST}|g" \
+      -e "s|\${GOMEMLIMIT}|$(( ${CAMPAIGN_MEMORY%Gi} * 900 ))MiB|g"
 }
 
 campaign_pod() {
@@ -381,6 +407,32 @@ check_campaign_context() {
   fi
   if ! [[ "${CAMPAIGN_ID}" =~ ^[A-Za-z0-9._-]*$ && "${CAMPAIGN_ID}" != .* ]]; then
     echo "Error: --campaign-id '${CAMPAIGN_ID}' must be letters, digits, '.', '_' or '-', not starting with '.'." >&2
+    exit 1
+  fi
+  if ! [[ "${CAMPAIGN_PLAN}" =~ ^(tunnel-cap|ladder)?$ ]]; then
+    echo "Error: --campaign-plan '${CAMPAIGN_PLAN}' is not tunnel-cap or ladder." >&2
+    exit 1
+  fi
+  if [[ -z "${CAMPAIGN_MEMORY}" ]]; then
+    CAMPAIGN_MEMORY="${CAMPAIGN_MEMORY_DEFAULT}"
+    if [[ "${CAMPAIGN_PLAN}" == ladder ]]; then
+      CAMPAIGN_MEMORY="${LADDER_MEMORY_DEFAULT}"
+    fi
+  fi
+  if [[ -z "${CAMPAIGN_MEMORY_REQUEST}" ]]; then
+    CAMPAIGN_MEMORY_REQUEST="${CAMPAIGN_MEMORY_REQUEST_DEFAULT}"
+    if [[ "${CAMPAIGN_PLAN}" == ladder ]]; then
+      CAMPAIGN_MEMORY_REQUEST="${LADDER_MEMORY_REQUEST_DEFAULT}"
+    fi
+  fi
+  for mem in "${CAMPAIGN_MEMORY}" "${CAMPAIGN_MEMORY_REQUEST}"; do
+    if ! [[ "${mem}" =~ ^[1-9][0-9]*Gi$ ]]; then
+      echo "Error: --campaign-memory and --campaign-memory-request must be whole Gi, such as 12Gi, got '${mem}'." >&2
+      exit 1
+    fi
+  done
+  if (( ${CAMPAIGN_MEMORY_REQUEST%Gi} > ${CAMPAIGN_MEMORY%Gi} )); then
+    echo "Error: --campaign-memory-request ${CAMPAIGN_MEMORY_REQUEST} is above --campaign-memory ${CAMPAIGN_MEMORY}." >&2
     exit 1
   fi
   if ! [[ "${SCRIPTS_DIR}" =~ ^[A-Za-z0-9_.:@/~-]*$ ]]; then
@@ -637,6 +689,27 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --campaign-id=*)
       CAMPAIGN_ID="${1#*=}"
+      ;;
+    --campaign-plan)
+      shift
+      CAMPAIGN_PLAN="$1"
+      ;;
+    --campaign-plan=*)
+      CAMPAIGN_PLAN="${1#*=}"
+      ;;
+    --campaign-memory)
+      shift
+      CAMPAIGN_MEMORY="$1"
+      ;;
+    --campaign-memory=*)
+      CAMPAIGN_MEMORY="${1#*=}"
+      ;;
+    --campaign-memory-request)
+      shift
+      CAMPAIGN_MEMORY_REQUEST="$1"
+      ;;
+    --campaign-memory-request=*)
+      CAMPAIGN_MEMORY_REQUEST="${1#*=}"
       ;;
     --scripts-dir)
       shift
