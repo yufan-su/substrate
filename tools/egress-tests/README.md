@@ -548,8 +548,9 @@ kubectl --context <ctx> -n egress-tests exec egress-campaign -- touch /out/go/<N
 ```
 
 At the fit stop the runner fits the run JSONs itself, prints the
-coefficients and writes `/out/predictions.json`, then waits like any owner
-step.
+coefficients and writes `/out/predictions.json`, `/out/fit.json` and the
+predictor page `/out/predictor.html` (see [Predicting cost](#predicting-cost)),
+then waits like any owner step.
 
 The runner's output also goes to `/out/campaign.log`, appended to by every
 Pod, so a resume keeps the earlier attempts' lines.

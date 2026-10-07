@@ -37,7 +37,8 @@ Provisional rows missing from --ref-dir are left out, with a line saying so;
 
 At the fit stop the runner fits DIR/A-c???-b???.json and C-c???-b???.json,
 prints the coefficients, and writes DIR/predictions.json: each holdout's
-judged responses, predicted with their 95% half-widths. An existing
+judged responses, predicted with their 95% half-widths. It also writes
+DIR/fit.json and the predictor page DIR/predictor.html. An existing
 predictions.json is kept; delete it and the go file to refit.
 
 Before every measured run it waits until the gateway's cleartext pool is
@@ -223,7 +224,7 @@ def fit_commands(out: Path, provisional: list[Path]) -> tuple[list[str], str]:
     """The fit step's command, which the runner also runs itself."""
     rows, why = provisional_rows(out, provisional)
     cmd = (f"{shlex.quote(sys.executable)} {PLOT / 'fit.py'} {out}/{FIT_GLOBS[0]} {out}/{FIT_GLOBS[1]} "
-           f"--csv {out}/runs.csv")
+           f"--csv {out}/runs.csv --json {out}/fit.json")
     if rows:
         cmd += " --provisional " + " ".join(str(p) for p in rows)
     return [cmd], why
@@ -320,6 +321,17 @@ def predict_holdouts(rows: list[dict], holdouts: list[Step], say) -> dict:
     return preds
 
 
+def render_predictor(rows: list[dict], inputs: list[Path], out: Path) -> list[Path]:
+    """Writes OUT/fit.json and OUT/predictor.html from the fit over rows."""
+    fit = fit_module()
+    import predictor  # noqa: E402  (on the path fit_module set)
+    doc = fit.fit_document(rows, fit.fit_all(rows), inputs=[str(p) for p in inputs])
+    paths = [out / "fit.json", out / "predictor.html"]
+    fit.write_json(doc, str(paths[0]))
+    paths[1].write_text(predictor.render(doc))
+    return paths
+
+
 def within_cpu_rule(value: float, ref: float) -> bool:
     return abs(value - ref) <= max(0.15 * abs(ref), 0.02)
 
@@ -347,6 +359,7 @@ class Runner:
     kubeconfig: str = ""
     extract: object = fit_extract
     predict: object = predict_holdouts
+    render: object = render_predictor
     prompt: object = input
     isatty: object = sys.stdin.isatty
     say: object = print
@@ -464,6 +477,11 @@ class Runner:
         self.say(f"      fit: {len(runs)} runs, {len(rows_from)} provisional rows")
         preds = self.predict(rows, holdouts, self.say)
         path.write_text(json.dumps(preds, indent=1) + "\n")
+        try:
+            for p in self.render(rows, [Path(f) for f in runs] + list(rows_from), self.out):
+                self.say(f"      wrote {p}")
+        except (KeyError, ValueError, OSError) as e:
+            self.say(f"      predictor page not written: {type(e).__name__}: {e}")
         for name, p in preds.items():
             parts = [f"{r} {v['predicted']:.4g} ± {v['halfWidth']:.2g}" for r, v in p["responses"].items()]
             self.say(f"      predict {name} B={p['B']} C={p['C']}: {'; '.join(parts)}")

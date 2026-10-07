@@ -14,11 +14,11 @@
 # limitations under the License.
 
 # Builds the campaign image from the checked-out tree: the linux/amd64
-# egress-tests driver, campaign.py, plot/fit.py and plot/runs.py, and under
-# /work/ref the base check's reference run, named in /work/ref/base-check-ref,
-# and whichever provisional rows' JSONs exist. The tag is
-# ${KO_DOCKER_REPO}/egress-campaign:<short commit>. See
-# tools/egress-tests/README.md.
+# egress-tests driver, campaign.py, plot/fit.py, plot/runs.py and the
+# predictor page generator, and under /work/ref the base check's reference
+# run, named in /work/ref/base-check-ref, and whichever provisional rows'
+# JSONs exist. The tag is ${KO_DOCKER_REPO}/egress-campaign:<short commit>.
+# See tools/egress-tests/README.md.
 
 set -o errexit -o nounset -o pipefail
 
@@ -98,7 +98,8 @@ mkdir -p "${CONTEXT_DIR}/campaign" "${CONTEXT_DIR}/plot" "${CONTEXT_DIR}/ref"
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o "${CONTEXT_DIR}/egress-tests" ./tools/egress-tests
 cp tools/egress-tests/campaign/image/Dockerfile "${CONTEXT_DIR}/"
 cp tools/egress-tests/campaign/campaign.py "${CONTEXT_DIR}/campaign/"
-cp tools/egress-tests/plot/fit.py tools/egress-tests/plot/runs.py "${CONTEXT_DIR}/plot/"
+cp tools/egress-tests/plot/fit.py tools/egress-tests/plot/runs.py tools/egress-tests/plot/predictor.py \
+  tools/egress-tests/plot/predictor.html.tmpl "${CONTEXT_DIR}/plot/"
 cp tools/egress-tests/plot/requirements.txt "${CONTEXT_DIR}/"
 # The Pod passes /work/ref/$(cat /work/ref/base-check-ref) to --base-check-ref.
 cp "${BASE_CHECK_REF}" "${CONTEXT_DIR}/ref/${BASE_CHECK_NAME}"

@@ -508,7 +508,7 @@ func TestCampaignImageRefs(t *testing.T) {
 			repo, shims, refDir := filepath.Join(tmp, "repo"), filepath.Join(tmp, "shims"), filepath.Join(tmp, "ref")
 			log := filepath.Join(tmp, "shim.log")
 			for _, f := range []string{"campaign/image/build.sh", "campaign/image/Dockerfile", "campaign/campaign.py",
-				"plot/fit.py", "plot/runs.py", "plot/requirements.txt"} {
+				"plot/fit.py", "plot/runs.py", "plot/predictor.py", "plot/predictor.html.tmpl", "plot/requirements.txt"} {
 				writeFile(t, filepath.Join(repo, "tools/egress-tests", f), readFile(t, f), 0o755)
 			}
 			for _, r := range tc.refs {

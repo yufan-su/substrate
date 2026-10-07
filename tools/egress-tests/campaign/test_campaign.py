@@ -190,6 +190,11 @@ class RunnerTest(unittest.TestCase):
         # gateway cores the stub extract reports, by file name
         self.cores = {"A-c010-b100.json": 0.50, "t3.json": 0.52}
         self.fit_rows = []
+        self.rendered = []
+
+    def render(self, rows, inputs, out):
+        self.rendered.append([p.name for p in inputs])
+        return [out / "fit.json", out / "predictor.html"]
 
     def predict(self, rows, holdouts, say):
         self.fit_rows.append(rows)
@@ -210,7 +215,7 @@ class RunnerTest(unittest.TestCase):
         kw.setdefault("provisional", [Path("/ref/t3.json"), Path("/ref/t1.json")])
         return cp.Runner(CTX, "egress-tests", self.out, {}, execute=execute, read_active=lambda: 0,
                          read_gateway=lambda: (self.pods[0], self.gateway_node), base_ref=Path("/ref/t3.json"), extract=extract,
-                         predict=self.predict, prompt=self.prompts.append, isatty=lambda: tty, say=self.said.append,
+                         predict=self.predict, render=self.render, prompt=self.prompts.append, isatty=lambda: tty, say=self.said.append,
                          sleep=sleep, **kw)
 
     def predict_holdouts(self):
@@ -229,6 +234,11 @@ class RunnerTest(unittest.TestCase):
         preds = json.loads((self.out / "predictions.json").read_text())
         self.assertEqual(sorted(preds), sorted(s.name for s in cp.plan(CTX) if s.holdout))
         self.assertIn("      predict D-c075-b020 B=20 C=75: gateway_cores 1 ± 0.1", self.said)
+        # The page hashes the fitting runs and the provisional rows, not the .gate.json files.
+        self.assertEqual(len(self.rendered), 1)
+        self.assertEqual(len(self.rendered[0]), 15 + 3 + 2)
+        self.assertFalse([n for n in self.rendered[0] if n.endswith(".gate.json")])
+        self.assertIn(f"      wrote {self.out / 'predictor.html'}", self.said)
 
     def test_an_existing_prediction_file_is_kept_and_refuses_holdouts_missing_from_it(self):
         (self.out / "predictions.json").write_text("{}")
@@ -436,6 +446,10 @@ class FitStopTest(unittest.TestCase):
             cells[name] = self.cores(b, c, i)
             steps.append(cp.run(name, b, c, measured=False))
         refs = {"p1.json": self.cores(100, 10, 0, True), "p2.json": self.cores(10, 100, 1, True)}
+        ref_dir = self.out / "ref"
+        ref_dir.mkdir(exist_ok=True)
+        for n in refs:
+            (ref_dir / n).write_text("{}")
         if base_pass is not None:
             (self.out / "base-check.json").write_text(json.dumps({"pass": base_pass}))
         holdouts = [cp.run("D-c075-b020", 20, 75, holdout=True), cp.run("D-c160-b080", 80, 160, holdout=True)]
@@ -456,7 +470,8 @@ class FitStopTest(unittest.TestCase):
             out.with_suffix(".gate.json").write_text("{}")  # must not enter the fit
         said = []
         r = cp.Runner(CTX, "egress-tests", self.out, {}, execute=execute, read_active=lambda: 0,
-                      read_gateway=lambda: ("gw", "node-gw"), provisional=[Path("/ref/p1.json"), Path("/ref/p2.json")],
+                      read_gateway=lambda: ("gw", "node-gw"),
+                      provisional=[ref_dir / "p1.json", ref_dir / "p2.json"],
                       extract=extract, prompt=lambda _: None, isatty=lambda: True, say=said.append)
         r.walk(steps)
         rows = [extract(Path(f"{n}.json")) for n in cells]
@@ -488,6 +503,16 @@ class FitStopTest(unittest.TestCase):
                 self.assertAlmostEqual(preds["D-c075-b020"]["responses"]["gateway_cores"]["predicted"], truth,
                                        delta=tolerance)
                 self.assertTrue(any(s.startswith("      gateway_cores: n=") for s in said), said)
+                # fit.json holds the same fit, and hashes every row's file.
+                doc = json.loads((self.out / "fit.json").read_text())
+                fitted = rows + ([r | {"provisional": True} for r in refs] if with_refs else [])
+                want_fit = cp.fit_module().fit_all(fitted)["gateway_cores"]
+                coef = doc["fits"]["gateway_cores"]["coef"]
+                self.assertEqual(len(coef), len(want_fit.coef))
+                for got, want in zip(coef, want_fit.coef):
+                    self.assertAlmostEqual(got, want, places=12)
+                self.assertEqual(len(doc["provenance"]["inputs"]), len(fitted))
+                self.assertIn('<script type="application/json" id="fit">', (self.out / "predictor.html").read_text())
 
     def test_a_rerun_keeps_the_predictions(self):
         preds, *_ = self.walk(True)
