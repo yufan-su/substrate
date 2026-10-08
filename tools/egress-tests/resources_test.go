@@ -178,7 +178,6 @@ envoy_cluster_circuit_breakers_high_cx_open{envoy_cluster_name="mitm_internal"} 
 envoy_cluster_upstream_cx_total_x{envoy_cluster_name="mitm_internal"} 1
 envoy_cluster_upstream_cx_length_ms_bucket{envoy_cluster_name="mitm_internal",le="0.5"} 0
 envoy_server_uptime{} 12
-not a metric
 `
 	got := parseEnvoyStats([]byte(body))
 	want := map[string]float64{
@@ -192,6 +191,11 @@ not a metric
 	}
 	if !maps.Equal(got, want) {
 		t.Errorf("parseEnvoyStats = %v, want %v", got, want)
+	}
+	// A body that is not Prometheus text, such as an error page served with
+	// 200, yields nothing rather than whatever lines happened to parse.
+	if got := parseEnvoyStats([]byte("<html>busy</html>\n" + body)); len(got) != 0 {
+		t.Errorf("parseEnvoyStats on junk = %v, want nothing", got)
 	}
 }
 
