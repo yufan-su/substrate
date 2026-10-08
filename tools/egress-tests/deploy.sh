@@ -48,6 +48,16 @@ WORKER_COUNT=2
 ACTOR_MEMORY="256Mi"
 WORKER_MEMORY=""
 ENDPOINTS=100
+# Service i forwards to target ports HTTP_PORT_BASE+i and TLS_PORT_BASE+i, so
+# no two Services share a backend IP and port: on Dataplane V2 two Services'
+# connections can otherwise arrive at one pod with the same 4-tuple. The
+# target listens on the whole MAX_ENDPOINTS range whatever --endpoints is,
+# so a Service left from an earlier, larger deploy still reaches an open
+# port. The bases stay clear of the target's own :8080 and :8443 and of each
+# other up to MAX_ENDPOINTS.
+HTTP_PORT_BASE=10000
+TLS_PORT_BASE=12000
+TARGET_IMAGE=""
 WAIT_TIMEOUT_SECS=300
 HTTPS=false
 SKIP_TEMPLATE=false
@@ -108,6 +118,8 @@ usage() {
   echo "  --actor-memory SIZE     Memory limit of each actor (default: ${ACTOR_MEMORY})"
   echo "  --endpoints C           Endpoint Services to create, egress-target-0 up to"
   echo "                          egress-target-<C-1> (default: ${ENDPOINTS}, at most ${MAX_ENDPOINTS})"
+  echo "  --target-image IMAGE    With --print-targets, the target image instead of its ko:// reference"
+  echo "  --print-targets         Print the target Deployment and the endpoint Services; change nothing"
   echo "  --wait-timeout SECONDS  How long to wait for each rollout and the golden snapshot (default: ${WAIT_TIMEOUT_SECS})"
   echo "  --cgreader              Also deploy the cgroup reader DaemonSet for run --usage-cgroup-reader"
   echo "  --kubeconfig FILE       Kubeconfig for every kubectl, kubectl-ate and ko call"
@@ -204,8 +216,22 @@ render_services() {
   local i
   for ((i = 0; i < ENDPOINTS; i++)); do
     echo "---"
-    sed -e "s|\${INDEX}|${i}|g" "${MANIFEST_DIR}/target-service.yaml.tmpl"
+    sed -e "s|\${INDEX}|${i}|g" -e "s|targetPort: http\$|targetPort: $((HTTP_PORT_BASE + i))|" \
+      -e "s|targetPort: https\$|targetPort: $((TLS_PORT_BASE + i))|" "${MANIFEST_DIR}/target-service.yaml.tmpl"
   done
+}
+
+# render_targets prints the target Deployment, listening on every Service's
+# port up to MAX_ENDPOINTS.
+render_targets() {
+  local image="ko://github.com/agent-substrate/substrate/tools/egress-tests/target"
+  awk -v http="${HTTP_PORT_BASE}-$((HTTP_PORT_BASE + MAX_ENDPOINTS - 1))" \
+    -v tls="${TLS_PORT_BASE}-$((TLS_PORT_BASE + MAX_ENDPOINTS - 1))" '
+    { print }
+    $1 == "-" && $2 ~ /^--tls-key-file=/ {
+      print "        - --listen-ports=" http
+      print "        - --tls-listen-ports=" tls
+    }' "${MANIFEST_DIR}/targets.yaml.tmpl" | sed -e "s|${image}|${TARGET_IMAGE:-${image}}|"
 }
 
 # wait_actortemplate_ready polls the actor template until its golden snapshot
@@ -543,7 +569,7 @@ deploy() {
 
   ensure_target_tls_secret
   echo "Deploying ${ENDPOINTS} endpoints in ${TARGET_NAMESPACE}..."
-  ko_apply <"${MANIFEST_DIR}/targets.yaml.tmpl"
+  render_targets | ko_apply
   render_services | kubectl apply -f - >/dev/null
   kubectl rollout status deployment/egress-target \
     --namespace="${TARGET_NAMESPACE}" --timeout="${WAIT_TIMEOUT_SECS}s"
@@ -597,6 +623,16 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --https)
       HTTPS=true
+      ;;
+    --target-image)
+      shift
+      TARGET_IMAGE="$1"
+      ;;
+    --target-image=*)
+      TARGET_IMAGE="${1#*=}"
+      ;;
+    --print-targets)
+      action="print-targets"
       ;;
     --skip-template)
       SKIP_TEMPLATE=true
@@ -767,6 +803,10 @@ case "${action}" in
   unpatch-gateway) unpatch_gateway_trust ;;
   campaign) campaign ;;
   delete-campaign) delete_campaign ;;
+  print-targets)
+    render_targets
+    render_services
+    ;;
   *)
     usage
     exit 1

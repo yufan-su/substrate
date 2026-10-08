@@ -15,7 +15,9 @@
 // Command target is the endpoint the egress-tests actors call: every request
 // gets a 200 with a small fixed body, over plain HTTP and, when given a
 // certificate, HTTPS. One Deployment of it sits behind all of the test's
-// Services.
+// Services. --listen-ports and --tls-listen-ports give each Service its own
+// backend port: Services on distinct ClusterIPs that share one backend port
+// can hand the target two connections with the same 4-tuple.
 package main
 
 import (
@@ -26,8 +28,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -55,9 +60,60 @@ func newTLSConfig(certFile, keyFile string) (*tls.Config, error) {
 	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}, nil
 }
 
+// portRange parses "A-B" or "A" into the ports A through B; "" is none.
+func portRange(s string) ([]int, error) {
+	if s == "" {
+		return nil, nil
+	}
+	lo, hi, found := strings.Cut(s, "-")
+	if !found {
+		hi = lo
+	}
+	a, errA := strconv.Atoi(lo)
+	b, errB := strconv.Atoi(hi)
+	if errA != nil || errB != nil || a < 1 || b > 65535 || a > b {
+		return nil, fmt.Errorf("%q is not a port or a port range A-B", s)
+	}
+	ports := make([]int, 0, b-a+1)
+	for p := a; p <= b; p++ {
+		ports = append(ports, p)
+	}
+	return ports, nil
+}
+
+// openListeners opens addr, when set, and every port in ports on all interfaces.
+// On an error it closes what it opened.
+func openListeners(addr, ports string) ([]net.Listener, error) {
+	ps, err := portRange(ports)
+	if err != nil {
+		return nil, err
+	}
+	var addrs []string
+	if addr != "" {
+		addrs = append(addrs, addr)
+	}
+	for _, p := range ps {
+		addrs = append(addrs, ":"+strconv.Itoa(p))
+	}
+	lns := make([]net.Listener, 0, len(addrs))
+	for _, a := range addrs {
+		ln, err := net.Listen("tcp", a)
+		if err != nil {
+			for _, l := range lns {
+				l.Close()
+			}
+			return nil, fmt.Errorf("listening on %s: %w", a, err)
+		}
+		lns = append(lns, ln)
+	}
+	return lns, nil
+}
+
 func main() {
 	listen := flag.String("listen", ":8080", "Address to serve plain HTTP on.")
+	listenPorts := flag.String("listen-ports", "", "Also serve plain HTTP on each port of this range, A-B.")
 	tlsListen := flag.String("tls-listen", "", "Address to serve HTTPS on; empty serves no HTTPS.")
+	tlsListenPorts := flag.String("tls-listen-ports", "", "Also serve HTTPS on each port of this range, A-B.")
 	tlsCertFile := flag.String("tls-cert-file", "", "PEM certificate to serve HTTPS with.")
 	tlsKeyFile := flag.String("tls-key-file", "", "PEM private key of --tls-cert-file.")
 	responseBytes := flag.Int("response-bytes", 16, "Size of the body every request gets back.")
@@ -67,35 +123,44 @@ func main() {
 	defer stop()
 
 	handler := newHandler(*responseBytes)
-	servers := []*http.Server{{Addr: *listen, Handler: handler, ReadHeaderTimeout: 10 * time.Second}}
-	if *tlsListen != "" {
+	plain := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	plainLns, err := openListeners(*listen, *listenPorts)
+	if err != nil {
+		log.Fatal(err)
+	}
+	servers := []*http.Server{plain}
+	var tlsSrv *http.Server
+	var tlsLns []net.Listener
+	if *tlsListen != "" || *tlsListenPorts != "" {
 		cfg, err := newTLSConfig(*tlsCertFile, *tlsKeyFile)
 		if err != nil {
 			log.Fatal(err)
 		}
-		servers = append(servers, &http.Server{Addr: *tlsListen, Handler: handler, TLSConfig: cfg, ReadHeaderTimeout: 10 * time.Second})
+		tlsSrv = &http.Server{Handler: handler, TLSConfig: cfg, ReadHeaderTimeout: 10 * time.Second}
+		if tlsLns, err = openListeners(*tlsListen, *tlsListenPorts); err != nil {
+			log.Fatal(err)
+		}
+		servers = append(servers, tlsSrv)
 	}
+	log.Printf("egress-tests target serving HTTP on %d ports and HTTPS on %d", len(plainLns), len(tlsLns))
 
-	// The first server to fail stops them all, as the signal does.
-	failed := make(chan error, len(servers))
+	// The first listener to fail stops them all, as the signal does.
+	failed := make(chan error, len(plainLns)+len(tlsLns))
 	var wg sync.WaitGroup
-	for _, srv := range servers {
+	serve := func(ln net.Listener, run func(net.Listener) error) {
 		wg.Go(func() {
-			var err error
-			if srv.TLSConfig != nil {
-				log.Printf("egress-tests target serving HTTPS on %s", srv.Addr)
-				err = srv.ListenAndServeTLS("", "")
-			} else {
-				log.Printf("egress-tests target serving HTTP on %s", srv.Addr)
-				err = srv.ListenAndServe()
-			}
-			if !errors.Is(err, http.ErrServerClosed) {
-				failed <- fmt.Errorf("serving on %s: %w", srv.Addr, err)
+			if err := run(ln); !errors.Is(err, http.ErrServerClosed) {
+				failed <- fmt.Errorf("serving on %s: %w", ln.Addr(), err)
 			}
 		})
 	}
+	for _, ln := range plainLns {
+		serve(ln, plain.Serve)
+	}
+	for _, ln := range tlsLns {
+		serve(ln, func(ln net.Listener) error { return tlsSrv.ServeTLS(ln, "", "") })
+	}
 
-	var err error
 	select {
 	case <-ctx.Done():
 	case err = <-failed:

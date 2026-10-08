@@ -15,13 +15,20 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/yaml"
 
 	"github.com/agent-substrate/substrate/tools/egress-tests/internal/egressapi"
 )
@@ -315,5 +322,92 @@ func TestDeployMaxEndpointsMatchesTheDriver(t *testing.T) {
 	}
 	if got, _ := strconv.Atoi(m[1]); got != egressapi.MaxEndpoints {
 		t.Errorf("deploy.sh MAX_ENDPOINTS = %d, want egressapi.MaxEndpoints = %d", got, egressapi.MaxEndpoints)
+	}
+}
+
+// TestPrintTargets renders the target Deployment and Services with
+// --print-targets, which must not need a cluster: kubectl is not on PATH.
+func TestPrintTargets(t *testing.T) {
+	t.Parallel()
+	// Every Service gets its own target ports, and the target listens on
+	// the whole MAX_ENDPOINTS range whatever --endpoints is, so a Service
+	// left from an earlier, larger deploy still reaches an open port.
+	wantArgs := []string{
+		fmt.Sprintf("--listen-ports=10000-%d", 10000+egressapi.MaxEndpoints-1),
+		fmt.Sprintf("--tls-listen-ports=12000-%d", 12000+egressapi.MaxEndpoints-1),
+	}
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		wantImage string
+	}{
+		{
+			name:      "the ko image",
+			args:      []string{"--endpoints", "3"},
+			wantImage: "ko://github.com/agent-substrate/substrate/tools/egress-tests/target",
+		},
+		{
+			name:      "another image",
+			args:      []string{"--endpoints", "3", "--target-image", "gcr.io/p/target@sha256:0"},
+			wantImage: "gcr.io/p/target@sha256:0",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			repo := filepath.Join(t.TempDir(), "repo")
+			writeFile(t, filepath.Join(repo, "tools/egress-tests/deploy.sh"), readFile(t, "deploy.sh"), 0o755)
+			for _, m := range []string{"targets.yaml.tmpl", "target-service.yaml.tmpl"} {
+				writeFile(t, filepath.Join(repo, "tools/egress-tests/manifests", m), readFile(t, filepath.Join("manifests", m)), 0o644)
+			}
+			if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v\n%s", err, out)
+			}
+			cmd := exec.Command("bash", append([]string{"tools/egress-tests/deploy.sh", "--print-targets"}, tc.args...)...)
+			cmd.Dir = repo
+			cmd.Env = []string{"PATH=" + filepath.Dir(mustLookPath(t, "git")) + ":/usr/bin:/bin", "HOME=" + repo}
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("deploy.sh --print-targets: %v\n%s", err, out)
+			}
+			var services []corev1.Service
+			var dep *appsv1.Deployment
+			for _, doc := range strings.Split(string(out), "\n---\n") {
+				var meta struct{ Kind string }
+				if err := yaml.Unmarshal([]byte(doc), &meta); err != nil {
+					t.Fatalf("decoding %q: %v", doc, err)
+				}
+				switch meta.Kind {
+				case "Deployment":
+					dep = &appsv1.Deployment{}
+					if err := yaml.UnmarshalStrict([]byte(doc), dep); err != nil {
+						t.Fatal(err)
+					}
+				case "Service":
+					var svc corev1.Service
+					if err := yaml.UnmarshalStrict([]byte(doc), &svc); err != nil {
+						t.Fatal(err)
+					}
+					services = append(services, svc)
+				}
+			}
+			if dep == nil || len(services) != 3 {
+				t.Fatalf("got a Deployment %v and %d Services, want one and 3", dep != nil, len(services))
+			}
+			c := dep.Spec.Template.Spec.Containers[0]
+			if c.Image != tc.wantImage {
+				t.Errorf("target image = %q, want %q", c.Image, tc.wantImage)
+			}
+			for _, a := range wantArgs {
+				if !slices.Contains(c.Args, a) {
+					t.Errorf("target args %v lack %q", c.Args, a)
+				}
+			}
+			for i, svc := range services {
+				wantHTTP, wantHTTPS := intstr.FromInt32(int32(10000+i)), intstr.FromInt32(int32(12000+i))
+				if p := svc.Spec.Ports; len(p) != 2 || p[0].TargetPort != wantHTTP || p[1].TargetPort != wantHTTPS {
+					t.Errorf("Service %s ports %v, want targetPorts %v and %v", svc.Name, p, wantHTTP.String(), wantHTTPS.String())
+				}
+			}
+		})
 	}
 }
