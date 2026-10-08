@@ -15,11 +15,13 @@
 # limitations under the License.
 
 
-# Runs the unit tests of tools/egress-tests/plot, the Python plotting and
-# cross-run checks of the egress scale test. They need plotly, so this script
-# keeps a venv at tools/egress-tests/plot/venv, as python-licenses.sh does,
-# and creates it on demand. Go's test target cannot reach them, and a test
-# nothing runs is not a test.
+# Runs the Python unit tests of tools/egress-tests: the plotting, cross-run
+# checks, cost-model fits and predictor page under plot/, and the campaign
+# runner under campaign/. They need plotly and numpy, so this script keeps a
+# venv at tools/egress-tests/plot/venv, as python-licenses.sh does, and
+# creates it on demand. Go's test target cannot reach them, and a test
+# nothing runs is not a test. In CI (CI=true) the suites fail rather than
+# skip when numpy or a JavaScript shell is missing.
 
 set -o errexit -o nounset -o pipefail
 
@@ -34,4 +36,7 @@ VENV="${PLOT_DIR}/venv"
 ensure_venv "${VENV}"
 venv_sync_requirements "${VENV}" "${PLOT_DIR}/requirements.txt"
 
-(cd "${PLOT_DIR}" && "${ROOT}/${VENV}/bin/python" -m unittest test_plot)
+EGRESS_DIR="tools/egress-tests"
+for dir in plot campaign; do
+  (cd "${EGRESS_DIR}/${dir}" && "${ROOT}/${VENV}/bin/python" -m unittest discover -s . -p 'test_*.py')
+done
