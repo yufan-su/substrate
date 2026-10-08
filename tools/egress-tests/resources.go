@@ -117,8 +117,12 @@ type resourceReport struct {
 	// Cgreader holds the cgroup readers' one-second rows, when enabled.
 	Cgreader *cgreaderReport `json:"cgreader,omitempty"`
 	// Series holds per-interval rates and gauges in long format for plots.
-	Series []seriesPoint  `json:"series,omitempty"`
-	Driver driverUsage    `json:"driver"`
+	Series []seriesPoint `json:"series,omitempty"`
+	Driver driverUsage   `json:"driver"`
+	// Reads and Errors count answered and failed reads per source and
+	// target, keyed source/target: the pod for live and envoy, the node for
+	// cadvisor and cgreader, the namespace for metrics-server.
+	Reads  map[string]int `json:"reads,omitempty"`
 	Errors map[string]int `json:"errors,omitempty"`
 	Verify []verifyResult `json:"verify,omitempty"`
 }
@@ -225,7 +229,7 @@ func newResourceSampler(get rawGetter, k8s kubernetes.Interface, interval time.D
 		now:              time.Now,
 		lastTS:           map[string]time.Time{},
 		rusage:           map[string]rusageMark{},
-		rep:              resourceReport{Errors: map[string]int{}},
+		rep:              resourceReport{Reads: map[string]int{}, Errors: map[string]int{}},
 	}
 }
 
@@ -252,7 +256,9 @@ func (s *resourceSampler) start(ctx context.Context) error {
 	s.rep.Sources = append(s.rep.Sources,
 		sourceInfo{Name: "live", Interval: s.interval, Clock: "driver"},
 		sourceInfo{Name: "envoy", Interval: s.interval, Clock: "driver"},
-		sourceInfo{Name: "cadvisor", Interval: s.cadvisorInterval, Clock: "kubelet"})
+		sourceInfo{Name: "cadvisor", Interval: s.cadvisorInterval, Clock: "kubelet"},
+		// Read once, at the end of steady; Interval 0 says so.
+		sourceInfo{Name: "metrics-server", Clock: "kubelet"})
 	if s.cgreaderOn {
 		if err := s.resolveCgreader(ctx); err != nil {
 			return err
@@ -331,16 +337,17 @@ func (s *resourceSampler) pollCadvisor(ctx context.Context) {
 		wg.Go(func() {
 			body, err := s.get.GetRaw(ctx, "/api/v1/nodes/"+node+"/proxy/metrics/cadvisor", nil)
 			if err != nil {
-				s.fail("cadvisor")
+				s.fail(ctx, "cadvisor", node)
 				return
 			}
 			rows, err := parseCadvisor(body, s.cadvisorPods)
 			if err != nil {
-				s.fail("cadvisor")
+				s.fail(ctx, "cadvisor", node)
 				return
 			}
 			s.mu.Lock()
 			defer s.mu.Unlock()
+			s.rep.Reads[sourceKey("cadvisor", node)]++
 			for _, r := range rows {
 				if r.T.IsZero() || !r.T.After(s.lastTS[r.key()]) {
 					continue
@@ -385,15 +392,16 @@ func (s *resourceSampler) readMetricsServer(ctx context.Context) {
 	for _, ns := range slices.Sorted(maps.Keys(namespaces)) {
 		body, err := s.get.GetRaw(ctx, "/apis/metrics.k8s.io/v1beta1/namespaces/"+ns+"/pods", nil)
 		if err != nil {
-			s.fail("metrics-server")
+			s.fail(ctx, "metrics-server", ns)
 			continue
 		}
 		var list metricsv1beta1.PodMetricsList
 		if err := json.Unmarshal(body, &list); err != nil {
-			s.fail("metrics-server")
+			s.fail(ctx, "metrics-server", ns)
 			continue
 		}
 		s.mu.Lock()
+		s.rep.Reads[sourceKey("metrics-server", ns)]++
 		for _, pm := range list.Items {
 			p, ok := s.cadvisorPods[pm.Namespace+"/"+pm.Name]
 			if !ok {
@@ -506,10 +514,11 @@ func (s *resourceSampler) readProcess(ctx context.Context, t liveTarget, pod, la
 			defer s.mu.Unlock()
 			s.rep.Live = append(s.rep.Live, liveSample{T: sent.Add(rtt / 2), Label: label, Component: t.component, Pod: pod,
 				Container: t.container, ProcessCPUSeconds: cpu, RSSBytes: rss, RTT: rtt})
+			s.rep.Reads[sourceKey("live", pod)]++
 			return
 		}
 	}
-	s.fail("live")
+	s.fail(ctx, "live", pod)
 }
 
 func (s *resourceSampler) readEnvoy(ctx context.Context, pod, label string) {
@@ -524,18 +533,30 @@ func (s *resourceSampler) readEnvoy(ctx context.Context, pod, label string) {
 	// a body missing one means a renamed metric or cluster, not an idle
 	// gateway. Such a read is a failure, or the gaps would pass unnoticed.
 	if err != nil || len(counters) < len(envoyClusters)*len(envoyStats) {
-		s.fail("envoy")
+		s.fail(ctx, "envoy", pod)
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rep.Envoy = append(s.rep.Envoy, envoySample{T: at, Label: label, Pod: pod, Counters: counters})
+	s.rep.Reads[sourceKey("envoy", pod)]++
 }
 
-func (s *resourceSampler) fail(source string) {
+// sourceKey names one target of a source in Reads and Errors.
+func sourceKey(source, target string) string {
+	return source + "/" + target
+}
+
+// fail counts a failed read of source at target. A read that ctx cut off,
+// as stop() does to the polls in flight, is not the source's fault and is
+// not counted.
+func (s *resourceSampler) fail(ctx context.Context, source, target string) {
+	if ctx.Err() != nil {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.rep.Errors[source]++
+	s.rep.Errors[sourceKey(source, target)]++
 }
 
 // runningPods lists the names of the Running pods that match selector.

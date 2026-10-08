@@ -43,6 +43,8 @@ type fakeGetter struct {
 	envoyCx func() float64
 	// envoyPartial answers the Envoy read with one series instead of all.
 	envoyPartial bool
+	// block holds the paths whose reads wait until ctx ends.
+	block map[string]bool
 }
 
 // envoyBody renders /stats/prometheus text with every stat of every cluster
@@ -59,15 +61,19 @@ func envoyBody(counters map[string]float64) []byte {
 }
 
 func newFakeGetter() *fakeGetter {
-	return &fakeGetter{reads: map[string]int{}, fail: map[string]bool{}, envoyCx: func() float64 { return 0 }}
+	return &fakeGetter{reads: map[string]int{}, fail: map[string]bool{}, block: map[string]bool{}, envoyCx: func() float64 { return 0 }}
 }
 
-func (g *fakeGetter) GetRaw(_ context.Context, path string, params url.Values) ([]byte, error) {
+func (g *fakeGetter) GetRaw(ctx context.Context, path string, params url.Values) ([]byte, error) {
 	g.mu.Lock()
 	g.reads[path]++
 	n := g.reads[path]
-	fail := g.fail[path]
+	fail, block := g.fail[path], g.block[path]
 	g.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if fail {
 		return nil, errors.New("proxy error")
 	}
@@ -219,8 +225,8 @@ func TestReadEnvoyRejectsPartialBody(t *testing.T) {
 	get.envoyPartial = false
 	s.readEnvoy(t.Context(), "atenet-egress-a", "")
 	rep := s.stop()
-	if len(rep.Envoy) != 1 || rep.Errors["envoy"] != 1 {
-		t.Errorf("%d envoy samples and %d errors, want the partial body counted as an error and the full one kept", len(rep.Envoy), rep.Errors["envoy"])
+	if len(rep.Envoy) != 1 || rep.Errors["envoy/atenet-egress-a"] != 1 {
+		t.Errorf("%d envoy samples and %d errors, want the partial body counted as an error and the full one kept", len(rep.Envoy), rep.Errors["envoy/atenet-egress-a"])
 	}
 }
 
@@ -245,6 +251,135 @@ func TestEnvoyStatsNamesAreReal(t *testing.T) {
 	}
 	if got[envoyCxTotal] == 0 {
 		t.Errorf("the dump's %s is 0; it was captured during a run and should carry real values", envoyCxTotal)
+	}
+}
+
+func TestCheckSourceReads(t *testing.T) {
+	t.Parallel()
+	sources := []sourceInfo{{Name: "live"}, {Name: "envoy"}, {Name: "cadvisor"}}
+	type verdict struct{ pass, info bool }
+	ok, fail, info := verdict{true, false}, verdict{false, false}, verdict{false, true}
+	for _, tc := range []struct {
+		name   string
+		reads  map[string]int
+		errors map[string]int
+		want   map[string]verdict // scope -> verdict; scopes not listed must be absent
+	}{
+		{
+			name:  "all answered",
+			reads: map[string]int{"live/a": 100, "envoy/gw": 100, "cadvisor/n1": 20},
+			want:  map[string]verdict{"live/a": ok, "envoy/gw": ok, "cadvisor/n1": ok},
+		},
+		{
+			name:   "a target that answered nothing fails",
+			reads:  map[string]int{"live/a": 100, "cadvisor/n1": 20},
+			errors: map[string]int{"envoy/gw": 100},
+			want:   map[string]verdict{"live/a": ok, "envoy/gw": fail, "cadvisor/n1": ok},
+		},
+		{
+			name:  "a source never read fails too",
+			reads: map[string]int{"live/a": 100, "envoy/gw": 100},
+			want:  map[string]verdict{"live/a": ok, "envoy/gw": ok, "cadvisor": fail},
+		},
+		{
+			name:   "5% failed passes, 6% fails",
+			reads:  map[string]int{"live/a": 95, "envoy/gw": 94, "cadvisor/n1": 20},
+			errors: map[string]int{"live/a": 5, "envoy/gw": 6},
+			want:   map[string]verdict{"live/a": ok, "envoy/gw": fail, "cadvisor/n1": ok},
+		},
+		{
+			name:   "too few reads to judge a share",
+			reads:  map[string]int{"live/a": 100, "envoy/gw": 100, "cadvisor/n1": 20, "metrics-server/ate-system": 3},
+			errors: map[string]int{"metrics-server/ate-system": 1},
+			want:   map[string]verdict{"live/a": ok, "envoy/gw": ok, "cadvisor/n1": ok, "metrics-server/ate-system": info},
+		},
+		{
+			name:   "one dead target among many is judged alone",
+			reads:  map[string]int{"live/a": 100, "envoy/gw": 100, "cadvisor/n1": 20, "cgreader/n1": 60, "cgreader/n2": 60, "cgreader/n3": 60},
+			errors: map[string]int{"cgreader/n4": 12},
+			want:   map[string]verdict{"live/a": ok, "envoy/gw": ok, "cadvisor/n1": ok, "cgreader/n1": ok, "cgreader/n2": ok, "cgreader/n3": ok, "cgreader/n4": fail},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := map[string]verdict{}
+			for _, v := range checkSourceReads(sources, tc.reads, tc.errors) {
+				if v.Check != "source" {
+					t.Errorf("result %+v, want check \"source\"", v)
+				}
+				got[v.Scope] = verdict{v.Pass, v.Info}
+			}
+			if !maps.Equal(got, tc.want) {
+				t.Errorf("checkSourceReads = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// readsOf sums a source's answered reads over its targets.
+func readsOf(counts map[string]int, source string) int {
+	n := 0
+	for k, v := range counts {
+		if strings.HasPrefix(k, source+"/") {
+			n += v
+		}
+	}
+	return n
+}
+
+// A read that stop() cuts off is not a failure of the source.
+func TestStopDoesNotCountCancelledReads(t *testing.T) {
+	t.Parallel()
+	k8s := fake.NewSimpleClientset()
+	addSystemPods(t, k8s)
+	get := newFakeGetter()
+	envoy := podProxyPath(envoyTarget.namespace, "atenet-egress-a", envoyTarget.port, envoyTarget.path)
+	get.block[envoy] = true
+	s := newResourceSampler(get, k8s, 5*time.Millisecond)
+	s.cadvisorInterval = 2 * time.Millisecond
+	if err := s.start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	rep := s.stop()
+	if get.readsOf(envoy) == 0 {
+		t.Fatal("the blocked Envoy read was never attempted")
+	}
+	if rep.Errors["envoy/atenet-egress-a"] != 0 || readsOf(rep.Reads, "live") == 0 {
+		t.Errorf("errors %v reads %v, want no envoy error from the read stop() cut off, and live reads", rep.Errors, rep.Reads)
+	}
+}
+
+// A source that fails every read must fail the run and show in the text
+// report, rather than leaving a hole the other checks cannot see.
+func TestDeadSourceIsReported(t *testing.T) {
+	t.Parallel()
+	k8s := fake.NewSimpleClientset()
+	addSystemPods(t, k8s)
+	get := newFakeGetter()
+	envoy := podProxyPath(envoyTarget.namespace, "atenet-egress-a", envoyTarget.port, envoyTarget.path)
+	get.fail[envoy] = true
+	s := newResourceSampler(get, k8s, 5*time.Millisecond)
+	s.cadvisorInterval = 2 * time.Millisecond
+	if err := s.start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	s.mark(t.Context(), markSteadyEnd) // reads metrics-server once, as a run does
+	rep := s.stop()
+
+	if readsOf(rep.Reads, "envoy") != 0 || rep.Errors["envoy/atenet-egress-a"] != get.readsOf(envoy) || readsOf(rep.Reads, "live") == 0 {
+		t.Errorf("reads %v errors %v after %d envoy reads, want no envoy reads, one error per read, and live reads", rep.Reads, rep.Errors, get.readsOf(envoy))
+	}
+	for _, v := range checkSourceReads(rep.Sources, rep.Reads, rep.Errors) {
+		if want := v.Scope != "envoy/atenet-egress-a"; v.Pass != want || v.Info {
+			t.Errorf("source check %s = %+v, want pass %v and not INFO", v.Scope, v, want)
+		}
+	}
+	var out strings.Builder
+	(&report{Resources: rep}).printResources(&out)
+	if !strings.Contains(out.String(), "sources") || !strings.Contains(out.String(), "envoy/atenet-egress-a 0 reads") {
+		t.Errorf("printResources = %q, want a sources line naming envoy with 0 reads", out.String())
 	}
 }
 
@@ -386,15 +521,27 @@ func TestResourceSampler(t *testing.T) {
 	if pods["atenet-egress-a"] < 3 || pods["ate-api-server-a"] < 3 {
 		t.Errorf("live reads per pod = %v, want at least 3 for each working pod", pods)
 	}
-	if pods["ate-api-server-b"] != 0 || rep.Errors["live"] != get.readsOf(broken) {
+	if pods["ate-api-server-b"] != 0 || rep.Errors["live/ate-api-server-b"] != get.readsOf(broken) {
 		t.Errorf("broken pod: %d samples and %d errors after %d reads, want 0 samples and one error per read",
-			pods["ate-api-server-b"], rep.Errors["live"], get.readsOf(broken))
+			pods["ate-api-server-b"], rep.Errors["live/ate-api-server-b"], get.readsOf(broken))
 	}
 	if labeled != 4 {
 		t.Errorf("%d labeled live reads, want 2 marks x 2 working pods", labeled)
 	}
-	if len(rep.Envoy) < 3 || len(rep.Sources) != 3 {
-		t.Errorf("%d envoy reads and sources %+v, want at least 3 reads and 3 sources", len(rep.Envoy), rep.Sources)
+	if readsOf(rep.Reads, "live") != len(rep.Live) || readsOf(rep.Reads, "envoy") != len(rep.Envoy) || readsOf(rep.Reads, "cadvisor") == 0 || readsOf(rep.Reads, "metrics-server") == 0 {
+		t.Errorf("reads %v, want live=%d envoy=%d and cadvisor and metrics-server reads", rep.Reads, len(rep.Live), len(rep.Envoy))
+	}
+	if rep.Errors["live/ate-api-server-b"] != get.readsOf(broken) {
+		t.Errorf("errors %v, want one for each read of the broken pod", rep.Errors)
+	}
+	for _, v := range checkSourceReads(rep.Sources, rep.Reads, rep.Errors) {
+		// The broken pod is judged alone; the other targets answered every read.
+		if want := v.Scope != "live/ate-api-server-b"; v.Pass != want {
+			t.Errorf("source check %s = %+v, want pass %v", v.Scope, v, want)
+		}
+	}
+	if len(rep.Envoy) < 3 || len(rep.Sources) != 4 {
+		t.Errorf("%d envoy reads and sources %+v, want at least 3 reads and 4 sources: live, envoy, cadvisor and metrics-server", len(rep.Envoy), rep.Sources)
 	}
 	cadvisorReads := get.readsOf("/api/v1/nodes/node-a/proxy/metrics/cadvisor")
 	if want := (cadvisorReads + 2) / 3; len(rep.Samples) != want || cadvisorReads < 6 {

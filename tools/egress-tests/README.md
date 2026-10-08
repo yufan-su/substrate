@@ -244,10 +244,11 @@ people who could exec into pods anyway.
 when one fails: the gateway's new connections match the actors' own count,
 each pod cgroup equals its containers' sum, each Go process counter matches
 its container's cgroup, metrics-server falls within the sampler's range
-for its window within 15%, every series has its readings, the Go
-processes' steady means fall within their per-interval rates, a rerun's
-create and suspend phases stay near idle, and the driver stays under half
-a core. `INFO` lines report what a short run cannot resolve.
+for its window within 15%, every series has its readings, every source
+answered its reads, the Go processes' steady means fall within their
+per-interval rates, a rerun's create and suspend phases stay near idle,
+and the driver stays under half a core. `INFO` lines report what a short
+run cannot resolve.
 
 Gaps between reads are judged in two tiers, since one slow API server
 round trip costs a point of a cumulative counter, not CPU. Live reads are

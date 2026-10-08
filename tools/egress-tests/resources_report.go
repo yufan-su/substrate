@@ -512,10 +512,29 @@ func histogramDelta(b, a egressapi.Histogram) egressapi.Histogram {
 	return d
 }
 
+// sourceWarnings names the sources that answered nothing or failed reads,
+// so a dead source shows in the text report whether or not the self-checks
+// are printed.
+func sourceWarnings(res *resourceReport) string {
+	var parts []string
+	for _, v := range checkSourceReads(res.Sources, res.Reads, res.Errors) {
+		if !v.Pass || res.Errors[v.Scope] > 0 {
+			parts = append(parts, v.Scope+" "+v.Got)
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
 // printResources writes the cpu and memory summary lines.
 func (rep *report) printResources(w io.Writer) {
 	res := rep.Resources
-	if res == nil || len(res.Components) == 0 {
+	if res == nil {
+		return
+	}
+	if warn := sourceWarnings(res); warn != "" {
+		fmt.Fprintf(w, "%-10s %s\n", "sources", warn)
+	}
+	if len(res.Components) == 0 {
 		return
 	}
 	var cpu, perK, settledK, mem, insufficient []string
