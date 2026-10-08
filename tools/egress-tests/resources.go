@@ -61,11 +61,14 @@ var liveTargets = []liveTarget{
 	{component: "ateapi", namespace: "ate-system", selector: "app=ate-api-server", container: "ate-api-server", port: 9090},
 }
 
-// envoyTarget is the gateway Envoy whose admin /stats is read on each poll.
+// envoyTarget is the gateway Envoy whose stats are read on each poll, through
+// its envoy_metrics listener. The admin API itself listens on loopback only,
+// which the API server's pod proxy cannot reach.
 var envoyTarget = struct {
 	namespace, selector string
 	port                int
-}{"ate-system", "app=atenet-egress", 15000}
+	path                string
+}{"ate-system", "app=atenet-egress", 15090, "/stats/prometheus"}
 
 // resourceReport is the resources section of the report.
 type resourceReport struct {
@@ -278,7 +281,7 @@ func (s *resourceSampler) readProcess(ctx context.Context, t liveTarget, pod, la
 }
 
 func (s *resourceSampler) readEnvoy(ctx context.Context, pod, label string) {
-	body, err := s.get.GetRaw(ctx, podProxyPath(envoyTarget.namespace, pod, envoyTarget.port, "/stats"),
+	body, err := s.get.GetRaw(ctx, podProxyPath(envoyTarget.namespace, pod, envoyTarget.port, envoyTarget.path),
 		url.Values{"filter": {envoyStatsFilter}})
 	at := s.now()
 	if err != nil {

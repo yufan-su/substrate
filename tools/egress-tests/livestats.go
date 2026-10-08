@@ -18,6 +18,8 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -29,8 +31,33 @@ const (
 	metricProcessRSS = "process_resident_memory_bytes"
 )
 
-// envoyStatsFilter selects the gateway's connection counters from /stats.
-const envoyStatsFilter = `^cluster\.(mitm_internal|egress_forward_proxy_cleartext)\.upstream_cx_(total|active|overflow)$`
+// envoyClusters are the gateway clusters the sampler reads: the actors'
+// tunnels and the cleartext connections to the targets.
+var envoyClusters = []string{"mitm_internal", "egress_forward_proxy_cleartext"}
+
+// envoyStats maps each Prometheus metric the sampler reads from the gateway
+// to the admin stat it is reported under, so the report keys stay
+// cluster.<cluster>.<stat> whatever the endpoint. The gateway's admin API
+// is loopback-only; its envoy_metrics listener forwards GET /stats/prometheus
+// to it and nothing else.
+var envoyStats = map[string]string{
+	"envoy_cluster_upstream_cx_total":    "upstream_cx_total",
+	"envoy_cluster_upstream_cx_active":   "upstream_cx_active",
+	"envoy_cluster_upstream_cx_overflow": "upstream_cx_overflow",
+}
+
+// envoyStatsFilter selects the sampler's stats on /stats/prometheus, which
+// filters on the admin stat name.
+var envoyStatsFilter = envoyFilter()
+
+func envoyFilter() string {
+	stats := make([]string, 0, len(envoyStats))
+	for _, stat := range envoyStats {
+		stats = append(stats, regexp.QuoteMeta(stat))
+	}
+	slices.Sort(stats)
+	return `^cluster\.(` + strings.Join(envoyClusters, "|") + `)\.(` + strings.Join(stats, "|") + `)$`
+}
 
 // envoyCxTotal counts the connections the gateway opened toward the actors'
 // tunnels, one per actor connection.
@@ -67,20 +94,55 @@ func parseProcessMetrics(body []byte) (cpuSeconds, rssBytes float64, err error) 
 	return cpu, found[metricProcessRSS], nil
 }
 
-// parseEnvoyStats reads Envoy's "name: value" /stats lines. Histogram lines
-// and other non-numeric values are skipped.
+// parseEnvoyStats reads the gateway's /stats/prometheus text and returns
+// the stats in envoyStats for the clusters in envoyClusters, keyed by their
+// admin names. Every other line, including comments and histogram buckets,
+// is skipped.
 func parseEnvoyStats(body []byte) map[string]float64 {
 	out := map[string]float64{}
 	for line := range strings.Lines(string(body)) {
-		name, value, ok := strings.Cut(strings.TrimSpace(line), ": ")
+		line = strings.TrimSpace(line)
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		name, rest, ok := strings.Cut(line, "{")
 		if !ok {
 			continue
 		}
-		v, err := strconv.ParseFloat(value, 64)
+		stat, ok := envoyStats[name]
+		if !ok {
+			continue
+		}
+		labels, value, ok := strings.Cut(rest, "}")
+		if !ok {
+			continue
+		}
+		cluster := promLabel(labels, "envoy_cluster_name")
+		if !slices.Contains(envoyClusters, cluster) {
+			continue
+		}
+		// An optional timestamp may follow the value.
+		fields := strings.Fields(value)
+		if len(fields) == 0 {
+			continue
+		}
+		v, err := strconv.ParseFloat(fields[0], 64)
 		if err != nil {
 			continue
 		}
-		out[name] = v
+		out["cluster."+cluster+"."+stat] = v
 	}
 	return out
+}
+
+// promLabel returns the value of label name in a Prometheus label list such
+// as `a="x",b="y"`, or "" when it is absent.
+func promLabel(labels, name string) string {
+	for _, kv := range strings.Split(labels, ",") {
+		k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
+		if ok && k == name {
+			return strings.Trim(v, `"`)
+		}
+	}
+	return ""
 }
