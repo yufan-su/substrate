@@ -38,8 +38,8 @@ var envoyClusters = []string{"mitm_internal", "egress_forward_proxy_cleartext"}
 // envoyStats maps each Prometheus metric the sampler reads from the gateway
 // to the admin stat it is reported under, so the report keys stay
 // cluster.<cluster>.<stat> whatever the endpoint. The gateway's admin API
-// is loopback-only; its envoy_metrics listener forwards GET /stats/prometheus
-// to it and nothing else.
+// is loopback-only; its envoy_metrics listener forwards GET /ready and
+// GET /stats/prometheus to it and nothing else.
 var envoyStats = map[string]string{
 	"envoy_cluster_upstream_cx_total":    "upstream_cx_total",
 	"envoy_cluster_upstream_cx_active":   "upstream_cx_active",

@@ -1,87 +1,45 @@
-# Trimmed from GET /stats/prometheus on an idle atenet-egress gateway, through
-# the API server pod proxy, 2026-10-07.
+# Trimmed from GET /stats/prometheus on an atenet-egress gateway, through the
+# API server pod proxy, during a run, 2026-10-07. Lines keep Envoy's order:
+# HELP and TYPE, then one line per cluster. Two unrelated clusters, a
+# histogram family and two server gauges are left in for the parser to skip.
 # TYPE envoy_cluster_upstream_cx_overflow counter
-# TYPE envoy_cluster_upstream_cx_total counter
-# TYPE envoy_cluster_upstream_rq_cancelled counter
-# TYPE envoy_cluster_upstream_rq_pending_overflow counter
-# TYPE envoy_cluster_upstream_rq_pending_total counter
-# TYPE envoy_cluster_circuit_breakers_default_cx_open gauge
-# TYPE envoy_cluster_upstream_cx_active gauge
-envoy_cluster_upstream_cx_overflow{envoy_cluster_name="egress_forward_proxy"} 0
 envoy_cluster_upstream_cx_overflow{envoy_cluster_name="egress_forward_proxy_cleartext"} 0
-envoy_cluster_upstream_cx_overflow{envoy_cluster_name="egress_forward_proxy_grpc"} 0
-envoy_cluster_upstream_cx_overflow{envoy_cluster_name="egress_forward_proxy_passthrough"} 0
-envoy_cluster_upstream_cx_overflow{envoy_cluster_name="egress_original_dst_cleartext"} 0
-envoy_cluster_upstream_cx_overflow{envoy_cluster_name="egress_original_dst_tls"} 0
-envoy_cluster_upstream_cx_overflow{envoy_cluster_name="egress_original_dst_tls_grpc"} 0
 envoy_cluster_upstream_cx_overflow{envoy_cluster_name="ext_proc_server"} 0
 envoy_cluster_upstream_cx_overflow{envoy_cluster_name="mitm_internal"} 0
 envoy_cluster_upstream_cx_overflow{envoy_cluster_name="sds_mint"} 0
-envoy_cluster_upstream_cx_total{envoy_cluster_name="egress_forward_proxy"} 0
-envoy_cluster_upstream_cx_total{envoy_cluster_name="egress_forward_proxy_cleartext"} 0
-envoy_cluster_upstream_cx_total{envoy_cluster_name="egress_forward_proxy_grpc"} 0
-envoy_cluster_upstream_cx_total{envoy_cluster_name="egress_forward_proxy_passthrough"} 0
-envoy_cluster_upstream_cx_total{envoy_cluster_name="egress_original_dst_cleartext"} 0
-envoy_cluster_upstream_cx_total{envoy_cluster_name="egress_original_dst_tls"} 0
-envoy_cluster_upstream_cx_total{envoy_cluster_name="egress_original_dst_tls_grpc"} 0
-envoy_cluster_upstream_cx_total{envoy_cluster_name="ext_proc_server"} 0
-envoy_cluster_upstream_cx_total{envoy_cluster_name="mitm_internal"} 0
+# TYPE envoy_cluster_upstream_cx_total counter
+envoy_cluster_upstream_cx_total{envoy_cluster_name="egress_forward_proxy_cleartext"} 162
+envoy_cluster_upstream_cx_total{envoy_cluster_name="ext_proc_server"} 22
+envoy_cluster_upstream_cx_total{envoy_cluster_name="mitm_internal"} 210
 envoy_cluster_upstream_cx_total{envoy_cluster_name="sds_mint"} 0
-envoy_cluster_upstream_rq_cancelled{envoy_cluster_name="egress_forward_proxy"} 0
+# TYPE envoy_cluster_upstream_rq_cancelled counter
 envoy_cluster_upstream_rq_cancelled{envoy_cluster_name="egress_forward_proxy_cleartext"} 0
-envoy_cluster_upstream_rq_cancelled{envoy_cluster_name="egress_forward_proxy_grpc"} 0
-envoy_cluster_upstream_rq_cancelled{envoy_cluster_name="egress_forward_proxy_passthrough"} 0
-envoy_cluster_upstream_rq_cancelled{envoy_cluster_name="egress_original_dst_cleartext"} 0
-envoy_cluster_upstream_rq_cancelled{envoy_cluster_name="egress_original_dst_tls"} 0
-envoy_cluster_upstream_rq_cancelled{envoy_cluster_name="egress_original_dst_tls_grpc"} 0
 envoy_cluster_upstream_rq_cancelled{envoy_cluster_name="ext_proc_server"} 0
 envoy_cluster_upstream_rq_cancelled{envoy_cluster_name="mitm_internal"} 0
 envoy_cluster_upstream_rq_cancelled{envoy_cluster_name="sds_mint"} 0
-envoy_cluster_upstream_rq_pending_overflow{envoy_cluster_name="egress_forward_proxy"} 0
+# TYPE envoy_cluster_upstream_rq_pending_overflow counter
 envoy_cluster_upstream_rq_pending_overflow{envoy_cluster_name="egress_forward_proxy_cleartext"} 0
-envoy_cluster_upstream_rq_pending_overflow{envoy_cluster_name="egress_forward_proxy_grpc"} 0
-envoy_cluster_upstream_rq_pending_overflow{envoy_cluster_name="egress_forward_proxy_passthrough"} 0
-envoy_cluster_upstream_rq_pending_overflow{envoy_cluster_name="egress_original_dst_cleartext"} 0
-envoy_cluster_upstream_rq_pending_overflow{envoy_cluster_name="egress_original_dst_tls"} 0
-envoy_cluster_upstream_rq_pending_overflow{envoy_cluster_name="egress_original_dst_tls_grpc"} 0
 envoy_cluster_upstream_rq_pending_overflow{envoy_cluster_name="ext_proc_server"} 0
 envoy_cluster_upstream_rq_pending_overflow{envoy_cluster_name="mitm_internal"} 0
 envoy_cluster_upstream_rq_pending_overflow{envoy_cluster_name="sds_mint"} 0
-envoy_cluster_upstream_rq_pending_total{envoy_cluster_name="egress_forward_proxy"} 0
-envoy_cluster_upstream_rq_pending_total{envoy_cluster_name="egress_forward_proxy_cleartext"} 0
-envoy_cluster_upstream_rq_pending_total{envoy_cluster_name="egress_forward_proxy_grpc"} 0
-envoy_cluster_upstream_rq_pending_total{envoy_cluster_name="egress_forward_proxy_passthrough"} 0
-envoy_cluster_upstream_rq_pending_total{envoy_cluster_name="egress_original_dst_cleartext"} 0
-envoy_cluster_upstream_rq_pending_total{envoy_cluster_name="egress_original_dst_tls"} 0
-envoy_cluster_upstream_rq_pending_total{envoy_cluster_name="egress_original_dst_tls_grpc"} 0
-envoy_cluster_upstream_rq_pending_total{envoy_cluster_name="ext_proc_server"} 0
-envoy_cluster_upstream_rq_pending_total{envoy_cluster_name="mitm_internal"} 0
+# TYPE envoy_cluster_upstream_rq_pending_total counter
+envoy_cluster_upstream_rq_pending_total{envoy_cluster_name="egress_forward_proxy_cleartext"} 162
+envoy_cluster_upstream_rq_pending_total{envoy_cluster_name="ext_proc_server"} 22
+envoy_cluster_upstream_rq_pending_total{envoy_cluster_name="mitm_internal"} 210
 envoy_cluster_upstream_rq_pending_total{envoy_cluster_name="sds_mint"} 0
-envoy_cluster_circuit_breakers_default_cx_open{envoy_cluster_name="egress_forward_proxy"} 0
+# TYPE envoy_cluster_circuit_breakers_default_cx_open gauge
 envoy_cluster_circuit_breakers_default_cx_open{envoy_cluster_name="egress_forward_proxy_cleartext"} 0
-envoy_cluster_circuit_breakers_default_cx_open{envoy_cluster_name="egress_forward_proxy_grpc"} 0
-envoy_cluster_circuit_breakers_default_cx_open{envoy_cluster_name="egress_forward_proxy_passthrough"} 0
-envoy_cluster_circuit_breakers_default_cx_open{envoy_cluster_name="egress_original_dst_cleartext"} 0
-envoy_cluster_circuit_breakers_default_cx_open{envoy_cluster_name="egress_original_dst_tls"} 0
-envoy_cluster_circuit_breakers_default_cx_open{envoy_cluster_name="egress_original_dst_tls_grpc"} 0
 envoy_cluster_circuit_breakers_default_cx_open{envoy_cluster_name="ext_proc_server"} 0
 envoy_cluster_circuit_breakers_default_cx_open{envoy_cluster_name="mitm_internal"} 0
 envoy_cluster_circuit_breakers_default_cx_open{envoy_cluster_name="sds_mint"} 0
-envoy_cluster_upstream_cx_active{envoy_cluster_name="egress_forward_proxy"} 0
+envoy_cluster_circuit_breakers_high_cx_open{envoy_cluster_name="mitm_internal"} 0
+# TYPE envoy_cluster_upstream_cx_active gauge
 envoy_cluster_upstream_cx_active{envoy_cluster_name="egress_forward_proxy_cleartext"} 0
-envoy_cluster_upstream_cx_active{envoy_cluster_name="egress_forward_proxy_grpc"} 0
-envoy_cluster_upstream_cx_active{envoy_cluster_name="egress_forward_proxy_passthrough"} 0
-envoy_cluster_upstream_cx_active{envoy_cluster_name="egress_original_dst_cleartext"} 0
-envoy_cluster_upstream_cx_active{envoy_cluster_name="egress_original_dst_tls"} 0
-envoy_cluster_upstream_cx_active{envoy_cluster_name="egress_original_dst_tls_grpc"} 0
-envoy_cluster_upstream_cx_active{envoy_cluster_name="ext_proc_server"} 0
+envoy_cluster_upstream_cx_active{envoy_cluster_name="ext_proc_server"} 22
 envoy_cluster_upstream_cx_active{envoy_cluster_name="mitm_internal"} 0
 envoy_cluster_upstream_cx_active{envoy_cluster_name="sds_mint"} 0
-# A few of the other 2,800 lines the gateway serves, which the parser must skip.
-envoy_cluster_upstream_cx_length_ms_bucket{envoy_cluster_name="egress_forward_proxy",le="0.5"} 0
-envoy_cluster_upstream_cx_length_ms_bucket{envoy_cluster_name="egress_forward_proxy",le="1"} 0
-envoy_cluster_upstream_cx_length_ms_bucket{envoy_cluster_name="egress_forward_proxy",le="5"} 0
-envoy_server_memory_heap_size{} 18874368
-envoy_server_uptime{} 415
-envoy_cluster_upstream_cx_total{envoy_cluster_name="ext_proc_server"} 0
-envoy_cluster_circuit_breakers_high_cx_open{envoy_cluster_name="mitm_internal"} 0
+envoy_server_memory_heap_size{} 41943040
+envoy_server_uptime{} 421
+# TYPE envoy_cluster_upstream_cx_length_ms histogram
+envoy_cluster_upstream_cx_length_ms_bucket{envoy_cluster_name="mitm_internal",le="0.5"} 0
+envoy_cluster_upstream_cx_length_ms_bucket{envoy_cluster_name="mitm_internal",le="1"} 0

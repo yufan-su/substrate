@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -40,6 +41,21 @@ type fakeGetter struct {
 	reads   map[string]int
 	fail    map[string]bool // path -> always fail
 	envoyCx func() float64
+	// envoyPartial answers the Envoy read with one series instead of all.
+	envoyPartial bool
+}
+
+// envoyBody renders /stats/prometheus text with every stat of every cluster
+// the sampler reads, taking values from counters and 0 elsewhere.
+func envoyBody(counters map[string]float64) []byte {
+	var b strings.Builder
+	for _, metric := range slices.Sorted(maps.Keys(envoyStats)) {
+		fmt.Fprintf(&b, "# TYPE %s counter\n", metric)
+		for _, c := range envoyClusters {
+			fmt.Fprintf(&b, "%s{envoy_cluster_name=%q} %g\n", metric, c, counters["cluster."+c+"."+envoyStats[metric]])
+		}
+	}
+	return []byte(b.String())
 }
 
 func newFakeGetter() *fakeGetter {
@@ -62,7 +78,10 @@ func (g *fakeGetter) GetRaw(_ context.Context, path string, params url.Values) (
 		if params.Get("filter") != envoyStatsFilter {
 			return nil, fmt.Errorf("unexpected filter %q", params.Get("filter"))
 		}
-		return fmt.Appendf(nil, "# TYPE envoy_cluster_upstream_cx_total counter\nenvoy_cluster_upstream_cx_total{envoy_cluster_name=\"mitm_internal\"} %.0f\nenvoy_cluster_upstream_cx_active{envoy_cluster_name=\"mitm_internal\"} 3\n", g.envoyCx()), nil
+		if g.envoyPartial {
+			return []byte("envoy_cluster_upstream_cx_total{envoy_cluster_name=\"mitm_internal\"} 1\n"), nil
+		}
+		return envoyBody(map[string]float64{envoyCxTotal: g.envoyCx(), "cluster.mitm_internal.upstream_cx_active": 3}), nil
 	}
 	return nil, fmt.Errorf("unexpected path %s", path)
 }
@@ -161,6 +180,22 @@ func TestEnvoyStatsFilterMatchesTable(t *testing.T) {
 	}
 }
 
+// A read whose body lacks any of the expected series is a failed read, not
+// a sample of zeros: Envoy serves every stat of a cluster from the start.
+func TestReadEnvoyRejectsPartialBody(t *testing.T) {
+	t.Parallel()
+	get := newFakeGetter()
+	get.envoyPartial = true
+	s := newResourceSampler(get, fake.NewSimpleClientset(), time.Second)
+	s.readEnvoy(t.Context(), "atenet-egress-a", "")
+	get.envoyPartial = false
+	s.readEnvoy(t.Context(), "atenet-egress-a", "")
+	rep := s.stop()
+	if len(rep.Envoy) != 1 || rep.Errors["envoy"] != 1 {
+		t.Errorf("%d envoy samples and %d errors, want the partial body counted as an error and the full one kept", len(rep.Envoy), rep.Errors["envoy"])
+	}
+}
+
 // TestEnvoyStatsNamesAreReal reads a dump captured from a gateway, so the
 // Prometheus names in envoyStats are the ones Envoy actually serves.
 func TestEnvoyStatsNamesAreReal(t *testing.T) {
@@ -179,6 +214,9 @@ func TestEnvoyStatsNamesAreReal(t *testing.T) {
 	}
 	if len(got) != len(envoyClusters)*len(envoyStats) {
 		t.Errorf("parsed %d stats from the dump, want %d", len(got), len(envoyClusters)*len(envoyStats))
+	}
+	if got[envoyCxTotal] == 0 {
+		t.Errorf("the dump's %s is 0; it was captured during a run and should carry real values", envoyCxTotal)
 	}
 }
 

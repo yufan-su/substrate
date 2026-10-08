@@ -284,13 +284,20 @@ func (s *resourceSampler) readEnvoy(ctx context.Context, pod, label string) {
 	body, err := s.get.GetRaw(ctx, podProxyPath(envoyTarget.namespace, pod, envoyTarget.port, envoyTarget.path),
 		url.Values{"filter": {envoyStatsFilter}})
 	at := s.now()
-	if err != nil {
+	var counters map[string]float64
+	if err == nil {
+		counters = parseEnvoyStats(body)
+	}
+	// Envoy serves every stat of a cluster from the start, zeros included, so
+	// a body missing one means a renamed metric or cluster, not an idle
+	// gateway. Such a read is a failure, or the gaps would pass unnoticed.
+	if err != nil || len(counters) < len(envoyClusters)*len(envoyStats) {
 		s.fail("envoy")
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.rep.Envoy = append(s.rep.Envoy, envoySample{T: at, Label: label, Pod: pod, Counters: parseEnvoyStats(body)})
+	s.rep.Envoy = append(s.rep.Envoy, envoySample{T: at, Label: label, Pod: pod, Counters: counters})
 }
 
 func (s *resourceSampler) fail(source string) {
