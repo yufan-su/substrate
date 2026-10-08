@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/url"
@@ -368,12 +369,12 @@ func (s *resourceSampler) pollCadvisor(ctx context.Context) {
 		wg.Go(func() {
 			body, err := s.get.GetRaw(ctx, "/api/v1/nodes/"+node+"/proxy/metrics/cadvisor", nil)
 			if err != nil {
-				s.fail(ctx, "cadvisor", node)
+				s.fail(err, "cadvisor", node)
 				return
 			}
 			rows, err := parseCadvisor(body, s.cadvisorPods)
 			if err != nil {
-				s.fail(ctx, "cadvisor", node)
+				s.fail(err, "cadvisor", node)
 				return
 			}
 			s.mu.Lock()
@@ -423,12 +424,12 @@ func (s *resourceSampler) readMetricsServer(ctx context.Context) {
 	for _, ns := range slices.Sorted(maps.Keys(namespaces)) {
 		body, err := s.get.GetRaw(ctx, "/apis/metrics.k8s.io/v1beta1/namespaces/"+ns+"/pods", nil)
 		if err != nil {
-			s.fail(ctx, "metrics-server", ns)
+			s.fail(err, "metrics-server", ns)
 			continue
 		}
 		var list metricsv1beta1.PodMetricsList
 		if err := json.Unmarshal(body, &list); err != nil {
-			s.fail(ctx, "metrics-server", ns)
+			s.fail(err, "metrics-server", ns)
 			continue
 		}
 		s.mu.Lock()
@@ -549,7 +550,7 @@ func (s *resourceSampler) readProcess(ctx context.Context, t liveTarget, pod, la
 			return
 		}
 	}
-	s.fail(ctx, "live", pod)
+	s.fail(err, "live", pod)
 }
 
 func (s *resourceSampler) readEnvoy(ctx context.Context, pod, label string) {
@@ -563,8 +564,11 @@ func (s *resourceSampler) readEnvoy(ctx context.Context, pod, label string) {
 	// Envoy serves every stat of a cluster from the start, zeros included, so
 	// a body missing one means a renamed metric or cluster, not an idle
 	// gateway. Such a read is a failure, or the gaps would pass unnoticed.
-	if err != nil || len(counters) < len(envoyClusters)*len(envoyStats) {
-		s.fail(ctx, "envoy", pod)
+	if err == nil && len(counters) < len(envoyClusters)*len(envoyStats) {
+		err = fmt.Errorf("%d of %d stats in the body", len(counters), len(envoyClusters)*len(envoyStats))
+	}
+	if err != nil {
+		s.fail(err, "envoy", pod)
 		return
 	}
 	s.mu.Lock()
@@ -578,11 +582,12 @@ func sourceKey(source, target string) string {
 	return source + "/" + target
 }
 
-// fail counts a failed read of source at target. A read that ctx cut off,
-// as stop() does to the polls in flight, is not the source's fault and is
-// not counted.
-func (s *resourceSampler) fail(ctx context.Context, source, target string) {
-	if ctx.Err() != nil {
+// fail counts a failed read of source at target. A read that its context
+// cut off, as stop() does to the polls in flight, is not the source's fault
+// and is not counted; err tells, where the context's state afterwards
+// would also hide a failure that happened to land as the run stopped.
+func (s *resourceSampler) fail(err error, source, target string) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
 	s.mu.Lock()

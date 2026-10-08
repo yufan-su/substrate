@@ -177,7 +177,7 @@ func (s *resourceSampler) resolveCgreader(ctx context.Context) error {
 		if _, err := s.get.GetRaw(ctx, podProxyPath(cgreaderNamespace, n.Reader, cgapi.Port, "/healthz"), nil); err != nil {
 			delete(s.rep.Cgreader.Nodes, node)
 			delete(s.cg.targets, node)
-			s.fail(ctx, "cgreader", node)
+			s.fail(err, "cgreader", node)
 		}
 	}
 	if len(s.rep.Cgreader.Nodes) == 0 {
@@ -246,7 +246,7 @@ func (s *resourceSampler) pullReader(ctx context.Context, node string) {
 			err = json.Unmarshal(body, &resp)
 		}
 		if err != nil {
-			s.fail(ctx, "cgreader", node)
+			s.fail(err, "cgreader", node)
 			return
 		}
 
@@ -310,7 +310,7 @@ func (s *resourceSampler) reresolveSelf(ctx context.Context, node string) {
 	s.mu.Unlock()
 	p, err := s.k8s.CoreV1().Pods(cgreaderNamespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		s.fail(ctx, "cgreader", node)
+		s.fail(err, "cgreader", node)
 		return
 	}
 	s.mu.Lock()
