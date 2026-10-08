@@ -18,8 +18,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/agent-substrate/substrate/tools/egress-tests/internal/egressapi"
 )
 
 // logShim logs its name and arguments to $SHIM_LOG and drains stdin. No
@@ -298,4 +302,18 @@ func mustLookPath(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// TestDeployMaxEndpointsMatchesTheDriver pins deploy.sh's MAX_ENDPOINTS to
+// egressapi.MaxEndpoints: the script and the driver must refuse the same
+// --endpoints, or a deploy the driver accepts fails at preflight.
+func TestDeployMaxEndpointsMatchesTheDriver(t *testing.T) {
+	t.Parallel()
+	m := regexp.MustCompile(`(?m)^MAX_ENDPOINTS=(\d+)$`).FindStringSubmatch(readFile(t, "deploy.sh"))
+	if m == nil {
+		t.Fatal("deploy.sh has no MAX_ENDPOINTS=<n> line")
+	}
+	if got, _ := strconv.Atoi(m[1]); got != egressapi.MaxEndpoints {
+		t.Errorf("deploy.sh MAX_ENDPOINTS = %d, want egressapi.MaxEndpoints = %d", got, egressapi.MaxEndpoints)
+	}
 }

@@ -99,7 +99,7 @@ go run ./tools/egress-tests run --actors 1000 --parallel 10 --endpoints 10 --dur
 | `--actors` | 1000 | **A**: actors to create. Actors are named `egress-<i>`. A rerun reuses the ones that already exist. |
 | `--parallel` | 1 | **B**: actors to resume, all running their loops at the same time. Each run picks them from the A actors as `--pick` says. |
 | `--pick` | `first` | Which B actors to resume: `first`, egress-0 up to egress-<B-1> every run, so one warm-up run gives them all their own snapshots; or `random`, a new random set each run. |
-| `--endpoints` | 10 | **C**: endpoints each loop calls, in order, round and round. At most 256. |
+| `--endpoints` | 10 | **C**: endpoints each loop calls, in order, round and round. At most 1024. |
 | `--duration` | 5m | How long the loops run once they have all started. |
 | `--scheme` | `http` | `http`, or `https` through the gateway's TLS interception. HTTPS needs `deploy.sh --https`; see [HTTPS](#https). |
 | `--conn-mode` | `keepalive` | `keepalive` keeps one connection per endpoint. `new-conn` opens a new connection for every request. |

@@ -30,20 +30,21 @@ import (
 
 // buildPolicy returns the egress policy every actor gets: HTTP on port 80 and
 // HTTPS on port 443 to exactly the hosts of endpoints 0 through n-1, the ones
-// the actor's loop calls. Both schemes are always allowed, so a run can switch
-// between them without updating every actor's policy.
+// the actor's loop calls, in rules of at most egressapi.MaxRuleHostnames
+// hosts. Both schemes are always allowed, so a run can switch between them
+// without updating every actor's policy.
 func buildPolicy(atespace string, n int) *ateapipb.EgressPolicy {
 	hosts := make([]string, n)
 	for i := range n {
 		hosts[i] = egressapi.EndpointHost(i)
 	}
-	return &ateapipb.EgressPolicy{
-		Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: "default"},
-		Rules: []*ateapipb.EgressRule{
-			{Http: &ateapipb.HTTPRule{Hostnames: hosts}},
-			{Https: &ateapipb.HTTPSRule{Hostnames: slices.Clone(hosts)}},
-		},
+	p := &ateapipb.EgressPolicy{Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: "default"}}
+	for chunk := range slices.Chunk(hosts, egressapi.MaxRuleHostnames) {
+		p.Rules = append(p.Rules,
+			&ateapipb.EgressRule{Http: &ateapipb.HTTPRule{Hostnames: slices.Clone(chunk)}},
+			&ateapipb.EgressRule{Https: &ateapipb.HTTPSRule{Hostnames: slices.Clone(chunk)}})
 	}
+	return p
 }
 
 // samePolicyRules reports whether existing allows what want does: the same

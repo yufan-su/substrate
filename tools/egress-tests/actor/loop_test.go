@@ -323,7 +323,7 @@ func TestStartStopLifecycle(t *testing.T) {
 
 func TestStartRejectsBadRequests(t *testing.T) {
 	h := newServer().handler()
-	for _, body := range []string{`not json`, `{}`, `{"endpoints":0}`, `{"endpoints":257}`, `{"endpoints":1,"scheme":"ftp"}`} {
+	for _, body := range []string{`not json`, `{}`, `{"endpoints":0}`, `{"endpoints":1025}`, `{"endpoints":1,"scheme":"ftp"}`} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, egressapi.StartRoute, strings.NewReader(body)))
 		if rec.Code != http.StatusBadRequest {
