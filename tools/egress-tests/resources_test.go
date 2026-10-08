@@ -18,7 +18,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
+	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -55,11 +58,11 @@ func (g *fakeGetter) GetRaw(_ context.Context, path string, params url.Values) (
 	switch {
 	case strings.HasSuffix(path, ":9090/proxy/metrics"):
 		return fmt.Appendf(nil, "# TYPE process_cpu_seconds_total counter\nprocess_cpu_seconds_total %.2f\nprocess_resident_memory_bytes 5e+07\n", 100+0.01*float64(n)), nil
-	case strings.HasSuffix(path, ":15000/proxy/stats"):
+	case strings.HasSuffix(path, ":15090/proxy/stats/prometheus"):
 		if params.Get("filter") != envoyStatsFilter {
 			return nil, fmt.Errorf("unexpected filter %q", params.Get("filter"))
 		}
-		return fmt.Appendf(nil, "%s: %.0f\ncluster.mitm_internal.upstream_cx_active: 3\n", envoyCxTotal, g.envoyCx()), nil
+		return fmt.Appendf(nil, "# TYPE envoy_cluster_upstream_cx_total counter\nenvoy_cluster_upstream_cx_total{envoy_cluster_name=\"mitm_internal\"} %.0f\nenvoy_cluster_upstream_cx_active{envoy_cluster_name=\"mitm_internal\"} 3\n", g.envoyCx()), nil
 	}
 	return nil, fmt.Errorf("unexpected path %s", path)
 }
@@ -117,9 +120,65 @@ func TestParseProcessMetrics(t *testing.T) {
 
 func TestParseEnvoyStats(t *testing.T) {
 	t.Parallel()
-	got := parseEnvoyStats([]byte("cluster.mitm_internal.upstream_cx_total: 42\ncluster.x.upstream_rq_time: P0(nan,1)\nnot a stat\n"))
-	if len(got) != 1 || got[envoyCxTotal] != 42 {
-		t.Errorf("parseEnvoyStats = %v, want only %s=42", got, envoyCxTotal)
+	body := `# HELP envoy_cluster_upstream_cx_total Multiline...
+# TYPE envoy_cluster_upstream_cx_total counter
+envoy_cluster_upstream_cx_total{envoy_cluster_name="mitm_internal"} 42
+envoy_cluster_upstream_cx_total{envoy_cluster_name="egress_forward_proxy_cleartext"} 7 1791287695035
+envoy_cluster_upstream_cx_total{envoy_cluster_name="ext_proc"} 9
+envoy_cluster_upstream_cx_active{envoy_cluster_name="mitm_internal"} 3
+envoy_cluster_upstream_cx_total_x{envoy_cluster_name="mitm_internal"} 1
+envoy_cluster_upstream_cx_length_ms_bucket{envoy_cluster_name="mitm_internal",le="0.5"} 0
+envoy_server_uptime{} 12
+not a metric
+`
+	got := parseEnvoyStats([]byte(body))
+	want := map[string]float64{
+		envoyCxTotal: 42,
+		"cluster.egress_forward_proxy_cleartext.upstream_cx_total": 7,
+		"cluster.mitm_internal.upstream_cx_active":                 3,
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("parseEnvoyStats = %v, want %v", got, want)
+	}
+}
+
+// TestEnvoyStatsFilterMatchesTable pins the filter sent to Envoy to the
+// stats the parser reads, so neither can drift from the other.
+func TestEnvoyStatsFilterMatchesTable(t *testing.T) {
+	t.Parallel()
+	filter := regexp.MustCompile(envoyStatsFilter)
+	for _, c := range envoyClusters {
+		for _, stat := range envoyStats {
+			if name := "cluster." + c + "." + stat; !filter.MatchString(name) {
+				t.Errorf("envoyStatsFilter does not select %s", name)
+			}
+		}
+	}
+	for _, name := range []string{"cluster.ext_proc.upstream_cx_total", "cluster.mitm_internal.upstream_cx_total_x", "cluster.mitm_internal.circuit_breakers.high.cx_open"} {
+		if filter.MatchString(name) {
+			t.Errorf("envoyStatsFilter selects %s", name)
+		}
+	}
+}
+
+// TestEnvoyStatsNamesAreReal reads a dump captured from a gateway, so the
+// Prometheus names in envoyStats are the ones Envoy actually serves.
+func TestEnvoyStatsNamesAreReal(t *testing.T) {
+	t.Parallel()
+	body, err := os.ReadFile("testdata/envoy-stats-prometheus.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := parseEnvoyStats(body)
+	for _, c := range envoyClusters {
+		for _, stat := range envoyStats {
+			if _, ok := got["cluster."+c+"."+stat]; !ok {
+				t.Errorf("the gateway dump has no %s for %s", stat, c)
+			}
+		}
+	}
+	if len(got) != len(envoyClusters)*len(envoyStats) {
+		t.Errorf("parsed %d stats from the dump, want %d", len(got), len(envoyClusters)*len(envoyStats))
 	}
 }
 
