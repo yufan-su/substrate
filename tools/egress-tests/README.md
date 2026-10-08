@@ -24,6 +24,17 @@ Endpoint `i` is the Service DNS name
 and 443 for HTTPS. Each endpoint has its own Service, so it has its own name and
 ClusterIP. All the Services select the same five `egress-target` pods.
 
+By default every Service forwards to the pods' ports 8080 and 8443. On GKE
+Dataplane V2 a pod reaching a ClusterIP is DNATed per packet, so the gateway
+picks source ports per Service IP, and two Services' connections can arrive at
+one target pod with the same 4-tuple. The target then resets the established
+one, which the gateway reports as a 503. This shows at C in the hundreds.
+`deploy.sh --port-per-service` gives Service `i` its own target ports,
+10000+i and 12000+i, and the target listens on all of them (`--listen-ports`,
+`--tls-listen-ports`). `deploy.sh --print-targets` prints the Deployment and
+Services without touching a cluster; `--target-image` replaces the ko
+reference.
+
 The naming scheme is fixed in code, in
 [internal/egressapi/endpoints.go](internal/egressapi/endpoints.go). The driver
 sends each actor only the count C in the `POST /start` body (`{"endpoints": C,

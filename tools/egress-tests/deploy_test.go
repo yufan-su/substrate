@@ -18,8 +18,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/yaml"
 )
 
 // logShim logs its name and arguments to $SHIM_LOG and drains stdin. No
@@ -263,4 +269,96 @@ func mustLookPath(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// TestPrintTargets renders the target Deployment and Services with
+// --print-targets, which must not need a cluster: kubectl is not on PATH.
+func TestPrintTargets(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		wantImage string
+		wantArgs  []string
+		wantPorts func(i int) (http, https intstr.IntOrString)
+	}{
+		{
+			name:      "shared named ports",
+			args:      []string{"--endpoints", "3"},
+			wantImage: "ko://github.com/agent-substrate/substrate/tools/egress-tests/target",
+			wantPorts: func(int) (intstr.IntOrString, intstr.IntOrString) {
+				return intstr.FromString("http"), intstr.FromString("https")
+			},
+		},
+		{
+			name:      "a port per Service",
+			args:      []string{"--endpoints", "3", "--port-per-service", "--target-image", "gcr.io/p/target@sha256:0"},
+			wantImage: "gcr.io/p/target@sha256:0",
+			wantArgs:  []string{"--listen-ports=10000-10002", "--tls-listen-ports=12000-12002"},
+			wantPorts: func(i int) (intstr.IntOrString, intstr.IntOrString) {
+				return intstr.FromInt32(int32(10000 + i)), intstr.FromInt32(int32(12000 + i))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			repo := filepath.Join(t.TempDir(), "repo")
+			writeFile(t, filepath.Join(repo, "tools/egress-tests/deploy.sh"), readFile(t, "deploy.sh"), 0o755)
+			for _, m := range []string{"targets.yaml.tmpl", "target-service.yaml.tmpl"} {
+				writeFile(t, filepath.Join(repo, "tools/egress-tests/manifests", m), readFile(t, filepath.Join("manifests", m)), 0o644)
+			}
+			if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v\n%s", err, out)
+			}
+			cmd := exec.Command("bash", append([]string{"tools/egress-tests/deploy.sh", "--print-targets"}, tc.args...)...)
+			cmd.Dir = repo
+			cmd.Env = []string{"PATH=" + filepath.Dir(mustLookPath(t, "git")) + ":/usr/bin:/bin", "HOME=" + repo}
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("deploy.sh --print-targets: %v\n%s", err, out)
+			}
+			var services []corev1.Service
+			var dep *appsv1.Deployment
+			for _, doc := range strings.Split(string(out), "\n---\n") {
+				var meta struct{ Kind string }
+				if err := yaml.Unmarshal([]byte(doc), &meta); err != nil {
+					t.Fatalf("decoding %q: %v", doc, err)
+				}
+				switch meta.Kind {
+				case "Deployment":
+					dep = &appsv1.Deployment{}
+					if err := yaml.UnmarshalStrict([]byte(doc), dep); err != nil {
+						t.Fatal(err)
+					}
+				case "Service":
+					var svc corev1.Service
+					if err := yaml.UnmarshalStrict([]byte(doc), &svc); err != nil {
+						t.Fatal(err)
+					}
+					services = append(services, svc)
+				}
+			}
+			if dep == nil || len(services) != 3 {
+				t.Fatalf("got a Deployment %v and %d Services, want one and 3", dep != nil, len(services))
+			}
+			c := dep.Spec.Template.Spec.Containers[0]
+			if c.Image != tc.wantImage {
+				t.Errorf("target image = %q, want %q", c.Image, tc.wantImage)
+			}
+			for _, a := range tc.wantArgs {
+				if !slices.Contains(c.Args, a) {
+					t.Errorf("target args %v lack %q", c.Args, a)
+				}
+			}
+			if tc.wantArgs == nil && slices.ContainsFunc(c.Args, func(a string) bool { return strings.Contains(a, "listen-ports") }) {
+				t.Errorf("target args %v listen on port ranges without --port-per-service", c.Args)
+			}
+			for i, svc := range services {
+				wantHTTP, wantHTTPS := tc.wantPorts(i)
+				if p := svc.Spec.Ports; len(p) != 2 || p[0].TargetPort != wantHTTP || p[1].TargetPort != wantHTTPS {
+					t.Errorf("Service %s ports %v, want targetPorts %v and %v", svc.Name, p, wantHTTP.String(), wantHTTPS.String())
+				}
+			}
+		})
+	}
 }
