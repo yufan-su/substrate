@@ -15,13 +15,15 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
+
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 )
 
 // Process metrics every Go component serves on its Prometheus port. They are
@@ -82,84 +84,61 @@ const (
 
 // parseProcessMetrics reads the process CPU and RSS from Prometheus text.
 func parseProcessMetrics(body []byte) (cpuSeconds, rssBytes float64, err error) {
-	found := map[string]float64{}
-	sc := bufio.NewScanner(bytes.NewReader(body))
-	sc.Buffer(make([]byte, 64*1024), 1<<20)
-	for sc.Scan() {
-		line := sc.Text()
-		if line == "" || line[0] == '#' {
-			continue
-		}
-		name, rest, ok := strings.Cut(line, " ")
-		if !ok || (name != metricProcessCPU && name != metricProcessRSS) {
-			continue
-		}
-		// An optional timestamp may follow the value.
-		v, err := strconv.ParseFloat(strings.Fields(rest)[0], 64)
-		if err != nil {
-			return 0, 0, fmt.Errorf("parsing %s: %w", name, err)
-		}
-		found[name] = v
-	}
-	if err := sc.Err(); err != nil {
+	parser := expfmt.NewTextParser(model.UTF8Validation)
+	families, err := parser.TextToMetricFamilies(bytes.NewReader(body))
+	if err != nil {
 		return 0, 0, err
 	}
-	cpu, ok := found[metricProcessCPU]
+	value := func(name string) (float64, bool) {
+		for _, m := range families[name].GetMetric() {
+			if v, ok := sampleValue(m); ok {
+				return v, true
+			}
+		}
+		return 0, false
+	}
+	cpu, ok := value(metricProcessCPU)
 	if !ok {
 		return 0, 0, fmt.Errorf("no %s in the metrics", metricProcessCPU)
 	}
-	return cpu, found[metricProcessRSS], nil
+	rss, _ := value(metricProcessRSS)
+	return cpu, rss, nil
 }
 
-// parseEnvoyStats reads the gateway's /stats/prometheus text and returns
+// sampleValue is a counter's, gauge's or untyped sample's value.
+func sampleValue(m *dto.Metric) (float64, bool) {
+	switch {
+	case m.Counter != nil:
+		return m.Counter.GetValue(), true
+	case m.Gauge != nil:
+		return m.Gauge.GetValue(), true
+	case m.Untyped != nil:
+		return m.Untyped.GetValue(), true
+	}
+	return 0, false
+}
+
+// parseEnvoyStats decodes the gateway's /stats/prometheus text and returns
 // the stats in envoyStats for the clusters in envoyClusters, keyed by their
-// admin names. Every other line, including comments and histogram buckets,
-// is skipped.
+// admin names. Other families and clusters are dropped. A body that is not
+// Prometheus text yields nothing, which readEnvoy counts as a failed read.
 func parseEnvoyStats(body []byte) map[string]float64 {
 	out := map[string]float64{}
-	for line := range strings.Lines(string(body)) {
-		line = strings.TrimSpace(line)
-		if line == "" || line[0] == '#' {
-			continue
+	parser := expfmt.NewTextParser(model.UTF8Validation)
+	families, err := parser.TextToMetricFamilies(bytes.NewReader(body))
+	if err != nil {
+		return out
+	}
+	for metric, stat := range envoyStats {
+		for _, m := range families[metric].GetMetric() {
+			cluster := labelMap(m)["envoy_cluster_name"]
+			if !slices.Contains(envoyClusters, cluster) {
+				continue
+			}
+			if v, ok := sampleValue(m); ok {
+				out["cluster."+cluster+"."+stat] = v
+			}
 		}
-		name, rest, ok := strings.Cut(line, "{")
-		if !ok {
-			continue
-		}
-		stat, ok := envoyStats[name]
-		if !ok {
-			continue
-		}
-		labels, value, ok := strings.Cut(rest, "}")
-		if !ok {
-			continue
-		}
-		cluster := promLabel(labels, "envoy_cluster_name")
-		if !slices.Contains(envoyClusters, cluster) {
-			continue
-		}
-		// An optional timestamp may follow the value.
-		fields := strings.Fields(value)
-		if len(fields) == 0 {
-			continue
-		}
-		v, err := strconv.ParseFloat(fields[0], 64)
-		if err != nil {
-			continue
-		}
-		out["cluster."+cluster+"."+stat] = v
 	}
 	return out
-}
-
-// promLabel returns the value of label name in a Prometheus label list such
-// as `a="x",b="y"`, or "" when it is absent.
-func promLabel(labels, name string) string {
-	for _, kv := range strings.Split(labels, ",") {
-		k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
-		if ok && k == name {
-			return strings.Trim(v, `"`)
-		}
-	}
-	return ""
 }
