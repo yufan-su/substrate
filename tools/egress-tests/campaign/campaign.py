@@ -71,7 +71,7 @@ whose halves always poll at 1 s and 5 s; the campaign Pod sets it to 5s.
 
 --plan ladder runs the scale ladder instead: a warm-up of all 1000 actors,
 then B x C = 100 x 1000, 300 x 1000, 1000 x 300 and 1000 x 1000, with a
-gateway restart between rungs, and a worker reshape to 44 x 7Gi before
+gateway restart between rungs, and a worker reshape to 80 x 7Gi on 8 nodes before
 the last. Each rung runs for its first round, from the
 campaign's fit, plus 3 min to settle, and rungs with B >= 300 poll progress
 every 15 s, since each poll asks all B actors at once. It has no base check,
@@ -228,7 +228,7 @@ def ladder_plan(ctx: str, kubeconfig: str = "", scripts: str = SCRIPTS_PLACEHOLD
         if i > 1:
             note = f"before rung {i} (B={b} C={c}): restart the gateway"
             if b * c > LADDER_RESHAPE_ABOVE:
-                note = (f"before rung {i} (B={b} C={c}): reshape the workers to 44 x 7Gi for the worker pods' "
+                note = (f"before rung {i} (B={b} C={c}): reshape the workers to 80 x 7Gi on 8 nodes for the worker pods' "
                         "source ports, then restart the gateway")
             steps += [owner(f"before-rung{i}", note, restart_gw, restarts=True)]
         steps += [run(f"L{i}-c{c:04d}-b{b:04d}", b, c, duration=ladder_duration(b, c),

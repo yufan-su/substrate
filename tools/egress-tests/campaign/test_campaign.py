@@ -123,7 +123,7 @@ class LadderPlanTest(unittest.TestCase):
         owners = [s for s in steps if s.kind == "owner"]
         self.assertEqual([s.name for s in owners], ["start", "before-rung2", "before-rung3", "before-rung4"])
         self.assertTrue(all(s.restarts for s in owners))
-        self.assertEqual(["44 x 7Gi" in s.note for s in owners], [False, False, False, True])
+        self.assertEqual(["80 x 7Gi" in s.note for s in owners], [False, False, False, True])
         self.assertFalse(any(s.base_check or s.holdout or s.fit for s in steps))
 
     def test_a_step_interval_overrides_the_env(self):
