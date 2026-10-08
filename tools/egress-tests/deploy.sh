@@ -33,8 +33,8 @@ ATESPACE="egress-tests"
 TEMPLATE="egress-tests-actor"
 POOL_NAMESPACE="egress-tests"
 TARGET_NAMESPACE="egress-tests-targets"
-# The egress policy admits at most this many hostnames.
-MAX_ENDPOINTS=256
+# Keep in sync with egressapi.MaxEndpoints.
+MAX_ENDPOINTS=1024
 # The egress gateway and what --patch-gateway adds to it. Keep in sync with
 # gateway.go and the gateway-trust-*.yaml manifests.
 SYSTEM_NAMESPACE="ate-system"

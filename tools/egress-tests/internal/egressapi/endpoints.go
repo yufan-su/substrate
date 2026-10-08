@@ -19,9 +19,12 @@ import "fmt"
 // TargetNamespace holds the endpoint Services; deploy.sh creates it.
 const TargetNamespace = "egress-tests-targets"
 
-// MaxEndpoints is the most endpoints a run can use: one egress policy rule
-// admits at most 256 hostnames.
-const MaxEndpoints = 256
+// MaxEndpoints is the most endpoints a run can use. The egress policy
+// splits them across rules of at most MaxRuleHostnames each.
+const MaxEndpoints = 1024
+
+// MaxRuleHostnames is the most hostnames one egress policy rule admits.
+const MaxRuleHostnames = 256
 
 // ServiceName is the name of endpoint i's Service.
 func ServiceName(i int) string {

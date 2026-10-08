@@ -853,6 +853,39 @@ func TestBuildPolicy(t *testing.T) {
 		t.Errorf("policy hostnames = %v", rules)
 	}
 
+	for _, tc := range []struct {
+		n, wantRules int
+	}{{256, 1}, {257, 2}, {1000, 4}, {egressapi.MaxEndpoints, 4}} {
+		p := buildPolicy("ns", tc.n)
+		var http, https []string
+		var httpRules, httpsRules int
+		for _, r := range p.GetRules() {
+			switch {
+			case r.GetHttp() != nil:
+				httpRules++
+				http = append(http, r.GetHttp().GetHostnames()...)
+				if n := len(r.GetHttp().GetHostnames()); n > egressapi.MaxRuleHostnames {
+					t.Errorf("C=%d: an http rule holds %d hostnames, want at most %d", tc.n, n, egressapi.MaxRuleHostnames)
+				}
+			case r.GetHttps() != nil:
+				httpsRules++
+				https = append(https, r.GetHttps().GetHostnames()...)
+				if n := len(r.GetHttps().GetHostnames()); n > egressapi.MaxRuleHostnames {
+					t.Errorf("C=%d: an https rule holds %d hostnames, want at most %d", tc.n, n, egressapi.MaxRuleHostnames)
+				}
+			}
+		}
+		if httpRules != tc.wantRules || httpsRules != tc.wantRules {
+			t.Errorf("C=%d: got %d http and %d https rules, want %d of each", tc.n, httpRules, httpsRules, tc.wantRules)
+		}
+		if !slices.Equal(http, wantHosts(tc.n)) || !slices.Equal(https, wantHosts(tc.n)) {
+			t.Errorf("C=%d: the rules' hostnames are not endpoints 0 through %d, each once", tc.n, tc.n-1)
+		}
+		if !samePolicyRules(buildPolicy("ns", tc.n), p) {
+			t.Errorf("C=%d: samePolicyRules told apart two builds of the same policy", tc.n)
+		}
+	}
+
 	reordered := buildPolicy("ns", 3)
 	slices.Reverse(reordered.Rules[0].Http.Hostnames)
 	slices.Reverse(reordered.Rules)
