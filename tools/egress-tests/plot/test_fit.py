@@ -339,6 +339,37 @@ class ExtractTest(unittest.TestCase):
             p.write_text(json.dumps(report))
             self.assertIsNone(fit.extract(p)["gateway_ws_mib"])
 
+    def test_b_counts_the_actors_that_ran(self):
+        # Three of ten actors died before the end and reported no loop
+        # statistics: B is 7 and the tunnels are theirs, 7 x 10.
+        report = json.loads(FIXTURE.read_text())
+        report["actors"] = [{"name": f"egress-{i}", "stats": {"requests": 1}} for i in range(7)] + \
+                           [{"name": f"egress-{i}"} for i in range(7, 10)]
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "r.json"
+            p.write_text(json.dumps(report))
+            row = fit.extract(p)
+        self.assertEqual((row["B"], row["C"], row["T"], row["lost_actors"]), (7, 10, 70, 3))
+        # Without per-actor statistics every configured actor ran.
+        row = fit.extract(FIXTURE)
+        self.assertEqual((row["B"], row["T"], row["lost_actors"]), (10, 100, 0))
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "runs.csv"
+            fit.write_csv([row], str(out))
+            self.assertIn("lost_actors", out.read_text().splitlines()[0].split(","))
+
+    def test_rate_from_the_settled_window(self):
+        # The fixture's loop ran 60,000 requests in 60 s; a settled window
+        # reports its own, slower-start-free, rate.
+        self.assertAlmostEqual(fit.extract(FIXTURE)["R_measured"], 1000.0)
+        report = json.loads(FIXTURE.read_text())
+        steady = next(p for p in report["phases"] if p["name"] == "steady")
+        report["resources"]["settledWindow"] = {"start": steady["start"], "rule": "new-connection plateau", "reqPerS": 95.0}
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "r.json"
+            p.write_text(json.dumps(report))
+            self.assertAlmostEqual(fit.extract(p)["R_measured"], 95.0)
+
     def test_envoy_heap(self):
         # Envoy's allocated heap per gateway pod: the settled max minus the
         # pre-idle max, summed over pods.

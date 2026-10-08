@@ -21,7 +21,11 @@ Usage:
 
 Each response is a linear form in B (active actors), T = B x C (open
 tunnels) and C (Services per actor), fitted by least squares over the
-settled window. Terms whose 95% interval includes zero are dropped one at
+settled window. B counts the actors that reported loop statistics: an
+actor whose sandbox died during the run opened its tunnels and closed
+them again, so the settled window holds the survivors' tunnels alone. The
+configured count less B is the lost_actors column. The request rate is
+the settled window's when the driver measured one. Terms whose 95% interval includes zero are dropped one at
 a time. Holdouts are scored against the fit: CPU within 15% or 0.02 core,
 whichever is larger; memory within 15%; settled p99 within two histogram
 buckets. Exits 1 when a holdout misses, and 2 when the runs, provisional
@@ -221,17 +225,25 @@ def extract(path: str | Path, base: str = "") -> dict:
     run = rr.load_run(path)
     rep = run.report
     cfg, loop, res = rep["config"], rep.get("loop") or {}, rep.get("resources") or {}
-    B, C = cfg["parallel"], cfg["endpoints"]
+    # The actors that reported loop statistics ran to the end; one whose
+    # sandbox died opened its tunnels and closed them again before the
+    # settled window. A report without per-actor statistics ran them all.
+    ran = sum(1 for a in rep.get("actors") or [] if a.get("stats"))
+    B, C = ran or cfg["parallel"], cfg["endpoints"]
     s0, s1 = run.phases["steady"]
     settled = res.get("settledWindow")
     lo = rr.parse_time(settled["start"]) if settled else s0
     elapsed = loop.get("elapsed", 0) / 1e9
     row = {
         "run": Path(path).name, "B": B, "C": C, "T": B * C,
+        "lost_actors": cfg["parallel"] - B,
         # Every driver report names its scheme; one that does not is not a
         # report this fit knows, and must not pass as HTTP.
         "scheme": cfg["scheme"],
-        "R_measured": loop.get("requests", 0) / elapsed if elapsed else 0.0,
+        # The settled window's rate when the driver measured one: the first
+        # round of connects runs slower than the paced loop that follows.
+        "R_measured": (settled["reqPerS"] if settled and settled.get("reqPerS")
+                       else loop.get("requests", 0) / elapsed if elapsed else 0.0),
         "interval_ms": cfg.get("requestInterval", 0) / 1e6,
         "base": base or rep.get("base", ""),
         "breakers": rep.get("breakers", ""),
@@ -401,7 +413,7 @@ def score(fits: dict[str, Fit], holdout: dict) -> list[tuple[str, float, float, 
 
 # ---- output ---------------------------------------------------------------
 
-CSV_FIELDS = ["run", "provisional", "B", "C", "T", "scheme", "R_measured", "interval_ms", "base", "breakers", "warmup",
+CSV_FIELDS = ["run", "provisional", "B", "C", "T", "lost_actors", "scheme", "R_measured", "interval_ms", "base", "breakers", "warmup",
               "policies_updated", "cleartext_active_at_start", "cleartext_active_max", "settled_rule",
               "gateway_ws_base_mib", "envoy_heap_floor_mib", *FORMS]
 
@@ -477,7 +489,7 @@ def fit_document(rows: list[dict], fits: dict[str, Fit], holdouts: list[dict] = 
     rates = [r["R_measured"] / r["B"] for r in fitting if r.get("R_measured") and r["B"]]
     floors = [r["envoy_heap_floor_mib"] for r in fitting if r.get("envoy_heap_floor_mib") is not None]
     pools = [r["cleartext_active_max"] / r["C"] for r in fitting if r.get("cleartext_active_max") and r["C"]]
-    keep = ["run", "provisional", "B", "C", "T", "R_measured", "cleartext_active_max", *FORMS]
+    keep = ["run", "provisional", "B", "C", "T", "lost_actors", "R_measured", "cleartext_active_max", *FORMS]
     scored = []
     for h in holdouts:
         responses = {resp: {"predicted": pred, "halfWidth": half, "measured": meas, "ok": ok}

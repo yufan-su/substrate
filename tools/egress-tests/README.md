@@ -365,6 +365,10 @@ python3 -m venv /tmp/egress-plot && /tmp/egress-plot/bin/pip install -r tools/eg
 coefficients, covariance and residual variance, the rows it came from, the
 holdout scores, and the per-actor request rate, Envoy's pre-idle heap and the
 gateway-to-target connections per Service measured across the runs.
+B counts the actors that reported loop statistics, not the configured
+count: an actor whose sandbox died during the run opened its tunnels and
+closed them again before the settled window. `lost_actors` in `runs.csv` is
+the difference. The request rate is the settled window's.
 `plot/predictor.py` turns that into one offline HTML page: sliders for B and
 C, each component's predicted cores, cores per 1000 req/s, Envoy heap, the
 gateway's high-water working set, worker memory, p99 and first round, all with
