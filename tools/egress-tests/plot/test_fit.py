@@ -370,6 +370,31 @@ class ExtractTest(unittest.TestCase):
             p.write_text(json.dumps(report))
             self.assertAlmostEqual(fit.extract(p)["R_measured"], 95.0)
 
+    def test_ws_delta_from_the_pre_idle_samples_without_a_pod_baseline(self):
+        # A report whose baseline sums the containers but not the pod
+        # cgroups: the pod cgroups' pre-idle maxima come from the series.
+        pre = (fit.rr.parse_time(at(0)), fit.rr.parse_time(at(30)))
+        lo, hi = fit.rr.parse_time(at(60)), fit.rr.parse_time(at(100))
+
+        def ws(t, pod, mib):
+            return {"metric": "working_set_bytes", "source": "cadvisor", "component": "workers",
+                    "pod": pod, "container": "POD", "t": at(t), "value": mib * 2**20}
+        series = [ws(0, "w-a", 100), ws(20, "w-a", 120), ws(70, "w-a", 500), ws(90, "w-a", 450),
+                  ws(10, "w-b", 50), ws(80, "w-b", 300)]
+        run = synthetic_run(series)
+        run.phases["pre-idle"] = pre
+        run.report["resources"]["baseline"] = {"workers": {"workingSetBytes": 100 * 2**20, "cpuCores": {"mean": 0, "max": 0}}}
+        self.assertAlmostEqual(fit.ws_delta_mib(run, "workers", lo, hi), (500 - 120) + (300 - 50))
+        # A pod with steady samples but none at pre-idle leaves no delta.
+        run = synthetic_run(series + [ws(75, "w-c", 10)])
+        run.phases["pre-idle"] = pre
+        run.report["resources"]["baseline"] = {"workers": {"workingSetBytes": 100 * 2**20}}
+        self.assertIsNone(fit.ws_delta_mib(run, "workers", lo, hi))
+        # Without a pre-idle phase there is nothing like for like.
+        run = synthetic_run(series)
+        run.report["resources"]["baseline"] = {"workers": {"workingSetBytes": 100 * 2**20}}
+        self.assertIsNone(fit.ws_delta_mib(run, "workers", lo, hi))
+
     def test_envoy_heap(self):
         # Envoy's allocated heap per gateway pod: the settled max minus the
         # pre-idle max, summed over pods.

@@ -145,7 +145,8 @@ def summed_mean(per_series: dict, lo: float, hi: float) -> float | None:
 
 def ws_delta_mib(run: rr.Run, component: str, lo: float, hi: float) -> float | None:
     """Steady max minus the baseline, summed over pods, from the pod cgroups.
-    The baseline is the driver's pre-idle maximum when the run has one."""
+    The baseline is the driver's pre-idle maximum when the run has one, else
+    the pod cgroups' own samples over the pre-idle phase."""
     base = ((run.report.get("resources") or {}).get("baseline") or {}).get(component)
     by_pod: dict[str, list[tuple[float, float]]] = {}
     for r in run.series("working_set_bytes", source_for(run, "working_set_bytes", component)):
@@ -157,10 +158,19 @@ def ws_delta_mib(run: rr.Run, component: str, lo: float, hi: float) -> float | N
         # Like from like: the pod cgroups' steady maxima less the pod
         # cgroups' pre-idle maxima. The component's workingSetBytes sums
         # its containers and sits below the pod cgroup.
-        if not base.get("podWorkingSetBytes"):
-            return None
         steady = sum(max((v for t, v in pts if lo <= t <= hi), default=0.0) for pts in by_pod.values())
-        return (steady - base["podWorkingSetBytes"]) / 2**20
+        if base.get("podWorkingSetBytes"):
+            return (steady - base["podWorkingSetBytes"]) / 2**20
+        # A report whose driver summed the containers but not the pod
+        # cgroups: the pod cgroups' pre-idle maxima are in the series. A pod
+        # without pre-idle samples leaves the delta undefined, not short.
+        pre = run.phases.get("pre-idle")
+        if not pre:
+            return None
+        idle = [max((v for t, v in pts if pre[0] <= t <= pre[1]), default=None) for pts in by_pod.values()]
+        if any(m is None for m in idle):
+            return None
+        return (steady - sum(idle)) / 2**20
     start = min(t for pts in by_pod.values() for t, _ in pts)
     total = 0.0
     found = False
