@@ -145,11 +145,20 @@ class PageScriptTest(unittest.TestCase):
         doc["ratePerActor"] = None
         self.assertEqual(self.run_js(doc, "return [rateFromFit, rate];"), [False, 9.7])
 
+    def test_presets_and_ranges(self):
+        doc = document()
+        self.assertEqual(self.run_js(doc, "return Object.keys(PRESETS);"), ["ladder", "campaign", "stock"])
+        self.assertEqual(self.run_js(doc, "return [PRESETS.ladder, SLIDER, [state.M, state.P]];"),
+                         [{"M": 1100000, "P": 1100000}, {"B": [1, 1000], "C": [1, 1000]}, [1100000, 1100000]])
+        self.assertEqual(self.run_js(doc, "return ticks(1000);"), [0, 250, 500, 750, 1000])
+
     def test_clamp(self):
         doc = document()  # pool per Service 8
         for name, m, p, b, want in [
+            ("ladder, B=1000: the slider's 1000", 1100000, 1100000, 1000, 1000),
+            ("ladder, B=1000, M=300000: mitm binds", 300000, 1100000, 1000, 300),
             ("campaign, B=50: mitm binds", 16384, 16384, 50, 327),
-            ("campaign, B=10: the slider's 512", 16384, 16384, 10, 512),
+            ("campaign, B=10: the slider's 1000", 16384, 16384, 10, 1000),
             ("stock, B=5: cleartext binds", 1024, 1024, 5, 128),
             ("stock, B=10: mitm binds", 1024, 1024, 10, 102),
         ]:
@@ -165,7 +174,8 @@ class PageScriptTest(unittest.TestCase):
             ("past the cleartext pool", 1, 2049, False),
         ]:
             with self.subTest(name):
-                self.assertEqual(self.run_js(doc, f"return feasible({b}, {c});"), want)
+                self.assertEqual(self.run_js(doc, f"Object.assign(state, PRESETS.campaign); return feasible({b}, {c});"), want)
+        self.assertTrue(self.run_js(doc, "return feasible(1000, 1000);"))
 
 
 if __name__ == "__main__":

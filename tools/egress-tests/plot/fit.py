@@ -457,17 +457,19 @@ def print_fits(fits: dict[str, Fit], out=sys.stdout, rows: list[dict] = ()) -> N
             print(f"  {t:>3} {f.coef[i]: .5g}  [{lo:.5g}, {hi:.5g}]", file=out)
 
 
-# The gateway pod's working set over Envoy's live heap, 1.1 GiB over
-# 1.0 GiB, observed once at the 12,800-tunnel high-water mark of one run:
-# allocator retention, ext-proc and sdsmint. The pod's working set has no
+# The gateway pod's working set over Envoy's live heap: allocator
+# retention, ext-proc and sdsmint. 1.1 GiB over 1.0 GiB at the 12,800-tunnel
+# high-water mark of one run, and 9 to 13% over the heap at every rung of
+# the ladder from 100,000 to 1,000,000 tunnels. The pod's working set has no
 # fit of its own once it ratchets. Written to the JSON as an assumption,
 # with its source, not as a fitted figure.
 RSS_OVER_HEAP = 1.1
-RSS_OVER_HEAP_SOURCE = "one run at 12,800 tunnels, 2026-10-06: pod working set 1.1 GiB over 1.0 GiB of heap"
+RSS_OVER_HEAP_SOURCE = ("pod working set 1.1 GiB over 1.0 GiB of heap at 12,800 tunnels, 2026-10-06, "
+                        "and 9 to 13% over the heap from 100,000 to 1,000,000 tunnels, 2026-10-08")
 
 # (B, C) points at which --json records Fit.predict, so a consumer that
 # re-implements the prediction can check itself.
-CHECK_POINTS = [(10, 10), (50, 128), (100, 160)]
+CHECK_POINTS = [(10, 10), (50, 128), (100, 160), (1000, 1000)]
 
 JSON_SCHEMA = 1
 

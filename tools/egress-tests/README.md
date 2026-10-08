@@ -370,20 +370,23 @@ count: an actor whose sandbox died during the run opened its tunnels and
 closed them again before the settled window. `lost_actors` in `runs.csv` is
 the difference. The request rate is the settled window's.
 `plot/predictor.py` turns that into one offline HTML page: sliders for B and
-C, each component's predicted cores, cores per 1000 req/s, Envoy heap, the
-gateway's high-water working set, worker memory, p99 and first round, all with
-95% prediction intervals, and the measured runs on the B × C plane.
+C, each to 1000, each component's predicted cores, cores per 1000 req/s,
+Envoy heap, the gateway's high-water working set, worker memory, p99 and
+first round, all with 95% prediction intervals, and the measured runs on the
+B × C plane.
 
-The page enforces both gateway breakers, with a campaign preset (16384 and
-16384) and a stock-install preset (1024 and 1024). B × C stays within
-`mitm_internal`'s max_connections. The largest measured connections per
-Service × C stays within `egress_forward_proxy_cleartext`'s. Each slider stops
-at the first breaker to bind and names it. `?B=50&C=128&M=16384&P=16384`
-opens a point. The page checks its own predictions against the ones fit.py
-recorded, and shows nothing else if they differ.
+The page enforces both gateway breakers, with a ladder preset (1,100,000 and
+1,100,000, the 2026-10-08 ladder to 1,000,000 tunnels), a campaign preset
+(16384 and 16384) and a stock-install preset (1024 and 1024). B × C stays
+within `mitm_internal`'s max_connections. The largest measured connections
+per Service × C stays within `egress_forward_proxy_cleartext`'s. Each slider
+stops at the first breaker to bind and names it.
+`?B=50&C=128&M=16384&P=16384` opens a point. The page checks its own
+predictions against the ones fit.py recorded, and shows nothing else if they
+differ.
 
 ```bash
-/tmp/egress-plot/bin/python tools/egress-tests/plot/fit.py A-*.json C-*.json --json fit.json
+/tmp/egress-plot/bin/python tools/egress-tests/plot/fit.py A-*.json C-*.json L?-*.json --json fit.json
 /tmp/egress-plot/bin/python tools/egress-tests/plot/predictor.py fit.json -o predictor.html
 ```
 
