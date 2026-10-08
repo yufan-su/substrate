@@ -69,7 +69,53 @@ const (
 	maxLiveGap = 5 * time.Second
 	// maxSlowShare is the share of intervals that may exceed the soft gap.
 	maxSlowShare = 0.05
+	// maxSourceFailShare is the share of a target's reads that may fail
+	// before its data is judged unreliable: a failed read costs one point of
+	// a cumulative counter, like a slow interval in gapVerdict, so a few are
+	// resolution lost, and many are a source that cannot be trusted.
+	maxSourceFailShare = 0.05
+	// minSourceReads is the read count below which a failure share means
+	// nothing: at 5% that is 20 reads. Fewer reads with a failure are INFO.
+	minSourceReads = 20
 )
+
+// checkSourceReads reports whether each target of each source answered its
+// reads. The other checks judge only the readings that exist, so a target
+// that answered nothing, or failed more than maxSourceFailShare of its
+// reads, would otherwise pass by leaving holes. Targets are judged one by
+// one: one dead reader among twenty must not hide in a pooled share.
+func checkSourceReads(sources []sourceInfo, reads, errors map[string]int) []verifyResult {
+	keys := map[string]bool{}
+	for k := range reads {
+		keys[k] = true
+	}
+	for k := range errors {
+		keys[k] = true
+	}
+	want := fmt.Sprintf("reads answered, at most %.0f%% failed", 100*maxSourceFailShare)
+	seen := map[string]bool{}
+	var out []verifyResult
+	for _, k := range slices.Sorted(maps.Keys(keys)) {
+		source, _, _ := strings.Cut(k, "/")
+		seen[source] = true
+		ok, failed := reads[k], errors[k]
+		res := verifyResult{Check: "source", Scope: k, Want: want, Got: fmt.Sprintf("%d reads, %d failed", ok, failed)}
+		switch {
+		case ok == 0:
+		case failed > 0 && ok+failed < minSourceReads:
+			res = res.info("too few reads to judge a share")
+		default:
+			res.Pass = float64(failed) <= maxSourceFailShare*float64(ok+failed)
+		}
+		out = append(out, res)
+	}
+	for _, src := range sources {
+		if !seen[src.Name] {
+			out = append(out, verifyResult{Check: "source", Scope: src.Name, Want: want, Got: "no reads"})
+		}
+	}
+	return out
+}
 
 // within reports whether got is within rel of want, or within abs of it.
 func within(got, want, rel, abs float64) bool {

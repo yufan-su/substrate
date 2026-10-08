@@ -531,6 +531,7 @@ func (r *runner) finishResources(rep *report) {
 	if rep.Loop != nil {
 		newConns = rep.Loop.NewConns
 	}
+	res.Verify = append(res.Verify, checkSourceReads(res.Sources, res.Reads, res.Errors)...)
 	res.Verify = append(res.Verify, checkEnvoyConnections(res.Envoy, newConns), checkDriverOverhead(res.Driver))
 	var run phaseMark
 	if len(rep.Phases) > 0 {
