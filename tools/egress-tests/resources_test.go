@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 )
 
 // fakeGetter answers raw API server paths. Each Go process's CPU counter
@@ -804,5 +805,20 @@ func TestWaitCleartextIdle(t *testing.T) {
 				t.Errorf("recorded gate %+v, want %+v", s.rep.CleartextGate, got)
 			}
 		})
+	}
+}
+
+// TestSamplerConfigHasATimeout pins the per-read timeout: proxy requests
+// are exempt from the API server's request timeout, so without it a read
+// that never answers holds the run.
+func TestSamplerConfigHasATimeout(t *testing.T) {
+	t.Parallel()
+	cfg := &rest.Config{}
+	tuneSamplerConfig(cfg)
+	if cfg.Timeout != samplerTimeout || cfg.Timeout <= 0 {
+		t.Errorf("sampler client timeout = %v, want %v", cfg.Timeout, samplerTimeout)
+	}
+	if cfg.QPS != samplerQPS || cfg.Burst != samplerBurst {
+		t.Errorf("sampler rate limit = %v/%v, want %v/%v", cfg.QPS, cfg.Burst, samplerQPS, samplerBurst)
 	}
 }

@@ -53,12 +53,24 @@ const (
 
 // newSamplerGetter builds a rawGetter with its own client and rate limit, so
 // sampling neither waits behind the run's own API calls nor delays them.
+// samplerTimeout bounds one read. The API server does not apply its own
+// request timeout to proxy requests, so a pod or node that accepts the
+// connection and never answers would otherwise hold the read, and with it
+// the phase-boundary reads and the run, for as long as TCP allows.
+const samplerTimeout = 30 * time.Second
+
+// tuneSamplerConfig sets the sampler's rate limit and per-read timeout.
+func tuneSamplerConfig(cfg *rest.Config) {
+	cfg.QPS, cfg.Burst = samplerQPS, samplerBurst
+	cfg.Timeout = samplerTimeout
+}
+
 func newSamplerGetter(kubeconfig, kubeContext string) (rawGetter, error) {
 	cfg, err := ateclient.LoadKubeConfig(kubeconfig, kubeContext)
 	if err != nil {
 		return nil, fmt.Errorf("loading kubeconfig: %w", err)
 	}
-	cfg.QPS, cfg.Burst = samplerQPS, samplerBurst
+	tuneSamplerConfig(cfg)
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("creating the sampler's Kubernetes client: %w", err)
