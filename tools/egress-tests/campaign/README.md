@@ -157,6 +157,14 @@ design; nothing else should.
   `retry.go`). Suspending 1000 actors at once takes 28 to 31 s. With the earlier 30 s deadline the
   retry hit a sandbox that had just saved and exited, and ateapi marked the actor CRASHED. The
   1000 x 1000 rung of record suspended in 29.9 s and lost none; a 7-minute repeat at 30.1 s lost 45.
+- **More than one gateway replica.** Spreading replicas one per node needs a pod anti-affinity on
+  `kubernetes.io/hostname`; with it, a rolling restart deadlocks at the default 25% max unavailable,
+  because the new pod cannot schedule while an old one holds every node. Set `maxUnavailable: 100%`
+  for the restart and put it back. Replicas split the tunnels evenly but each keeps its own
+  connections to every target and its own policy cache, so CPU per request rises with the count.
+- **HTTPS opening phase.** With 1000 actors opening tunnels at once, the first pass sees client-side
+  TLS handshake and request timeouts (about 0.01 to 0.03% of requests) and actor DNS lookups slow
+  to a p50 above 60 ms. Nothing fails at the gateway; the steady window is clean.
 - **gVisor before `80bb741691be`.** Sandboxes die silently during the tunnel-opening phase, stay
   RUNNING, and their snapshots fail to restore. This branch pins release 20260907.0.
 - **anetd memory on small nodes.** Re-pointing 1000 Services at once took two 16 GiB system nodes
