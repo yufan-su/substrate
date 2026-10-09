@@ -30,11 +30,13 @@ import (
 // a full worker pool, an unavailable or slow server, or a concurrent update.
 type backoff struct {
 	initial, max time.Duration
-	// rpcTimeout bounds each attempt.
+	// rpcTimeout bounds each attempt. A suspend of 1000 actors at once queues
+	// checkpoints on each node for about 30 s, and an attempt cut off while
+	// atelet is still saving leaves the retry to checkpoint an exited sandbox.
 	rpcTimeout time.Duration
 }
 
-var defaultBackoff = backoff{initial: 50 * time.Millisecond, max: 2 * time.Second, rpcTimeout: 30 * time.Second}
+var defaultBackoff = backoff{initial: 50 * time.Millisecond, max: 2 * time.Second, rpcTimeout: 2 * time.Minute}
 
 // retry runs call until it succeeds, fails for good, or ctx ends.
 func (b backoff) retry(ctx context.Context, call func(context.Context) error) error {
