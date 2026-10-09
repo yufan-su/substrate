@@ -66,6 +66,7 @@ type runConfig struct {
 	Template          string        `json:"template"`
 	Scheme            string        `json:"scheme"`
 	Pick              string        `json:"pick"`
+	PolicyHosts       string        `json:"policyHosts"`
 }
 
 func (c *runConfig) validate() error {
@@ -94,6 +95,8 @@ func (c *runConfig) validate() error {
 		return fmt.Errorf("--scheme must be %s or %s, got %q", egressapi.SchemeHTTP, egressapi.SchemeHTTPS, c.Scheme)
 	case c.Pick != pickFirst && c.Pick != pickRandom:
 		return fmt.Errorf("--pick must be %s or %s, got %q", pickFirst, pickRandom, c.Pick)
+	case c.PolicyHosts != policyHostsExact && c.PolicyHosts != policyHostsWildcard:
+		return fmt.Errorf("--policy-hosts must be %s or %s, got %q", policyHostsExact, policyHostsWildcard, c.PolicyHosts)
 	case c.Atespace == "" || c.Template == "":
 		return errors.New("--atespace and --template are required")
 	}
@@ -272,7 +275,7 @@ func (r *runner) run(ctx context.Context) (*report, error) {
 // actor, whether it is ready to resume.
 func (r *runner) createActors(ctx context.Context, rep *report) []bool {
 	n := r.cfg.Actors
-	want := buildPolicy(r.cfg.Atespace, r.cfg.Endpoints)
+	want := buildPolicy(r.cfg.Atespace, r.cfg.Endpoints, r.cfg.PolicyHosts)
 	ok := make([]bool, n)
 	res := newPhase()
 	var reused, updated, done atomic.Int64

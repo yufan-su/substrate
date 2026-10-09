@@ -407,6 +407,7 @@ func testConfig() runConfig {
 		Template:          "egress-tests-actor",
 		Scheme:            egressapi.SchemeHTTP,
 		Pick:              pickFirst,
+		PolicyHosts:       policyHostsExact,
 	}
 }
 
@@ -838,7 +839,7 @@ func TestCleanup(t *testing.T) {
 }
 
 func TestBuildPolicy(t *testing.T) {
-	p := buildPolicy("ns", 3)
+	p := buildPolicy("ns", 3, policyHostsExact)
 	if p.GetMetadata().GetName() != "default" || p.GetMetadata().GetAtespace() != "ns" {
 		t.Errorf("policy metadata = %v, want default in ns", p.GetMetadata())
 	}
@@ -856,7 +857,7 @@ func TestBuildPolicy(t *testing.T) {
 	for _, tc := range []struct {
 		n, wantRules int
 	}{{256, 1}, {257, 2}, {1000, 4}, {egressapi.MaxEndpoints, 4}} {
-		p := buildPolicy("ns", tc.n)
+		p := buildPolicy("ns", tc.n, policyHostsExact)
 		var http, https []string
 		var httpRules, httpsRules int
 		for _, r := range p.GetRules() {
@@ -881,19 +882,19 @@ func TestBuildPolicy(t *testing.T) {
 		if !slices.Equal(http, wantHosts(tc.n)) || !slices.Equal(https, wantHosts(tc.n)) {
 			t.Errorf("C=%d: the rules' hostnames are not endpoints 0 through %d, each once", tc.n, tc.n-1)
 		}
-		if !samePolicyRules(buildPolicy("ns", tc.n), p) {
+		if !samePolicyRules(buildPolicy("ns", tc.n, policyHostsExact), p) {
 			t.Errorf("C=%d: samePolicyRules told apart two builds of the same policy", tc.n)
 		}
 	}
 
-	reordered := buildPolicy("ns", 3)
+	reordered := buildPolicy("ns", 3, policyHostsExact)
 	slices.Reverse(reordered.Rules[0].Http.Hostnames)
 	slices.Reverse(reordered.Rules)
 	httpOnly := &ateapipb.EgressPolicy{Rules: []*ateapipb.EgressRule{{Http: &ateapipb.HTTPRule{Hostnames: wantHosts(3)}}}}
 	switch {
 	case !samePolicyRules(reordered, p):
 		t.Error("samePolicyRules told apart policies that differ only in order")
-	case samePolicyRules(buildPolicy("ns", 2), p):
+	case samePolicyRules(buildPolicy("ns", 2, policyHostsExact), p):
 		t.Error("samePolicyRules missed a different set of hostnames")
 	case samePolicyRules(httpOnly, p):
 		t.Error("samePolicyRules took an http-only policy for one that also allows https")
@@ -1105,11 +1106,11 @@ func TestLostAnswers(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 				defer cancel()
 				if _, err := api.CreateActorEgressPolicy(ctx, &ateapipb.CreateActorEgressPolicyRequest{
-					Actor: &ateapipb.ObjectRef{Atespace: "egress-tests", Name: "egress-0"}, EgressPolicy: buildPolicy("egress-tests", 1),
+					Actor: &ateapipb.ObjectRef{Atespace: "egress-tests", Name: "egress-0"}, EgressPolicy: buildPolicy("egress-tests", 1, policyHostsExact),
 				}); err != nil {
 					t.Fatal(err)
 				}
-				want := buildPolicy("egress-tests", 3)
+				want := buildPolicy("egress-tests", 3, policyHostsExact)
 				changed, err := r.ensurePolicy(ctx, "egress-0", want)
 				if err != nil || !changed {
 					t.Fatalf("ensurePolicy = %v, %v; want true, nil", changed, err)
@@ -1186,6 +1187,42 @@ func TestResumeSource(t *testing.T) {
 			}
 			if got := resumeSource(a); got != tc.want {
 				t.Errorf("resumeSource(%q) = %q, want %q", tc.uri, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildPolicyWildcard(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		n     int
+		rules int
+	}{
+		{name: "one endpoint", n: 1, rules: 2},
+		{name: "a thousand endpoints", n: 1000, rules: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := buildPolicy("ns", tc.n, policyHostsWildcard)
+			if got, want := len(p.GetRules()), tc.rules; got != want {
+				t.Fatalf("rules = %d, want %d", got, want)
+			}
+			want := []string{"*." + egressapi.EndpointDomain}
+			for _, r := range p.GetRules() {
+				var got []string
+				switch {
+				case r.GetHttp() != nil:
+					got = r.GetHttp().GetHostnames()
+				case r.GetHttps() != nil:
+					got = r.GetHttps().GetHostnames()
+				}
+				if !slices.Equal(got, want) {
+					t.Errorf("hostnames = %q, want %q", got, want)
+				}
+			}
+			if samePolicyRules(p, buildPolicy("ns", tc.n, policyHostsExact)) {
+				t.Error("samePolicyRules took the wildcard policy for the exact one")
 			}
 		})
 	}
