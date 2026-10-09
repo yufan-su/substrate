@@ -949,6 +949,14 @@ data:
       - name: egress_forward_proxy
         lb_policy: CLUSTER_PROVIDED
         connect_timeout: 5s
+        # One pool per worker thread per upstream host, so at 1000 hosts and 16
+        # threads the default 1024 connections overflow and HTTPS requests fail
+        # with 503 UO while tunnels open. Sized like the cleartext leg.
+        circuit_breakers:
+          thresholds:
+          - max_connections: 1100000
+            max_pending_requests: 1100000
+            max_requests: 1100000
         cluster_type:
           name: envoy.clusters.dynamic_forward_proxy
           typed_config:
