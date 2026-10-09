@@ -149,10 +149,10 @@ design; nothing else should.
 
 ## 7. Known limits and failure modes
 
-- **Suspend deadline.** The driver gives each `SuspendActor` attempt 30 s and retries
-  (`defaultBackoff` in `retry.go`). Suspending 1000 actors at once takes 28 to 31 s. Past 30 s the
-  retry hits a sandbox that has just saved and exited, and ateapi marks the actor CRASHED. Raise
-  the deadline before 1000-actor runs, or expect a few dozen crashed actors at the end.
+- **Suspend deadline.** The driver gives each `SuspendActor` attempt 2 minutes (`defaultBackoff` in
+  `retry.go`). Suspending 1000 actors at once takes 28 to 31 s. With the earlier 30 s deadline the
+  retry hit a sandbox that had just saved and exited, and ateapi marked the actor CRASHED. The
+  1000 x 1000 rung of record suspended in 29.9 s and lost none; a 7-minute repeat at 30.1 s lost 45.
 - **gVisor before `80bb741691be`.** Sandboxes die silently during the tunnel-opening phase, stay
   RUNNING, and their snapshots fail to restore. This branch pins release 20260907.0.
 - **anetd memory on small nodes.** Re-pointing 1000 Services at once took two 16 GiB system nodes
