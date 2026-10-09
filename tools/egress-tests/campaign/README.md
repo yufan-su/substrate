@@ -136,6 +136,10 @@ kubectl -n egress-tests exec egress-campaign -- sh -c 'cd /out/RUN && nohup /wor
   --output /out/RUN/L4-c1000-b1000.json > /out/RUN/L4-c1000-b1000.txt 2>&1 < /dev/null &'
 ```
 
+For HTTPS, add `--scheme https`. Each actor's policy lists the endpoints it calls by name, so the
+rule has C hostnames; `--policy-hosts wildcard` replaces the list with one pattern covering every
+endpoint, which is the shape the gateway's per-tunnel policy copy does not grow with.
+
 ## 6. Reading the result
 
 `/out/RUN/<rung>.txt` ends with the summary: the `loop` line (requests, req/s, success, new

@@ -28,15 +28,30 @@ import (
 	"github.com/agent-substrate/substrate/tools/egress-tests/internal/egressapi"
 )
 
+// Values of --policy-hosts: the hostnames each actor's policy rules list.
+const (
+	// policyHostsExact lists exactly the hosts of endpoints 0 through C-1.
+	policyHostsExact = "exact"
+	// policyHostsWildcard lists one leftmost-label wildcard that covers every
+	// endpoint, so the rule's size does not grow with C.
+	policyHostsWildcard = "wildcard"
+)
+
 // buildPolicy returns the egress policy every actor gets: HTTP on port 80 and
-// HTTPS on port 443 to exactly the hosts of endpoints 0 through n-1, the ones
-// the actor's loop calls, in rules of at most egressapi.MaxRuleHostnames
-// hosts. Both schemes are always allowed, so a run can switch between them
-// without updating every actor's policy.
-func buildPolicy(atespace string, n int) *ateapipb.EgressPolicy {
-	hosts := make([]string, n)
-	for i := range n {
-		hosts[i] = egressapi.EndpointHost(i)
+// HTTPS on port 443 to the hosts the actor's loop calls. With policyHostsExact
+// those are endpoints 0 through n-1 by name, in rules of at most
+// egressapi.MaxRuleHostnames hosts; with policyHostsWildcard one pattern
+// covers them all. Both schemes are always allowed, so a run can switch
+// between them without updating every actor's policy.
+func buildPolicy(atespace string, n int, hostsMode string) *ateapipb.EgressPolicy {
+	var hosts []string
+	if hostsMode == policyHostsWildcard {
+		hosts = []string{"*." + egressapi.EndpointDomain}
+	} else {
+		hosts = make([]string, n)
+		for i := range n {
+			hosts[i] = egressapi.EndpointHost(i)
+		}
 	}
 	p := &ateapipb.EgressPolicy{Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: "default"}}
 	for chunk := range slices.Chunk(hosts, egressapi.MaxRuleHostnames) {
