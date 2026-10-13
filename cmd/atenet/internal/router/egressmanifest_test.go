@@ -148,6 +148,50 @@ func staticClusters(t *testing.T, raw string) []envoyCluster {
 	return bootstrap.StaticResources.Clusters
 }
 
+// TestEgressManifestsDisableTheConnectStreamIdleTimeout is the other half of
+// the route timeout above. A CONNECT tunnel carries nothing while the actor's
+// connection inside it is idle, and the connection manager's
+// stream_idle_timeout, 5 minutes unless set, resets the whole tunnel when
+// that happens: every keep-alive connection an actor leaves unused that long
+// dies and is reopened. The MITM connection managers already disable it; the
+// CONNECT one is the one that fronts every tunnel.
+func TestEgressManifestsDisableTheConnectStreamIdleTimeout(t *testing.T) {
+	for _, path := range egressManifests {
+		t.Run(path, func(t *testing.T) {
+			var bootstrap envoyBootstrap
+			if err := yaml.Unmarshal([]byte(envoyConfig(t, path)), &bootstrap); err != nil {
+				t.Fatalf("parsing envoy.yaml: %v", err)
+			}
+			found := 0
+			for _, l := range bootstrap.StaticResources.Listeners {
+				for _, fc := range l.FilterChains {
+					for _, f := range fc.Filters {
+						if f.TypedConfig.StatPrefix != "egress_connect" {
+							continue
+						}
+						found++
+						if f.TypedConfig.StreamIdleTimeout == nil {
+							t.Error("the egress_connect connection manager sets no stream_idle_timeout, so Envoy's 5 minute default resets every tunnel idle that long")
+							continue
+						}
+						d, err := time.ParseDuration(*f.TypedConfig.StreamIdleTimeout)
+						if err != nil {
+							t.Errorf("egress_connect stream_idle_timeout %q is not a duration: %v", *f.TypedConfig.StreamIdleTimeout, err)
+							continue
+						}
+						if d != 0 {
+							t.Errorf("egress_connect stream_idle_timeout is %s; it must be 0 to disable it", d)
+						}
+					}
+				}
+			}
+			if found == 0 {
+				t.Fatal("found no egress_connect connection manager; the manifest changed shape and this test is checking nothing")
+			}
+		})
+	}
+}
+
 // envoyRoute is the sliver of an Envoy bootstrap this test reads. Unnamed
 // fields are dropped by the decoder, so the manifests stay free to grow.
 type envoyRoute struct {
@@ -166,7 +210,9 @@ type envoyBootstrap struct {
 			FilterChains []struct {
 				Filters []struct {
 					TypedConfig struct {
-						RouteConfig struct {
+						StatPrefix        string  `json:"stat_prefix"`
+						StreamIdleTimeout *string `json:"stream_idle_timeout"`
+						RouteConfig       struct {
 							VirtualHosts []struct {
 								Routes []envoyRoute `json:"routes"`
 							} `json:"virtual_hosts"`

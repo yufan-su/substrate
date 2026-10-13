@@ -119,6 +119,12 @@ data:
                 # Set windows sizes to values that balance throughput and memory usage.
                 initial_stream_window_size: 1048576
                 initial_connection_window_size: 1048576
+              # A CONNECT tunnel carries nothing while the actor's connection
+              # inside it is idle, so Envoy's default stream idle timeout of
+              # 5 minutes would reset every keep-alive connection an actor
+              # leaves unused that long. The route timeout below is already 0;
+              # this is the other half.
+              stream_idle_timeout: 0s
               upgrade_configs:
               - upgrade_type: CONNECT
               # TODO(liorlieberman): Can we make this cleaner?
@@ -152,7 +158,7 @@ data:
                       # with no per-destination visibility at all.
                       cluster: mitm_internal
                       # Set request timeout to disabled (0) as CONNECT is a long-running stream.
-                      # There will still be a stream_idle_timeout (5 minutes by default).
+                      # The connection manager's stream_idle_timeout is disabled above.
                       timeout: 0s
                       upgrade_configs:
                       - upgrade_type: CONNECT
