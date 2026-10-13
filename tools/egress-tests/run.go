@@ -364,7 +364,7 @@ func (r *runner) ensurePolicy(ctx context.Context, name string, want *ateapipb.E
 	// and version as preconditions, and a version conflict (Aborted) means
 	// another write, possibly an earlier attempt's, moved them.
 	err = r.backoff.retry(ctx, func(ctx context.Context) error {
-		existing, err := r.api.GetActorEgressPolicy(ctx, &ateapipb.GetActorEgressPolicyRequest{Actor: ref})
+		existing, err := r.api.GetActorEgressPolicy(ctx, &ateapipb.GetActorEgressPolicyRequest{Actor: ref, Name: policyName})
 		if err != nil {
 			return err
 		}

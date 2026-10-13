@@ -43,6 +43,10 @@ const (
 // egressapi.MaxRuleHostnames hosts; with policyHostsWildcard one pattern
 // covers them all. Both schemes are always allowed, so a run can switch
 // between them without updating every actor's policy.
+// policyName is the name of an actor's one egress policy; the API accepts
+// no other, and its Get and Delete requests name it explicitly.
+const policyName = "default"
+
 func buildPolicy(atespace string, n int, hostsMode string) *ateapipb.EgressPolicy {
 	var hosts []string
 	if hostsMode == policyHostsWildcard {
@@ -53,7 +57,7 @@ func buildPolicy(atespace string, n int, hostsMode string) *ateapipb.EgressPolic
 			hosts[i] = egressapi.EndpointHost(i)
 		}
 	}
-	p := &ateapipb.EgressPolicy{Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: "default"}}
+	p := &ateapipb.EgressPolicy{Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: policyName}}
 	for chunk := range slices.Chunk(hosts, egressapi.MaxRuleHostnames) {
 		p.Rules = append(p.Rules,
 			&ateapipb.EgressRule{Http: &ateapipb.HTTPRule{Hostnames: slices.Clone(chunk)}},

@@ -157,6 +157,9 @@ func (f *fakeAPI) GetActorEgressPolicy(_ context.Context, in *ateapipb.GetActorE
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("GetActorEgressPolicy", in.GetActor().GetName())
+	if in.GetName() != "default" {
+		return nil, status.Error(codes.InvalidArgument, "name: Required value")
+	}
 	p, ok := f.policies[in.GetActor().GetName()]
 	if !ok {
 		return nil, status.Error(codes.NotFound, "no policy")
