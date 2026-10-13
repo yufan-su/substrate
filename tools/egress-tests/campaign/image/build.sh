@@ -103,7 +103,7 @@ mkdir -p "${CONTEXT_DIR}/campaign" "${CONTEXT_DIR}/plot" "${CONTEXT_DIR}/ref"
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o "${CONTEXT_DIR}/egress-tests" ./tools/egress-tests
 cp tools/egress-tests/campaign/image/Dockerfile "${CONTEXT_DIR}/"
 cp tools/egress-tests/campaign/campaign.py "${CONTEXT_DIR}/campaign/"
-cp tools/egress-tests/plot/fit.py tools/egress-tests/plot/runs.py tools/egress-tests/plot/predictor.py \
+cp tools/egress-tests/plot/fit.py tools/egress-tests/plot/runs.py tools/egress-tests/plot/predictor.py tools/egress-tests/plot/matrix.py \
   tools/egress-tests/plot/predictor.html.tmpl "${CONTEXT_DIR}/plot/"
 cp tools/egress-tests/plot/requirements.txt "${CONTEXT_DIR}/"
 # The Pod passes /work/ref/$(cat /work/ref/base-check-ref) to --base-check-ref.

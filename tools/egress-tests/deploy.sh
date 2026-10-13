@@ -79,6 +79,10 @@ REHEARSAL=false
 # --campaign-id: the runner writes to /out/<id>, so one PVC holds several campaigns.
 CAMPAIGN_ID=""
 CAMPAIGN_PLAN=""
+# --campaign-matrix and --campaign-schemes: the matrix plan's cells and schemes, as campaign.py
+# --matrix and --schemes take them; empty keeps the runner's defaults.
+CAMPAIGN_MATRIX=""
+CAMPAIGN_SCHEMES=""
 # --campaign-memory and --campaign-memory-request: the Pod's memory limit
 # and request. The driver holds every cgroup reader row until the end of a
 # run, about 180 bytes per actor per second, so the ladder's 1000 actors
@@ -138,8 +142,10 @@ usage() {
   echo "  --rehearsal             With --campaign, create the rehearsal Pod ${REHEARSAL_POD} instead"
   echo "  --dry-run               With --campaign, print what it would apply; change nothing"
   echo "  --campaign-id ID        With --campaign, write to /out/ID instead of /out"
-  echo "  --campaign-plan PLAN    With --campaign, the runner's --plan: tunnel-cap or ladder"
+  echo "  --campaign-plan PLAN    With --campaign, the runner's --plan: tunnel-cap, ladder or matrix"
   echo "                          (default: the runner's, tunnel-cap)"
+  echo "  --campaign-matrix LIST  With --campaign-plan matrix: the B x C cells, such as 250x1000,750x1000"
+  echo "  --campaign-schemes LIST With --campaign-plan matrix: http, https or http,https (the default)"
   echo "  --campaign-memory MEM   With --campaign, the Pod's memory limit, in whole Gi; the driver's"
   echo "                          GOMEMLIMIT is set a tenth below (default: ${CAMPAIGN_MEMORY_DEFAULT},"
   echo "                          ${LADDER_MEMORY_DEFAULT} for the ladder)"
@@ -363,6 +369,12 @@ campaign_script() {
     # Quoted, so the Pod's shell leaves a laptop ~ alone.
     owner="${owner} --scripts-dir '${SCRIPTS_DIR}'"
   fi
+  if [[ -n "${CAMPAIGN_MATRIX}" ]]; then
+    owner="${owner} --matrix ${CAMPAIGN_MATRIX}"
+  fi
+  if [[ -n "${CAMPAIGN_SCHEMES}" ]]; then
+    owner="${owner} --schemes ${CAMPAIGN_SCHEMES}"
+  fi
   # campaign.status holds the runner's exit code once it is done: 0 finished,
   # 1 refused. The Pod stays Running either way, so the file is what tells.
   cat <<EOF
@@ -435,19 +447,31 @@ check_campaign_context() {
     echo "Error: --campaign-id '${CAMPAIGN_ID}' must be letters, digits, '.', '_' or '-', not starting with '.'." >&2
     exit 1
   fi
-  if ! [[ "${CAMPAIGN_PLAN}" =~ ^(tunnel-cap|ladder)?$ ]]; then
-    echo "Error: --campaign-plan '${CAMPAIGN_PLAN}' is not tunnel-cap or ladder." >&2
+  if ! [[ "${CAMPAIGN_PLAN}" =~ ^(tunnel-cap|ladder|matrix)?$ ]]; then
+    echo "Error: --campaign-plan '${CAMPAIGN_PLAN}' is not tunnel-cap, ladder or matrix." >&2
+    exit 1
+  fi
+  if ! [[ "${CAMPAIGN_MATRIX}" =~ ^([0-9]+x[0-9]+(,[0-9]+x[0-9]+)*)?$ ]]; then
+    echo "Error: --campaign-matrix '${CAMPAIGN_MATRIX}' is not a comma-separated list of BxC cells." >&2
+    exit 1
+  fi
+  if ! [[ "${CAMPAIGN_SCHEMES}" =~ ^(http|https|http,https|https,http)?$ ]]; then
+    echo "Error: --campaign-schemes '${CAMPAIGN_SCHEMES}' is not http, https or both." >&2
+    exit 1
+  fi
+  if [[ -n "${CAMPAIGN_MATRIX}${CAMPAIGN_SCHEMES}" && "${CAMPAIGN_PLAN}" != matrix ]]; then
+    echo "Error: --campaign-matrix and --campaign-schemes need --campaign-plan matrix." >&2
     exit 1
   fi
   if [[ -z "${CAMPAIGN_MEMORY}" ]]; then
     CAMPAIGN_MEMORY="${CAMPAIGN_MEMORY_DEFAULT}"
-    if [[ "${CAMPAIGN_PLAN}" == ladder ]]; then
+    if [[ "${CAMPAIGN_PLAN}" == ladder || "${CAMPAIGN_PLAN}" == matrix ]]; then
       CAMPAIGN_MEMORY="${LADDER_MEMORY_DEFAULT}"
     fi
   fi
   if [[ -z "${CAMPAIGN_MEMORY_REQUEST}" ]]; then
     CAMPAIGN_MEMORY_REQUEST="${CAMPAIGN_MEMORY_REQUEST_DEFAULT}"
-    if [[ "${CAMPAIGN_PLAN}" == ladder ]]; then
+    if [[ "${CAMPAIGN_PLAN}" == ladder || "${CAMPAIGN_PLAN}" == matrix ]]; then
       CAMPAIGN_MEMORY_REQUEST="${LADDER_MEMORY_REQUEST_DEFAULT}"
     fi
   fi
@@ -732,6 +756,20 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --campaign-plan=*)
       CAMPAIGN_PLAN="${1#*=}"
+      ;;
+    --campaign-matrix)
+      shift
+      CAMPAIGN_MATRIX="$1"
+      ;;
+    --campaign-matrix=*)
+      CAMPAIGN_MATRIX="${1#*=}"
+      ;;
+    --campaign-schemes)
+      shift
+      CAMPAIGN_SCHEMES="$1"
+      ;;
+    --campaign-schemes=*)
+      CAMPAIGN_SCHEMES="${1#*=}"
       ;;
     --campaign-memory)
       shift

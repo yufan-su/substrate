@@ -742,3 +742,91 @@ class FitStopTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MatrixPlanTest(unittest.TestCase):
+    def test_cells_for_each_scheme_then_the_table(self):
+        steps = cp.matrix_plan(CTX)
+        runs = [s for s in steps if s.kind == "run"]
+        self.assertEqual([(s.name, s.B, s.C, s.scheme, s.duration, s.progress_interval) for s in runs], [
+            ("M-http-c1000-b0250", 250, 1000, "http", "13m", ""),
+            ("M-https-c1000-b0250", 250, 1000, "https", "13m", ""),
+            ("M-http-c1000-b0750", 750, 1000, "http", "27m", "15s"),
+            ("M-https-c1000-b0750", 750, 1000, "https", "27m", "15s"),
+            ("M-http-c1000-b1000", 1000, 1000, "http", "34m", "15s"),
+            ("M-https-c1000-b1000", 1000, 1000, "https", "34m", "15s"),
+        ])
+        owners = [s for s in steps if s.kind == "owner"]
+        self.assertEqual([s.name for s in owners], ["start"] + [f"before-{r.name}" for r in runs[1:]])
+        self.assertTrue(all(s.restarts for s in owners))
+        self.assertIn("deploy.sh --deploy --https --endpoints 1000 --cgreader", owners[0].note)
+        self.assertEqual(steps[-1].kind, "table")
+        self.assertTrue(all(s.measured for s in runs))
+        self.assertFalse(any(s.base_check or s.holdout or s.fit for s in steps))
+
+    def test_https_runs_name_every_endpoint_in_the_policy(self):
+        step = cp.run("M-https-c1000-b0250", 250, 1000, scheme="https")
+        args = cp.driver_args("egress-tests", CTX, step, Path("/o"), {})
+        self.assertEqual(args[args.index("--scheme") + 1], "https")
+        self.assertEqual(args[args.index("--policy-hosts") + 1], "exact")
+        http = cp.driver_args("egress-tests", CTX, cp.run("M-http-c1000-b0250", 250, 1000, scheme="http"), Path("/o"), {})
+        self.assertEqual(http[http.index("--scheme") + 1], "http")
+        self.assertNotIn("--policy-hosts", http)
+        self.assertNotIn("--scheme", cp.driver_args("egress-tests", CTX, cp.run("L1", 100, 1000), Path("/o"), {}))
+
+    def test_more_actors_than_the_default_when_b_asks(self):
+        args = cp.driver_args("egress-tests", CTX, cp.run("M-http-c0010-b1500", 1500, 10, scheme="http"), Path("/o"), {})
+        self.assertEqual(args[args.index("--actors") + 1], "1500")
+        self.assertEqual(args[args.index("--parallel") + 1], "1500")
+
+    def test_parse_matrix_and_schemes(self):
+        self.assertEqual(cp.parse_matrix("250x1000, 10X10"), [(250, 1000), (10, 10)])
+        for bad in ("250", "0x10", "ax10", "10x", ""):
+            with self.assertRaises(ValueError):
+                cp.parse_matrix(bad)
+        self.assertEqual(cp.parse_schemes("HTTPS,http"), ["https", "http"])
+        with self.assertRaises(ValueError):
+            cp.parse_schemes("ftp")
+
+    def test_main_builds_the_plan_from_the_flags(self):
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(cp.Runner, "walk") as walk, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            argv = ["--context", CTX, "--driver", "egress-tests", "--out", d, "--plan", "matrix"]
+            self.assertEqual(cp.main(argv + ["--matrix", "10x10,20x10", "--schemes", "http"]), 0)
+            names = [s.name for s in walk.call_args.args[0]]
+            self.assertEqual(names, ["start", "M-http-c0010-b0010", "before-M-http-c0010-b0020", "M-http-c0010-b0020", "table"])
+            self.assertEqual(cp.main(argv + ["--matrix", "nonsense"]), 1)
+            self.assertIn("refused: matrix cell", err.getvalue())
+
+    def test_table_step_tabulates_the_reports_that_exist(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d)
+            (out / "M-http-c0010-b0010.json").write_text("{}")
+            steps = [cp.run("M-http-c0010-b0010", 10, 10, scheme="http"),
+                     cp.run("M-https-c0010-b0010", 10, 10, scheme="https"),
+                     cp.Step("table", name="table")]
+            said, tabulated = [], []
+            r = cp.Runner(CTX, "egress-tests", out, {}, say=said.append,
+                          tabulate=lambda reports, o: tabulated.append((reports, o)) or [o / "MATRIX.md"])
+            r.table(3, steps)
+            self.assertEqual(tabulated, [([out / "M-http-c0010-b0010.json"], out)])
+            self.assertIn("1 of 2 runs; missing M-https-c0010-b0010.json", said[0])
+            self.assertIn("wrote", said[1])
+            r.dry_run = True
+            r.table(3, steps)
+            self.assertIn("dry run: not written", said[-1])
+            (out / "M-http-c0010-b0010.json").unlink()
+            r.dry_run = False
+            with self.assertRaises(cp.Refused):
+                r.table(3, steps)
+
+    def test_walk_runs_the_table_after_the_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d)
+            steps = cp.matrix_plan(CTX, matrix=((10, 10),), schemes=("http",))
+            said = []
+            r = cp.Runner(CTX, "egress-tests", out, {}, dry_run=True, say=said.append,
+                          prompt=lambda _: "", isatty=lambda: True)
+            r.walk(steps)
+            self.assertTrue(any("TABLE MATRIX.md: 1 runs" in s for s in said), said)

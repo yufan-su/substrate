@@ -90,6 +90,7 @@ fit or holdouts.
 from __future__ import annotations
 
 import argparse
+import functools
 import glob
 import io
 import json
@@ -165,6 +166,9 @@ class Step:
     fit: bool = False
     # progress_interval, when set, overrides PROGRESS_INTERVAL for this run.
     progress_interval: str = ""
+    # scheme, when set, is the run's --scheme; https runs name every endpoint
+    # in the policy (--policy-hosts exact).
+    scheme: str = ""
 
 
 def owner(name: str, note: str, *commands: str, restarts: bool = False, fit: bool = False) -> Step:
@@ -259,14 +263,69 @@ def ladder_plan(ctx: str, kubeconfig: str = "", scripts: str = SCRIPTS_PLACEHOLD
     return steps
 
 
-PLANS = {"tunnel-cap": plan, "ladder": ladder_plan}
+# The matrix plan: every (B, C) in MATRIX_DEFAULT for every scheme, HTTP and
+# HTTPS rows side by side in the table the runner writes at the end.
+MATRIX_DEFAULT = ((250, 1000), (750, 1000), (1000, 1000))
+SCHEMES_DEFAULT = ("http", "https")
+TABLE_FILE = "MATRIX.md"
+
+
+def parse_matrix(text: str) -> list[tuple[int, int]]:
+    """"250x1000,750x1000" -> [(250, 1000), (750, 1000)]."""
+    cells = []
+    for item in text.split(","):
+        b, sep, c = item.strip().lower().partition("x")
+        if not sep or not b.isdigit() or not c.isdigit() or int(b) == 0 or int(c) == 0:
+            raise ValueError(f"matrix cell {item.strip()!r} is not BxC with B and C positive integers")
+        cells.append((int(b), int(c)))
+    return cells
+
+
+SCHEME_ORDER = {"http": 0, "https": 1}
+
+
+def parse_schemes(text: str) -> list[str]:
+    schemes = [x.strip().lower() for x in text.split(",") if x.strip()]
+    bad = [x for x in schemes if x not in SCHEME_ORDER]
+    if bad or not schemes:
+        raise ValueError(f"schemes must be http, https or both, got {text!r}")
+    return schemes
+
+
+def matrix_plan(ctx: str, kubeconfig: str = "", scripts: str = SCRIPTS_PLACEHOLDER,
+                matrix=MATRIX_DEFAULT, schemes=SCHEMES_DEFAULT) -> list[Step]:
+    """Each (B, C) for each scheme, HTTP first, every run on a freshly
+    restarted gateway, then the table."""
+    del scripts  # no E0
+    k = shlex.join(["kubectl", *cluster_args(ctx, kubeconfig)])
+    restart_gw = (f"{k} -n ate-system rollout restart deploy/atenet-egress && "
+                  f"{k} -n ate-system rollout status deploy/atenet-egress --timeout=600s")
+    c_max = max(c for _, c in matrix)
+    steps = [owner("start", f"matrix start: deploy {c_max} endpoints with HTTPS (deploy.sh --deploy --https "
+                   f"--endpoints {c_max} --cgreader), then restart the gateway; at more than one replica set "
+                   "maxUnavailable 100% for the rollout and restore it", restart_gw, restarts=True)]
+    first = True
+    for b, c in matrix:
+        for scheme in sorted(schemes, key=SCHEME_ORDER.get):
+            name = f"M-{scheme}-c{c:04d}-b{b:04d}"
+            if not first:
+                steps += [owner(f"before-{name}", f"before {scheme} B={b} C={c}: restart the gateway",
+                                restart_gw, restarts=True)]
+            first = False
+            steps += [run(name, b, c, duration=ladder_duration(b, c), scheme=scheme,
+                          progress_interval=LADDER_SLOW_POLLS if b >= LADDER_SLOW_POLLS_FROM_B else "")]
+    steps += [Step("table", name="table", note=f"write {TABLE_FILE} and matrix.json from the runs above")]
+    return steps
+
+
+PLANS = {"tunnel-cap": plan, "ladder": ladder_plan, "matrix": matrix_plan}
 
 
 def driver_args(driver: str, ctx: str, step: Step, out: Path, env: dict, in_cluster: bool = False,
                 kubeconfig: str = "") -> list[str]:
     where = (["--api-endpoint", IN_CLUSTER_API, "--api-token-file", IN_CLUSTER_TOKEN, "--router-url", IN_CLUSTER_ROUTER]
              if in_cluster else cluster_args(ctx, kubeconfig))
-    args = [driver, "run", *where, "--actors", str(ACTORS), "--pick", "first",
+    args = [driver, "run", *where, "--actors", str(max(ACTORS, step.B)), "--pick", "first",
             "--parallel", str(step.B), "--endpoints", str(step.C), "--duration", step.duration,
             "--request-interval", "100ms",
             "--progress-interval", step.progress_interval or env.get("PROGRESS_INTERVAL", "1s")]
@@ -277,6 +336,10 @@ def driver_args(driver: str, ctx: str, step: Step, out: Path, env: dict, in_clus
              "--output", str(out / f"{step.name}.json")]
     if step.measured:
         args += ["--pre-idle", "30s", "--wait-for-cleartext-idle", "8m"]
+    if step.scheme:
+        args += ["--scheme", step.scheme]
+        if step.scheme == "https":
+            args += ["--policy-hosts", "exact"]
     return args
 
 
@@ -392,6 +455,18 @@ def fit_extract(path: Path) -> dict:
     return fit_module().extract(path)
 
 
+def render_matrix(reports: list[Path], out: Path) -> list[Path]:
+    """Writes OUT/MATRIX.md and OUT/matrix.json from the matrix runs' reports
+    with plot/matrix.py, and returns both paths."""
+    sys.path.insert(0, str(PLOT))
+    import matrix  # noqa: E402  (plot/matrix.py, on the path just set)
+    rows = [matrix.extract(p) for p in reports]
+    paths = [out / TABLE_FILE, out / "matrix.json"]
+    paths[0].write_text(f"# Egress gateway matrix\n\n{matrix.NOTE}\n{matrix.render(rows)}")
+    paths[1].write_text(json.dumps(sorted(rows, key=matrix.sort_key), indent=1) + "\n")
+    return paths
+
+
 def predict_holdouts(rows: list[dict], holdouts: list[Step], say) -> dict:
     """Fits rows as plot/fit.py does, prints the coefficients, and returns
     each holdout's judged responses predicted at its (B, C)."""
@@ -485,6 +560,7 @@ class Runner:
     extract: object = fit_extract
     predict: object = predict_holdouts
     render: object = render_predictor
+    tabulate: object = render_matrix
     prompt: object = input
     isatty: object = sys.stdin.isatty
     say: object = print
@@ -503,6 +579,9 @@ class Runner:
                 self.wait_owner(i, step, holdouts)
                 if step.restarts:
                     block = step.name
+                continue
+            if step.kind == "table":
+                self.table(i, steps)
                 continue
             out = self.out / f"{step.name}.json"
             if previous is not None and not self.dry_run and not (self.out / f"{previous.name}.json").exists():
@@ -622,6 +701,20 @@ class Runner:
             self.say(f"      predict {name} B={p['B']} C={p['C']}: {'; '.join(parts)}")
         self.say(f"      wrote {path}")
 
+    def table(self, i: int, steps: list[Step]) -> None:
+        """The matrix table over every measured run's report that exists."""
+        reports = [self.out / f"{s.name}.json" for s in steps if s.kind == "run" and s.measured]
+        if self.dry_run:
+            self.say(f"[{i}] TABLE {TABLE_FILE}: {len(reports)} runs (dry run: not written)")
+            return
+        have = [p for p in reports if p.exists()]
+        missing = [p.name for p in reports if not p.exists()]
+        self.say(f"[{i}] TABLE {TABLE_FILE}: {len(have)} of {len(reports)} runs" + (f"; missing {', '.join(missing)}" if missing else ""))
+        if not have:
+            raise Refused(f"no run report to tabulate; see {TABLE_FILE} once a run has finished")
+        for p in self.tabulate(have, self.out):
+            self.say(f"      wrote {p}")
+
     def gate(self, step: Step, pod: str | None, node: str | None = None) -> None:
         if self.dry_run:
             self.say(f"      gate: wait until {CLEARTEXT_ACTIVE} == 0, at most {GATE_CAP_S // 60} min (dry run: not polled)")
@@ -725,11 +818,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--scripts-dir", default=SCRIPTS_PLACEHOLDER,
                    help="the owner's directory of e0-apply.sh and e0-revert.sh, for the printed E0 commands")
     p.add_argument("--no-provisional", action="store_true", help="fit without the provisional rows")
+    p.add_argument("--matrix", default=",".join(f"{b}x{c}" for b, c in MATRIX_DEFAULT),
+                   help="the matrix plan's B x C cells, comma-separated (default: %(default)s)")
+    p.add_argument("--schemes", default=",".join(SCHEMES_DEFAULT),
+                   help="the matrix plan's schemes, comma-separated (default: %(default)s)")
     p.add_argument("--in-cluster", action="store_true", help="run inside the egress-campaign Pod")
     p.add_argument("--dry-run", action="store_true", help="print every step and command; run nothing")
     args = p.parse_args(argv)
     out = Path(args.out)
-    steps = PLANS[args.plan](args.context, args.kubeconfig, args.scripts_dir)
+    make_plan = PLANS[args.plan]
+    if args.plan == "matrix":
+        try:
+            make_plan = functools.partial(matrix_plan, matrix=parse_matrix(args.matrix), schemes=parse_schemes(args.schemes))
+        except ValueError as e:
+            print(f"refused: {e}", file=sys.stderr)
+            return 1
+    steps = make_plan(args.context, args.kubeconfig, args.scripts_dir)
     needs_ref = any(s.base_check for s in steps)
     if needs_ref and not args.ref_dir:
         print(f"refused: the {args.plan} plan has a base check and needs --ref-dir", file=sys.stderr)
