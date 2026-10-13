@@ -592,12 +592,16 @@ with a table. `--campaign-matrix 250x1000,750x1000,1000x1000` (the default)
 names the cells and `--campaign-schemes http,https` (the default) the schemes;
 every cell runs once per scheme, HTTP first, each run on a gateway the owner
 restarts at the step before it, for the ladder's duration of that cell. HTTPS
-runs name every endpoint in the policy (`--policy-hosts exact`). The last
-step writes `/out/MATRIX.md` and `/out/matrix.json` from the runs' reports
-with `plot/matrix.py`: B x C, protocol, tunnels, gateway replicas, opening and
-settled gateway cores per 1000 req/s, the replicas' Envoy heap summed, and
-the settled p99 and p99.9. `plot/matrix.py RUN.json...` builds the same table
-on a laptop from copied reports. The start step expects `deploy.sh --deploy
+runs name every endpoint in the policy (`--policy-hosts exact`).
+
+Every plan's walk ends by writing `/out/MATRIX.md` and `/out/matrix.json`
+from the measured runs' reports with `plot/matrix.py`, also when a run
+refused or failed partway: B x C, protocol, tunnels, gateway replicas,
+opening and settled gateway cores per 1000 req/s, the replicas' Envoy heap
+summed, and the settled p99 and p99.9. A report the table cannot be read
+from, such as a run without `--usage`, is named in `campaign.log` and left
+out. `plot/matrix.py RUN.json...` builds the same table on a laptop from
+copied reports. The start step expects `deploy.sh --deploy
 --https --endpoints C --cgreader` to have run with the largest C.
 
 The driver keeps every cgroup reader row in memory until a run ends, about

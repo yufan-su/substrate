@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import importlib.util
 import io
 import json
@@ -745,7 +746,7 @@ if __name__ == "__main__":
 
 
 class MatrixPlanTest(unittest.TestCase):
-    def test_cells_for_each_scheme_then_the_table(self):
+    def test_cells_for_each_scheme(self):
         steps = cp.matrix_plan(CTX)
         runs = [s for s in steps if s.kind == "run"]
         self.assertEqual([(s.name, s.B, s.C, s.scheme, s.duration, s.progress_interval) for s in runs], [
@@ -760,7 +761,7 @@ class MatrixPlanTest(unittest.TestCase):
         self.assertEqual([s.name for s in owners], ["start"] + [f"before-{r.name}" for r in runs[1:]])
         self.assertTrue(all(s.restarts for s in owners))
         self.assertIn("deploy.sh --deploy --https --endpoints 1000 --cgreader", owners[0].note)
-        self.assertEqual(steps[-1].kind, "table")
+        self.assertEqual(steps[-1], runs[-1])
         self.assertTrue(all(s.measured for s in runs))
         self.assertFalse(any(s.base_check or s.holdout or s.fit for s in steps))
 
@@ -795,38 +796,75 @@ class MatrixPlanTest(unittest.TestCase):
             argv = ["--context", CTX, "--driver", "egress-tests", "--out", d, "--plan", "matrix"]
             self.assertEqual(cp.main(argv + ["--matrix", "10x10,20x10", "--schemes", "http"]), 0)
             names = [s.name for s in walk.call_args.args[0]]
-            self.assertEqual(names, ["start", "M-http-c0010-b0010", "before-M-http-c0010-b0020", "M-http-c0010-b0020", "table"])
+            self.assertEqual(names, ["start", "M-http-c0010-b0010", "before-M-http-c0010-b0020", "M-http-c0010-b0020"])
             self.assertEqual(cp.main(argv + ["--matrix", "nonsense"]), 1)
             self.assertIn("refused: matrix cell", err.getvalue())
 
-    def test_table_step_tabulates_the_reports_that_exist(self):
-        with tempfile.TemporaryDirectory() as d:
-            out = Path(d)
-            (out / "M-http-c0010-b0010.json").write_text("{}")
-            steps = [cp.run("M-http-c0010-b0010", 10, 10, scheme="http"),
-                     cp.run("M-https-c0010-b0010", 10, 10, scheme="https"),
-                     cp.Step("table", name="table")]
-            said, tabulated = [], []
-            r = cp.Runner(CTX, "egress-tests", out, {}, say=said.append,
-                          tabulate=lambda reports, o: tabulated.append((reports, o)) or [o / "MATRIX.md"])
-            r.table(3, steps)
-            self.assertEqual(tabulated, [([out / "M-http-c0010-b0010.json"], out)])
-            self.assertIn("1 of 2 runs; missing M-https-c0010-b0010.json", said[0])
-            self.assertIn("wrote", said[1])
-            r.dry_run = True
-            r.table(3, steps)
-            self.assertIn("dry run: not written", said[-1])
-            (out / "M-http-c0010-b0010.json").unlink()
-            r.dry_run = False
-            with self.assertRaises(cp.Refused):
-                r.table(3, steps)
 
-    def test_walk_runs_the_table_after_the_runs(self):
-        with tempfile.TemporaryDirectory() as d:
-            out = Path(d)
-            steps = cp.matrix_plan(CTX, matrix=((10, 10),), schemes=("http",))
-            said = []
-            r = cp.Runner(CTX, "egress-tests", out, {}, dry_run=True, say=said.append,
-                          prompt=lambda _: "", isatty=lambda: True)
-            r.walk(steps)
-            self.assertTrue(any("TABLE MATRIX.md: 1 runs" in s for s in said), said)
+class TableTest(unittest.TestCase):
+    """Every plan's walk ends with the table over the reports it has."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.out = Path(self.tmp.name)
+        self.said, self.tabulated = [], []
+        self.steps = [cp.run("M-http-c0010-b0010", 10, 10, scheme="http"),
+                      cp.run("M-https-c0010-b0010", 10, 10, scheme="https")]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def tabulate(self, reports, out, say, fail=False):
+        self.tabulated.append(reports)
+        if fail:
+            raise OSError("disk full")
+        say("      inside")
+        return [out / "MATRIX.md", out / "matrix.json"]
+
+    def runner(self, **kw):
+        kw.setdefault("tabulate", self.tabulate)
+        return cp.Runner(CTX, "egress-tests", self.out, {}, say=self.said.append, prompt=lambda _: "", isatty=lambda: True, **kw)
+
+    def test_tabulates_the_reports_that_exist(self):
+        (self.out / "M-http-c0010-b0010.json").write_text("{}")
+        self.runner().table(self.steps)
+        self.assertEqual(self.tabulated, [[self.out / "M-http-c0010-b0010.json"]])
+        self.assertEqual(self.said, ["TABLE MATRIX.md: 1 of 2 runs; missing M-https-c0010-b0010.json", "      inside",
+                                     f"      wrote {self.out / 'MATRIX.md'}", f"      wrote {self.out / 'matrix.json'}"])
+
+    def test_nothing_to_tabulate_is_said_not_raised(self):
+        self.runner().table(self.steps)
+        self.assertEqual(self.tabulated, [])
+        self.assertEqual(self.said, ["TABLE MATRIX.md: 0 of 2 runs; missing M-http-c0010-b0010.json, M-https-c0010-b0010.json"])
+
+    def test_dry_run_writes_nothing(self):
+        r = self.runner(dry_run=True)
+        r.walk(self.steps)
+        self.assertEqual(self.tabulated, [])
+        self.assertEqual(self.said[-1], "TABLE MATRIX.md: 2 runs (dry run: not written)")
+
+    def test_a_table_error_is_the_walks_error_only_when_the_walk_passed(self):
+        (self.out / "M-http-c0010-b0010.json").write_text("{}")
+        r = self.runner(tabulate=functools.partial(self.tabulate, fail=True))
+        with self.assertRaises(OSError):
+            r.table(self.steps)
+        r.table(self.steps, failing=True)
+        self.assertEqual(self.said[-1], "      MATRIX.md not written: OSError: disk full")
+
+    def test_walk_tabulates_after_a_failed_run_and_keeps_the_runs_error(self):
+        def execute(args, log):
+            if args[args.index("--scheme") + 1] == "https":
+                raise cp.Refused("the https run broke")
+            Path(args[args.index("--output") + 1]).write_text("{}")
+        r = self.runner(execute=execute, read_active=lambda: 0, read_gateway=lambda: ("gw-1", "n1"), sleep=lambda s: None)
+        with mock.patch.object(cp, "check_report"):
+            with self.assertRaisesRegex(cp.Refused, "the https run broke"):
+                r.walk(self.steps)
+        self.assertEqual(self.tabulated, [[self.out / "M-http-c0010-b0010.json"]])
+
+    def test_render_matrix_leaves_out_a_report_it_cannot_read(self):
+        (self.out / "A-c010-b010.json").write_text("{}")
+        self.assertEqual(cp.render_matrix([self.out / "A-c010-b010.json"], self.out, self.said.append), [])
+        self.assertFalse((self.out / "MATRIX.md").exists())
+        self.assertEqual(len(self.said), 1)
+        self.assertIn("A-c010-b010.json left out of MATRIX.md: KeyError", self.said[0])

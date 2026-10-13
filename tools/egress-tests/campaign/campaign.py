@@ -295,7 +295,7 @@ def parse_schemes(text: str) -> list[str]:
 def matrix_plan(ctx: str, kubeconfig: str = "", scripts: str = SCRIPTS_PLACEHOLDER,
                 matrix=MATRIX_DEFAULT, schemes=SCHEMES_DEFAULT) -> list[Step]:
     """Each (B, C) for each scheme, HTTP first, every run on a freshly
-    restarted gateway, then the table."""
+    restarted gateway. The table comes at the end of every plan's walk."""
     del scripts  # no E0
     k = shlex.join(["kubectl", *cluster_args(ctx, kubeconfig)])
     restart_gw = (f"{k} -n ate-system rollout restart deploy/atenet-egress && "
@@ -314,7 +314,6 @@ def matrix_plan(ctx: str, kubeconfig: str = "", scripts: str = SCRIPTS_PLACEHOLD
             first = False
             steps += [run(name, b, c, duration=ladder_duration(b, c), scheme=scheme,
                           progress_interval=LADDER_SLOW_POLLS if b >= LADDER_SLOW_POLLS_FROM_B else "")]
-    steps += [Step("table", name="table", note=f"write {TABLE_FILE} and matrix.json from the runs above")]
     return steps
 
 
@@ -455,12 +454,21 @@ def fit_extract(path: Path) -> dict:
     return fit_module().extract(path)
 
 
-def render_matrix(reports: list[Path], out: Path) -> list[Path]:
-    """Writes OUT/MATRIX.md and OUT/matrix.json from the matrix runs' reports
-    with plot/matrix.py, and returns both paths."""
+def render_matrix(reports: list[Path], out: Path, say=print) -> list[Path]:
+    """Writes OUT/MATRIX.md and OUT/matrix.json from the run reports with
+    plot/matrix.py and returns both paths. A report the table cannot be read
+    from (a run without --usage, or one cut short) is named and left out;
+    nothing is written when no report is left."""
     sys.path.insert(0, str(PLOT))
     import matrix  # noqa: E402  (plot/matrix.py, on the path just set)
-    rows = [matrix.extract(p) for p in reports]
+    rows = []
+    for p in reports:
+        try:
+            rows.append(matrix.extract(p))
+        except (KeyError, ValueError, TypeError, IndexError) as e:
+            say(f"      {p.name} left out of {TABLE_FILE}: {type(e).__name__}: {e}")
+    if not rows:
+        return []
     paths = [out / TABLE_FILE, out / "matrix.json"]
     paths[0].write_text(f"# Egress gateway matrix\n\n{matrix.NOTE}\n{matrix.render(rows)}")
     paths[1].write_text(json.dumps(sorted(rows, key=matrix.sort_key), indent=1) + "\n")
@@ -568,6 +576,16 @@ class Runner:
     now: object = time.monotonic
 
     def walk(self, steps: list[Step]) -> None:
+        """Runs the steps, then writes the table over the runs that have a
+        report, also when a step refused or failed partway."""
+        try:
+            self._walk(steps)
+        except Exception:
+            self.table(steps, failing=True)
+            raise
+        self.table(steps)
+
+    def _walk(self, steps: list[Step]) -> None:
         previous: Step | None = None
         block = ""  # the OWNER step that last restarted the gateway
         holdouts = [s for s in steps if s.holdout]
@@ -579,9 +597,6 @@ class Runner:
                 self.wait_owner(i, step, holdouts)
                 if step.restarts:
                     block = step.name
-                continue
-            if step.kind == "table":
-                self.table(i, steps)
                 continue
             out = self.out / f"{step.name}.json"
             if previous is not None and not self.dry_run and not (self.out / f"{previous.name}.json").exists():
@@ -701,18 +716,27 @@ class Runner:
             self.say(f"      predict {name} B={p['B']} C={p['C']}: {'; '.join(parts)}")
         self.say(f"      wrote {path}")
 
-    def table(self, i: int, steps: list[Step]) -> None:
-        """The matrix table over every measured run's report that exists."""
+    def table(self, steps: list[Step], failing: bool = False) -> None:
+        """The table over every measured run's report that exists. While the
+        walk is failing, a table that cannot be written is said, not raised,
+        so the walk's own error is the one reported."""
         reports = [self.out / f"{s.name}.json" for s in steps if s.kind == "run" and s.measured]
         if self.dry_run:
-            self.say(f"[{i}] TABLE {TABLE_FILE}: {len(reports)} runs (dry run: not written)")
+            self.say(f"TABLE {TABLE_FILE}: {len(reports)} runs (dry run: not written)")
             return
         have = [p for p in reports if p.exists()]
         missing = [p.name for p in reports if not p.exists()]
-        self.say(f"[{i}] TABLE {TABLE_FILE}: {len(have)} of {len(reports)} runs" + (f"; missing {', '.join(missing)}" if missing else ""))
+        self.say(f"TABLE {TABLE_FILE}: {len(have)} of {len(reports)} runs" + (f"; missing {', '.join(missing)}" if missing else ""))
         if not have:
-            raise Refused(f"no run report to tabulate; see {TABLE_FILE} once a run has finished")
-        for p in self.tabulate(have, self.out):
+            return
+        try:
+            written = self.tabulate(have, self.out, self.say)
+        except Exception as e:  # noqa: BLE001  (the walk's error comes first)
+            if not failing:
+                raise
+            self.say(f"      {TABLE_FILE} not written: {type(e).__name__}: {e}")
+            return
+        for p in written:
             self.say(f"      wrote {p}")
 
     def gate(self, step: Step, pod: str | None, node: str | None = None) -> None:
