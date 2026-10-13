@@ -32,6 +32,7 @@ metadata:
     workload: egress-tests
 spec:
   replicas: ${WORKER_COUNT}
-  sandboxClass: gvisor
+  sandboxClasses:
+  - name: gvisor
   workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
   ${WORKER_TEMPLATE}
