@@ -1,12 +1,12 @@
 # Reproducing the egress gateway cost ladder, up to a million tunnels
 
 This branch is the code that measured the egress gateway at 100k, 300k and 1,000,000 open
-tunnels on October 8, 2026. It is the `egress-incluster` tooling on the fork's `egress-test` base
-(`47ed2247`, upstream `601c03ba` plus the mitm_internal breaker and the atunnel tunnel-open
-timeout), plus four commits:
+tunnels on October 8, 2026, rebased onto upstream `ab6dd775`. It is the `egress-incluster`
+tooling plus the fork's atunnel tunnel-open timeout and mitm_internal breaker test, plus:
 
-- `gvisor: move the sandbox asset to release 20260907.0`. The 2026-09-02 nightly kills 1 to 8% of
-  the sandboxes under load, see https://github.com/agent-substrate/substrate/issues/2377.
+- gVisor at or after `80bb741691be`: the 2026-09-02 nightly kills 1 to 8% of the sandboxes under
+  load, see https://github.com/agent-substrate/substrate/issues/2377. The shipped SandboxConfig
+  defaults to the 2026-10-10 nightly.
 - `atenet-egress: size the gateway for a million tunnels`. The gateway ConfigMap values the ladder
   ran with, which were only ever applied to the live cluster before.
 - `egress-tests: give the campaign Pod 8Gi requested and 48Gi limit`.
@@ -54,13 +54,14 @@ Build the images from this checkout and install as `README.md` and `CONTRIBUTING
 (`make build-images`, `hack/install-ate.sh`). Then check the two things this branch changes:
 
 ```
-kubectl get sandboxconfig gvisor-default -o jsonpath='{.spec.assets.amd64.gvisor.url}'
-# gs://gvisor/releases/release/20260907.0/x86_64/gvisor.tar.zstd
+kubectl get sandboxconfig gvisor-default -o jsonpath='{.spec.defaultVersion} {.spec.versions[*].assets.amd64.gvisor.url}'
+# v3 gs://gvisor/releases/nightly/2026-10-10/x86_64/gvisor.tar.zstd
 kubectl -n ate-system get cm atenet-egress -o yaml | grep -c 1100000
-# 6
+# 9
 ```
 
-Do not run the ladder on the 2026-09-02 nightly or any build before gVisor `80bb741691be`.
+Do not run the ladder on the 2026-09-02 nightly or any build before gVisor `80bb741691be`; the
+2026-10-10 nightly the SandboxConfig defaults to is after it.
 
 ## 3. Pin the gateway and raise its file limit
 
@@ -75,8 +76,14 @@ kubectl -n ate-system exec $POD -c envoy -- grep 'open files' /proc/1/limits
 
 The patch moves the gateway onto the gateway pool and wraps Envoy in `ulimit -HSn 8388608` before
 dropping to uid 65532 with no capabilities. A tunnel holds two file descriptors. The driver reads
-Envoy's admin API on the pod IP, port 15000, through the API server proxy; this base still binds it
-there. An installer redeploy of atenet-egress drops the patch; reapply it.
+Envoy's stats through the `envoy_metrics` listener on port 15090; the admin port is loopback only.
+An installer redeploy of atenet-egress drops the patch; reapply it.
+
+For HTTPS at a million tunnels, apply `gateway-pin-1m-r4.yaml` instead: the same pin and file
+limit at four replicas, spread at most one apart across the gateway nodes, each requesting 120Gi.
+An HTTPS tunnel costs 130 to 160 KiB of Envoy heap, so one replica would not fit a node. Every
+restart at more than one replica needs `maxUnavailable: 100%` for the rollout and `25%` put back
+afterwards; the file's header has the commands.
 
 ## 4. Deploy the workload
 
@@ -166,7 +173,8 @@ design; nothing else should.
   TLS handshake and request timeouts (about 0.01 to 0.03% of requests) and actor DNS lookups slow
   to a p50 above 60 ms. Nothing fails at the gateway; the steady window is clean.
 - **gVisor before `80bb741691be`.** Sandboxes die silently during the tunnel-opening phase, stay
-  RUNNING, and their snapshots fail to restore. This branch pins release 20260907.0.
+  RUNNING, and their snapshots fail to restore. The SandboxConfig defaults to the 2026-10-10
+  nightly, which has the fix.
 - **anetd memory on small nodes.** Re-pointing 1000 Services at once took two 16 GiB system nodes
   NotReady. Change Services in batches.
 - **No gateway memory limit or overload manager.** A node smaller than the gateway's heap plus 10%

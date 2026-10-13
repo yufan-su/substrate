@@ -1,0 +1,77 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Strategic merge patch for deploy/atenet-egress in ate-system: the
+# gateway-pin-1m.yaml pin and file limit, at four replicas. Used by the HTTPS
+# million-tunnel run (see campaign/README.md), where one replica's Envoy heap
+# would exceed a node: at 1000 actors x 1000 destinations over HTTPS a tunnel
+# costs 130 to 160 KiB of heap, so four replicas carry about 33 GiB each at
+# 250k tunnels and about 132 GiB each at a million.
+#
+# The topology spread keeps at most one replica of difference between gateway
+# nodes, so two c3-highmem-44 nodes take two each and four c3-highmem-22 nodes
+# one each. The memory request reserves a replica's share of a node up front,
+# so a second replica is never placed where the first one's heap will grow
+# into it; it is a request only, so Envoy is not killed by a limit.
+#
+#   kubectl -n ate-system patch deployment atenet-egress --type strategic \
+#     --patch-file tools/egress-tests/manifests/gateway-pin-1m-r4.yaml
+#
+# Restarting the gateway at more than one replica with a spread or an
+# anti-affinity deadlocks at the default maxUnavailable of 25%: 25% of 4 is 1
+# pod, and the new pod cannot schedule while the old ones hold every slot.
+# Set maxUnavailable to 100% for the rollout, then put 25% back:
+#
+#   kubectl -n ate-system patch deployment atenet-egress --type merge \
+#     -p '{"spec":{"strategy":{"rollingUpdate":{"maxUnavailable":"100%"}}}}'
+#   kubectl -n ate-system rollout restart deployment/atenet-egress
+#   kubectl -n ate-system rollout status deployment/atenet-egress --timeout=600s
+#   kubectl -n ate-system patch deployment atenet-egress --type merge \
+#     -p '{"spec":{"strategy":{"rollingUpdate":{"maxUnavailable":"25%"}}}}'
+spec:
+  replicas: 4
+  template:
+    spec:
+      nodeSelector:
+        ate.dev/pool: gateway
+      tolerations:
+      - key: ate.dev/gateway
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: atenet-egress
+      containers:
+      - name: envoy
+        command:
+        - /bin/bash
+        - -c
+        - ulimit -HSn 8388608 && exec setpriv --reuid=65532 --regid=65532 --clear-groups --inh-caps=-all -- /usr/local/bin/envoy "$@"
+        - envoy
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+          runAsNonRoot: false
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+            add: [SYS_RESOURCE, SETUID, SETGID]
+        resources:
+          requests:
+            memory: 120Gi
