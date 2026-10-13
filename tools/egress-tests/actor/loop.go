@@ -162,8 +162,12 @@ func newTransport(newConnPerRequest bool, roots *x509.CertPool) *http.Transport 
 		ForceAttemptHTTP2:   false, // HTTP/1.1 over either scheme: one request per connection at a time
 		MaxIdleConns:        0,     // no total cap, so C endpoints keep C connections
 		MaxIdleConnsPerHost: 1,     // requests are sequential, so one per endpoint is enough
-		IdleConnTimeout:     5 * time.Minute,
-		DisableKeepAlives:   newConnPerRequest,
+		// Long enough that one pass over every endpoint, at C=1000 and
+		// one request per 100 ms per actor, never outlives the idle
+		// connections: at 5 minutes an actor whose first cycle ran long
+		// flipped into one new connection per request and stayed there.
+		IdleConnTimeout:   30 * time.Minute,
+		DisableKeepAlives: newConnPerRequest,
 		// No TLSHandshakeTimeout: the request's own timeout bounds the
 		// handshake, so a stalled one is counted as a timeout like any other.
 	}
