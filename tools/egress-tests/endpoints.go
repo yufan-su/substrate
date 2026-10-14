@@ -60,8 +60,8 @@ func buildPolicy(atespace string, n int, hostsMode string) *ateapipb.EgressPolic
 	p := &ateapipb.EgressPolicy{Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: policyName}}
 	for chunk := range slices.Chunk(hosts, egressapi.MaxRuleHostnames) {
 		p.Rules = append(p.Rules,
-			&ateapipb.EgressRule{Http: &ateapipb.HTTPRule{Hostnames: slices.Clone(chunk)}},
-			&ateapipb.EgressRule{Https: &ateapipb.HTTPSRule{Hostnames: slices.Clone(chunk)}})
+			&ateapipb.EgressRule{Http: &ateapipb.HttpRule{Hostnames: slices.Clone(chunk)}},
+			&ateapipb.EgressRule{Https: &ateapipb.HttpsRule{Hostnames: slices.Clone(chunk)}})
 	}
 	return p
 }

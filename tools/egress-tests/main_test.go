@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/agent-substrate/substrate/internal/ateclient"
+	"google.golang.org/grpc"
 )
 
 const testKubeconfig = `apiVersion: v1
@@ -49,7 +50,7 @@ func TestConnectPassesTheEndpointAndTokenFile(t *testing.T) {
 	errStub := errors.New("stub dial")
 	saved := newATEClient
 	t.Cleanup(func() { newATEClient = saved })
-	newATEClient = func(_ context.Context, _, k8sContext, endpoint, tokenFile string, _ bool) (*ateclient.Client, error) {
+	newATEClient = func(_ context.Context, _, k8sContext, endpoint, tokenFile string, _ bool, _ ...grpc.DialOption) (*ateclient.Client, error) {
 		got = &dial{k8sContext, endpoint, tokenFile}
 		return nil, errStub
 	}

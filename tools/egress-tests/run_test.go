@@ -890,7 +890,7 @@ func TestBuildPolicy(t *testing.T) {
 	reordered := buildPolicy("ns", 3, policyHostsExact)
 	slices.Reverse(reordered.Rules[0].Http.Hostnames)
 	slices.Reverse(reordered.Rules)
-	httpOnly := &ateapipb.EgressPolicy{Rules: []*ateapipb.EgressRule{{Http: &ateapipb.HTTPRule{Hostnames: wantHosts(3)}}}}
+	httpOnly := &ateapipb.EgressPolicy{Rules: []*ateapipb.EgressRule{{Http: &ateapipb.HttpRule{Hostnames: wantHosts(3)}}}}
 	switch {
 	case !samePolicyRules(reordered, p):
 		t.Error("samePolicyRules told apart policies that differ only in order")
@@ -912,7 +912,7 @@ func TestRunUpgradesHTTPOnlyPolicies(t *testing.T) {
 		api.nextUID++
 		api.policies[name] = &ateapipb.EgressPolicy{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: cfg.Atespace, Name: "default", Uid: fmt.Sprint(api.nextUID)},
-			Rules:    []*ateapipb.EgressRule{{Http: &ateapipb.HTTPRule{Hostnames: wantHosts(cfg.Endpoints)}}},
+			Rules:    []*ateapipb.EgressRule{{Http: &ateapipb.HttpRule{Hostnames: wantHosts(cfg.Endpoints)}}},
 		}
 	}
 
