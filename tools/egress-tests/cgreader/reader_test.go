@@ -66,7 +66,7 @@ func TestReaderSample(t *testing.T) {
 	r, root := newTestReader(t, 100)
 	writeCgroup(t, filepath.Join(root, workerScope), 3000, 5000, 1000)
 	writeCgroup(t, filepath.Join(root, workerScope, "uid1-_pause"), 2000, 3000, 0)
-	writeCgroup(t, filepath.Join(root, workerScope, "ateom"), 1000, 2000, 500)
+	writeCgroup(t, filepath.Join(root, workerScope, "worker"), 1000, 2000, 500)
 	if err := r.addTargets([]string{workerScope, workerScope}); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestReaderSample(t *testing.T) {
 	}{
 		{"", cgapi.Row{UsageUsec: 3000, MemoryCurrent: 5000, WorkingSetBytes: 4000}},
 		{"uid1-_pause", cgapi.Row{UsageUsec: 2000, MemoryCurrent: 3000, WorkingSetBytes: 3000}},
-		{"ateom", cgapi.Row{UsageUsec: 1000, MemoryCurrent: 2000, WorkingSetBytes: 1500}},
+		{"worker", cgapi.Row{UsageUsec: 1000, MemoryCurrent: 2000, WorkingSetBytes: 1500}},
 	} {
 		t.Run("leaf "+tc.leaf, func(t *testing.T) {
 			g := got[tc.leaf]

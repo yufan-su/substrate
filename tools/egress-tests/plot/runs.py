@@ -36,7 +36,7 @@ COMPONENT_COLORS = {
     "actors": "#4a3aa7",
 }
 
-# Containers that split a worker's ateom into parts; they are not added to
+# Containers that split a worker's worker container into parts; they are not added to
 # the component's total.
 SPLIT_CONTAINERS = {"actors", "atunnel"}
 

@@ -16,6 +16,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,6 +41,18 @@ echo "$(basename "$0") $*" >>"${SHIM_LOG}"
 cat >/dev/null
 if [[ "$*" == *"get pod egress-campaign"* ]]; then
   exit 1
+fi
+`
+
+// koShim stands in for hack/run-tool.sh: it logs like logShim, and saves
+// what ko resolve reads, the rendered actor template, to resolved.yaml beside
+// $SHIM_LOG.
+const koShim = `#!/bin/bash
+echo "$(basename "$0") $*" >>"${SHIM_LOG}"
+if [[ "$1 $2" == "ko resolve" ]]; then
+  cat >>"$(dirname "${SHIM_LOG}")/resolved.yaml"
+else
+  cat >/dev/null
 fi
 `
 
@@ -259,7 +272,7 @@ func runDeployScript(t *testing.T, dir string, args, env []string) (logged, tmpd
 	for _, m := range manifests {
 		writeFile(t, filepath.Join(repo, "tools/egress-tests", m), readFile(t, m), 0o644)
 	}
-	writeFile(t, filepath.Join(repo, "hack/run-tool.sh"), logShim, 0o755)
+	writeFile(t, filepath.Join(repo, "hack/run-tool.sh"), koShim, 0o755)
 	writeFile(t, filepath.Join(shims, "kubectl"), logShim, 0o755)
 	writeFile(t, filepath.Join(shims, "go"), goShim, 0o755)
 	if err := os.MkdirAll(tmpdir, 0o755); err != nil {
@@ -309,6 +322,75 @@ func mustLookPath(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// TestDeployActorTemplateLimits checks the actor template deploy.sh renders
+// carries both limits the API requires, a cpu and a memory limit, with the
+// defaults and with --actor-cpu and --actor-memory.
+func TestDeployActorTemplateLimits(t *testing.T) {
+	t.Parallel()
+	for _, tool := range []string{"bash", "git", "jq"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			if deployToolsRequired() {
+				t.Fatalf("%s not found: %v", tool, err)
+			}
+			t.Skipf("%s not found: %v", tool, err)
+		}
+	}
+	for _, tc := range []struct {
+		name            string
+		args            []string
+		wantCPU, wantMB string
+	}{
+		{"defaults", nil, "500m", "256Mi"},
+		{"flags", []string{"--actor-cpu", "2", "--actor-memory=384Mi"}, "2", "384Mi"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			args := append([]string{"--deploy", "--endpoints", "2"}, tc.args...)
+			_, tmpdir, _ := runDeployScript(t, "", args, []string{"BUCKET_NAME=b", "KO_DOCKER_REPO=r"})
+			var tmpl struct {
+				Resources struct {
+					Limits []struct{ Name, Quantity string } `json:"limits"`
+				} `json:"resources"`
+			}
+			if err := yaml.Unmarshal([]byte(readFile(t, filepath.Join(filepath.Dir(tmpdir), "resolved.yaml"))), &tmpl); err != nil {
+				t.Fatalf("parsing the rendered actor template: %v", err)
+			}
+			got := map[string]string{}
+			for _, l := range tmpl.Resources.Limits {
+				got[l.Name] = l.Quantity
+			}
+			if want := map[string]string{"cpu": tc.wantCPU, "memory": tc.wantMB}; !maps.Equal(got, want) {
+				t.Errorf("actor template limits = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestManifestImagesExist checks every ko:// image a manifest names is a
+// package in this repository, so a renamed command fails here rather than at
+// deploy time.
+func TestManifestImagesExist(t *testing.T) {
+	t.Parallel()
+	manifests, err := filepath.Glob("manifests/*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := regexp.MustCompile(`ko://github\.com/agent-substrate/substrate/([^\s"']+)`)
+	found := 0
+	for _, m := range manifests {
+		for _, match := range ref.FindAllStringSubmatch(readFile(t, m), -1) {
+			found++
+			// This package sits at tools/egress-tests in the root module.
+			if fi, err := os.Stat(filepath.Join("..", "..", match[1])); err != nil || !fi.IsDir() {
+				t.Errorf("%s names ko://.../%s, which is not a package in this repository", m, match[1])
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatal("no ko:// image in manifests/; the check is checking nothing")
+	}
 }
 
 // TestDeployMaxEndpointsMatchesTheDriver pins deploy.sh's MAX_ENDPOINTS to

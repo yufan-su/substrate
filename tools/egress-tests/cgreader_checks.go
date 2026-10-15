@@ -265,7 +265,7 @@ func inferRemovedLeaves(samples []cgSample) {
 }
 
 // checkLeafSums compares each container that has child cgroups, such as a
-// worker's ateom with its actors' _pause leaves and the ateom leaf, with
+// worker container with its actors' _pause leaves and the worker leaf, with
 // its leaves, one reader round at a time. A leaf new in a round counts from
 // zero. A removed actor's inferred final counter closes its last round;
 // a round where two or more actors disappeared cannot be split, so it is
@@ -411,7 +411,7 @@ func cgreaderNodeRows(cg *cgreaderReport) []cadvisorSample {
 
 // cgreaderAsCadvisor turns the reader's container rows into cAdvisor-shaped
 // samples on the driver's clock, so the steady summaries can use them. It
-// adds two derived containers for each worker: atunnel, the ateom leaf, and
+// adds two derived containers for each worker: atunnel, the worker leaf, and
 // actors, a counter built from the actors' leaves' increases round by round,
 // so actors that come and go, including a removed actor's inferred last
 // use, keep it monotonic.
@@ -423,16 +423,16 @@ func cgreaderAsCadvisor(cg *cgreaderReport) (containers, split []cadvisorSample)
 		case s.Gone || s.Component == "cgreader":
 		case s.Leaf == "":
 			containers = append(containers, row)
-		case s.Component == "workers" && s.Leaf == "ateom":
+		case s.Component == "workers" && s.Leaf == "worker":
 			row.Container = "atunnel"
 			split = append(split, row)
 		}
 	}
 	for _, rs := range leafRounds(cg.Samples) {
 		first := cg.Samples[rs[0][""]]
-		// The pod cgroup has leaves too, its container scopes; only ateom
-		// holds the actors.
-		if first.Component != "workers" || first.Container != "ateom" {
+		// The pod cgroup has leaves too, its container scopes; only the worker
+		// container holds the actors.
+		if first.Component != "workers" || first.Container != "worker" {
 			continue
 		}
 		offset := medianOffset(cg.Nodes[first.Node])

@@ -59,8 +59,8 @@ func testResourceReport() *report {
 	samples = append(samples, series("gateway", "gw", "envoy", 1, every16...)...)
 	samples = append(samples, series("gateway", "gw", "ext-proc", 0.5, every16...)...)
 	samples = append(samples, series("gateway", "gw", "POD", 1.5, every16...)...)
-	samples = append(samples, series("workers", "w1", "ateom", 0.25, every16...)...)
-	samples = append(samples, series("workers", "w2", "ateom", 0.25, every16...)...)
+	samples = append(samples, series("workers", "w1", "worker", 0.25, every16...)...)
+	samples = append(samples, series("workers", "w2", "worker", 0.25, every16...)...)
 	samples = append(samples, series("dns", "d1", "kubedns", 0.01, 0, 40*s, 90*s)...)
 	for i := range samples {
 		samples[i].WorkingSetBytes = 64 << 20

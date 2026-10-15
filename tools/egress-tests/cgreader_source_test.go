@@ -86,7 +86,7 @@ func (f *fakeReaders) GetRaw(_ context.Context, path string, params url.Values) 
 func newPullSampler(t *testing.T, get rawGetter, k8s *fake.Clientset, scope string) *resourceSampler {
 	t.Helper()
 	s := newResourceSampler(get, k8s, time.Second)
-	s.cg = &cgreaderState{targets: map[string]map[string]cgTarget{"node-a": {scope: {"workers", "w1", "ateom"}}},
+	s.cg = &cgreaderState{targets: map[string]map[string]cgTarget{"node-a": {scope: {"workers", "w1", "worker"}}},
 		lastSeq: map[string]uint64{}, started: map[string]bool{}, boot: map[string]int64{}}
 	s.rep.Cgreader = &cgreaderReport{Nodes: map[string]*cgNode{"node-a": {Reader: "r1"}}}
 	return s
@@ -127,8 +127,8 @@ func TestPullReader(t *testing.T) {
 		t.Errorf("offsets = %+v, want one per pull, not per page, the last 1s", n.Offsets)
 	}
 	samples := s.rep.Cgreader.Samples
-	if len(samples) != 5 || samples[4].CPUSeconds != 6 || samples[4].Container != "ateom" || samples[4].Pod != "w1" {
-		t.Errorf("samples = %+v, want 5 rows mapped to workers/ateom@w1 with usage in seconds", samples)
+	if len(samples) != 5 || samples[4].CPUSeconds != 6 || samples[4].Container != "worker" || samples[4].Pod != "w1" {
+		t.Errorf("samples = %+v, want 5 rows mapped to workers/worker@w1 with usage in seconds", samples)
 	}
 	if len(get.targets) != 1 || get.targets[0] != scope {
 		t.Errorf("targets sent = %v, want [%s]", get.targets, scope)
@@ -202,7 +202,7 @@ func TestResolveCgreader(t *testing.T) {
 	}
 	mk("egress-tests", "reader-a", "r-a", "node-a", map[string]string{"app": "egress-tests-cgreader"}, corev1.PodQOSBurstable, "cgreader")
 	mk("ate-system", "gw", "g-1", "node-a", map[string]string{"app": "atenet-egress"}, corev1.PodQOSBurstable, "envoy", "ext-proc", "sidecar")
-	mk("egress-tests", "w-b", "w-b", "node-b", map[string]string{"ate.dev/worker-pool": "egress-tests"}, corev1.PodQOSBurstable, "ateom")
+	mk("egress-tests", "w-b", "w-b", "node-b", map[string]string{"ate.dev/worker-pool": "egress-tests"}, corev1.PodQOSBurstable, "worker")
 
 	get := newFakeGetter()
 	s := newResourceSampler(get, k8s, time.Second)
@@ -283,9 +283,9 @@ func cgRows(node, component, pod, container, leaf string, cores float64, from, t
 func TestCheckLeafSums(t *testing.T) {
 	t.Parallel()
 	row := func(i int, leaf string, cpu float64, gone bool) cgSample {
-		return cgSample{T: time.Unix(int64(1000+i), 0), Node: "n", Component: "workers", Pod: "w", Container: "ateom", Leaf: leaf, CPUSeconds: cpu, Gone: gone}
+		return cgSample{T: time.Unix(int64(1000+i), 0), Node: "n", Component: "workers", Pod: "w", Container: "worker", Leaf: leaf, CPUSeconds: cpu, Gone: gone}
 	}
-	// The shape of a resumed worker: an idle old actor, the ateom leaf at
+	// The shape of a resumed worker: an idle old actor, the worker leaf at
 	// 0.01 core, and actors whose sandboxes (a _pause and an actor cgroup
 	// each) appear at 5 s already holding restore CPU and are removed at
 	// 30 s. The container also holds each removed actor's last, unread
@@ -311,7 +311,7 @@ func TestCheckLeafSums(t *testing.T) {
 					container += 0.110
 				}
 			}
-			out = append(out, row(i, "", container, false), row(i, "ateom", atunnel, false), row(i, "old-_pause", 8.9, false))
+			out = append(out, row(i, "", container, false), row(i, "worker", atunnel, false), row(i, "old-_pause", 8.9, false))
 			for a, u := range use {
 				uid := fmt.Sprintf("a%d", a)
 				if i >= 5 && i <= 30 {
@@ -362,7 +362,7 @@ func TestCheckLeafSums(t *testing.T) {
 
 func TestThinLeafRows(t *testing.T) {
 	t.Parallel()
-	// One worker container over 250 rounds: the container row, the ateom
+	// One worker container over 250 rounds: the container row, the worker
 	// leaf, and each actor's _pause and actor leaves. The last actor is
 	// removed at round 100.
 	shape := func(actors int) []cgSample {
@@ -370,9 +370,9 @@ func TestThinLeafRows(t *testing.T) {
 		for i := range 250 {
 			at := time.Unix(int64(1000+i), 0)
 			row := func(leaf string, gone bool) cgSample {
-				return cgSample{T: at, Node: "n", Component: "workers", Pod: "w", Container: "ateom", Leaf: leaf, CPUSeconds: float64(i), Gone: gone}
+				return cgSample{T: at, Node: "n", Component: "workers", Pod: "w", Container: "worker", Leaf: leaf, CPUSeconds: float64(i), Gone: gone}
 			}
-			out = append(out, row("", false), row("ateom", false))
+			out = append(out, row("", false), row("worker", false))
 			for a := range actors {
 				if a == actors-1 && i > 100 {
 					continue
@@ -538,17 +538,17 @@ func TestCheckReaderOverheadAndGaps(t *testing.T) {
 func TestCgreaderAsCadvisor(t *testing.T) {
 	t.Parallel()
 	cg := &cgreaderReport{Nodes: map[string]*cgNode{"n": {Offsets: []clockOffset{{Offset: 2 * time.Second}}}}}
-	cg.Samples = append(cg.Samples, cgRows("n", "workers", "w", "ateom", "", 0.6, 0, 1)...)
-	cg.Samples = append(cg.Samples, cgRows("n", "workers", "w", "ateom", "ateom", 0.1, 0, 1)...)
-	cg.Samples = append(cg.Samples, cgRows("n", "workers", "w", "ateom", "a1-_pause", 0.2, 0, 1)...)
-	cg.Samples = append(cg.Samples, cgRows("n", "workers", "w", "ateom", "a2-_pause", 0.3, 0, 1)...)
+	cg.Samples = append(cg.Samples, cgRows("n", "workers", "w", "worker", "", 0.6, 0, 1)...)
+	cg.Samples = append(cg.Samples, cgRows("n", "workers", "w", "worker", "worker", 0.1, 0, 1)...)
+	cg.Samples = append(cg.Samples, cgRows("n", "workers", "w", "worker", "a1-_pause", 0.2, 0, 1)...)
+	cg.Samples = append(cg.Samples, cgRows("n", "workers", "w", "worker", "a2-_pause", 0.3, 0, 1)...)
 	cg.Samples = append(cg.Samples, cgRows("n", "cgreader", "r", "cgreader", "", 0.01, 0, 1)...)
 	// The worker's pod cgroup, whose leaves are its container scopes.
 	cg.Samples = append(cg.Samples, cgRows("n", "workers", "w", "POD", "", 0.7, 0, 1)...)
 	cg.Samples = append(cg.Samples, cgRows("n", "workers", "w", "POD", "cri-containerd-x.scope", 0.6, 0, 1)...)
 	containers, split := cgreaderAsCadvisor(cg)
 	if len(containers) != 4 || !containers[0].T.Equal(time.Unix(998, 0)) {
-		t.Errorf("containers = %+v, want the ateom rows shifted 2 s onto the driver clock", containers)
+		t.Errorf("containers = %+v, want the worker rows shifted 2 s onto the driver clock", containers)
 	}
 	parts := map[string]float64{}
 	seen := map[string]int{}

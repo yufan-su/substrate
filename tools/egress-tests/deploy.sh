@@ -46,6 +46,11 @@ TARGET_TLS_SECRET="egress-target-tls"
 
 WORKER_COUNT=2
 ACTOR_MEMORY="256Mi"
+# The API requires a cpu limit on every actor, and the scheduler books it
+# against the worker's cpu capacity. Actors idle between requests and use about
+# 30m, so 500m leaves room to burst while 25 actors still fit a 22-core node's
+# worker.
+ACTOR_CPU="500m"
 WORKER_MEMORY=""
 ENDPOINTS=100
 # Service i forwards to target ports HTTP_PORT_BASE+i and TLS_PORT_BASE+i, so
@@ -120,6 +125,7 @@ usage() {
   echo "  --worker-memory SIZE    Memory request and limit of each worker pod (default: unset)."
   echo "                          A worker hosts up to worker memory / actor memory actors."
   echo "  --actor-memory SIZE     Memory limit of each actor (default: ${ACTOR_MEMORY})"
+  echo "  --actor-cpu CPU         CPU limit of each actor (default: ${ACTOR_CPU})"
   echo "  --endpoints C           Endpoint Services to create, egress-target-0 up to"
   echo "                          egress-target-<C-1> (default: ${ENDPOINTS}, at most ${MAX_ENDPOINTS})"
   echo "  --target-image IMAGE    With --print-targets, the target image instead of its ko:// reference"
@@ -213,6 +219,7 @@ substitute() {
       -e "s|\${POOL_NAMESPACE}|${POOL_NAMESPACE}|g" \
       -e "s|\${WORKER_COUNT}|${WORKER_COUNT}|g" \
       -e "s|\${ACTOR_MEMORY}|${ACTOR_MEMORY}|g" \
+      -e "s|\${ACTOR_CPU}|${ACTOR_CPU}|g" \
       -e "s|\${WORKER_TEMPLATE}|${worker_template}|g" \
       "${manifest}"
 }
@@ -582,7 +589,7 @@ deploy() {
   else
     ensure_no_actors
     # Templates are immutable, so a changed one is deleted and created again.
-    echo "Creating actor template ${ATESPACE}/${TEMPLATE} (actor_memory=${ACTOR_MEMORY})..."
+    echo "Creating actor template ${ATESPACE}/${TEMPLATE} (actor_memory=${ACTOR_MEMORY}, actor_cpu=${ACTOR_CPU})..."
     run_kubectl_ate delete actor-template "${TEMPLATE}" -a "${ATESPACE}" >/dev/null 2>&1 || true
     substitute "${MANIFEST_DIR}/actor-template.yaml.tmpl" \
       | hack/run-tool.sh ko resolve -f - \
@@ -681,6 +688,13 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --actor-memory=*)
       ACTOR_MEMORY="${1#*=}"
+      ;;
+    --actor-cpu)
+      shift
+      ACTOR_CPU="$1"
+      ;;
+    --actor-cpu=*)
+      ACTOR_CPU="${1#*=}"
       ;;
     --endpoints)
       shift

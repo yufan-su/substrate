@@ -342,7 +342,7 @@ func summarizeResources(rep *report) {
 
 // addSplit adds the workers' actors and atunnel parts, from the cgroup
 // readers' leaves, as containers of the workers component. They are parts
-// of ateom, so they do not add to the component's total.
+// of the worker container, so they do not add to the component's total.
 func addSplit(res *resourceReport, split []cadvisorSample, steady phaseMark) {
 	bySeries := map[string][]cadvisorSample{}
 	for _, s := range split {
