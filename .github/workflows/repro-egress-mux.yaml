@@ -1,0 +1,123 @@
+# Temporary, not for upstream. Reproduces the TestActorEgressMultiplexing
+# failures seen with PR 2887 (runsc core tagging). Each job installs Agent
+# Substrate the way pr-workflow.yaml does, runs the gVisor preview lane
+# ITERATIONS times, and saves the egress gateway and worker logs after each run.
+# The "off" leg reverts the core tagging commit as a control.
+name: repro-egress-mux
+
+on:
+  push:
+    branches: [pr2887-egress-repro]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: repro (core tags ${{ matrix.core_tags }}, ${{ matrix.replica }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        core_tags: ['on', 'off']
+        replica: [1, 2]
+    env:
+      E2E_ATENET_DATAPLANE: envoy
+      ATE_CREDENTIAL_PROVIDER: '{"name":"k8s.io"}'
+      ATE_PREVIEW: ALL
+      ATE_INGRESS_ALLOWED_SPIFFE_IDS: spiffe://cluster.local/ns/ate-e2e-router-client/sa/router-client
+      ARTIFACTS: ${{ github.workspace }}/_artifacts
+      DOCKER_BUILD_FLAGS: >-
+        --cache-from type=gha,scope=envoy-dataplane
+        --cache-to type=gha,mode=max,scope=envoy-dataplane,ignore-error=true
+      ITERATIONS: 6
+    steps:
+    - name: Checkout
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        # The control leg reverts the core tagging commit, which needs it and
+        # its parent.
+        fetch-depth: 3
+        persist-credentials: false
+    - name: Revert core tagging
+      if: matrix.core_tags == 'off'
+      run: .github/repro-egress-mux/disable-core-tags.sh
+    - name: Setup Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: 'go.mod'
+        cache: false
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      with:
+        driver-opts: network=host
+        buildkitd-config-inline: |
+          [registry."localhost:5001"]
+            http = true
+    - name: Expose GitHub runtime to buildx
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      with:
+        script: |
+          for (const [key, value] of Object.entries(process.env)) {
+            if (key.startsWith('ACTIONS_')) core.exportVariable(key, value);
+          }
+    - name: Show CPU topology
+      run: .github/repro-egress-mux/topology.sh
+    - name: Create cluster
+      run: hack/create-kind-cluster.sh
+    - name: Install Agent Substrate (envoy)
+      env:
+        ATE_ATENET_DATAPLANE: envoy
+        NO_DEV_ENV: "true"
+        KO_DOCKER_REPO: "localhost:5001"
+        ATE_INSTALL_KIND: "true"
+        BUCKET_NAME: "ate-snapshot"
+        KIND_CLUSTER_NAME: "kind"
+        KUBECTL_CONTEXT: "kind-kind"
+      run: go run ./cmd/ate-setup deploy ate-system
+    - name: Enable NFS
+      run: |
+        sudo modprobe nfs || true
+        sudo modprobe nfsd || true
+    - name: Install CSI NFS driver
+      env:
+        NO_DEV_ENV: "true"
+        KO_DOCKER_REPO: "localhost:5001"
+        ATE_INSTALL_KIND: "true"
+        BUCKET_NAME: "ate-snapshot"
+        KIND_CLUSTER_NAME: "kind"
+        KUBECTL_CONTEXT: "kind-kind"
+      run: go run ./cmd/ate-setup setup csi nfs
+    - name: Deploy gVisor counter demo
+      env:
+        NO_DEV_ENV: "true"
+        KO_DOCKER_REPO: "localhost:5001"
+        ATE_INSTALL_KIND: "true"
+        BUCKET_NAME: "ate-snapshot"
+        KIND_CLUSTER_NAME: "kind"
+        KUBECTL_CONTEXT: "kind-kind"
+      run: go run ./cmd/ate-setup deploy demo counter
+    - name: Deploy egress demo
+      env:
+        NO_DEV_ENV: "true"
+        KO_DOCKER_REPO: "localhost:5001"
+        ATE_INSTALL_KIND: "true"
+        BUCKET_NAME: "ate-snapshot"
+        KIND_CLUSTER_NAME: "kind"
+        KUBECTL_CONTEXT: "kind-kind"
+      run: go run ./cmd/ate-setup deploy demo egress
+    - name: Trust local TLS origins in egress gateway
+      run: hack/setup-e2e-egress-tls-kind.sh
+    - name: Run the gVisor lane repeatedly
+      env:
+        E2E_PARALLELISM: 8
+      run: .github/repro-egress-mux/run-lanes.sh
+    - name: Upload logs
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: repro-core-tags-${{ matrix.core_tags }}-${{ matrix.replica }}
+        path: ${{ github.workspace }}/_artifacts
+        if-no-files-found: error
