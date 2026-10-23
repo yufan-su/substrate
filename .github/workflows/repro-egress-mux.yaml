@@ -38,8 +38,8 @@ jobs:
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         # The control leg reverts the core tagging commit, which needs it and
-        # its parent.
-        fetch-depth: 3
+        # its parent in the clone.
+        fetch-depth: 10
         persist-credentials: false
     - name: Revert core tagging
       if: matrix.core_tags == 'off'
