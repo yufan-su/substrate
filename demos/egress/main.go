@@ -504,17 +504,35 @@ func handleMux(w http.ResponseWriter, r *http.Request) {
 		err    error
 	}
 	outcomes := make([]muxOutcome, muxRequestCount)
+	timings := make([]muxTiming, muxRequestCount)
 
 	var doneWg sync.WaitGroup
 	doneWg.Add(muxRequestCount)
 	for i := range muxRequestCount {
 		go func(idx int) {
 			defer doneWg.Done()
-			status, body, reqErr := sendMuxRequest(ctx, cancel, targetAddr, parsed.Host, requestURI, &headersWg, allHeadersSent)
+			status, body, reqErr := sendMuxRequest(ctx, cancel, targetAddr, parsed.Host, requestURI, &headersWg, allHeadersSent, &timings[idx])
 			outcomes[idx] = muxOutcome{status: status, body: body, err: reqErr}
 		}(i)
 	}
 	doneWg.Wait()
+
+	// Logged after the burst so that logging doesn't change its timing.
+	for i, tm := range timings {
+		errText := ""
+		if outcomes[i].err != nil {
+			errText = outcomes[i].err.Error()
+		}
+		slog.Info("mux request timing",
+			"index", i,
+			"localAddr", tm.localAddr,
+			"dialStart", tm.dialStart.UTC().Format(time.RFC3339Nano),
+			"dialDoneMs", msAfter(tm.dialStart, tm.dialDone),
+			"headerWrittenMs", msAfter(tm.dialStart, tm.headerWritten),
+			"bodyWrittenMs", msAfter(tm.dialStart, tm.bodyWritten),
+			"responseReadMs", msAfter(tm.dialStart, tm.responseRead),
+			"err", errText)
+	}
 
 	for i, out := range outcomes {
 		if out.err != nil && !errors.Is(out.err, context.Canceled) {
@@ -540,7 +558,21 @@ func handleMux(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, fetchResponse{StatusCode: http.StatusOK})
 }
 
-func sendMuxRequest(ctx context.Context, cancel context.CancelFunc, targetAddr, host, requestURI string, headersWg *sync.WaitGroup, allHeadersSent <-chan struct{}) (int, string, error) {
+// muxTiming records when one /mux request reached each step.
+type muxTiming struct {
+	localAddr                                                     string
+	dialStart, dialDone, headerWritten, bodyWritten, responseRead time.Time
+}
+
+// msAfter returns the milliseconds from start to t, or -1 if t was never reached.
+func msAfter(start, t time.Time) float64 {
+	if t.IsZero() {
+		return -1
+	}
+	return float64(t.Sub(start).Microseconds()) / 1000
+}
+
+func sendMuxRequest(ctx context.Context, cancel context.CancelFunc, targetAddr, host, requestURI string, headersWg *sync.WaitGroup, allHeadersSent <-chan struct{}, tm *muxTiming) (int, string, error) {
 	headerDone := false
 	defer func() {
 		if !headerDone {
@@ -550,11 +582,14 @@ func sendMuxRequest(ctx context.Context, cancel context.CancelFunc, targetAddr, 
 	}()
 
 	var dialer net.Dialer
+	tm.dialStart = time.Now()
 	conn, err := dialer.DialContext(ctx, "tcp", targetAddr)
 	if err != nil {
 		return 0, "", fmt.Errorf("dialing %s: %w", targetAddr, err)
 	}
 	defer conn.Close()
+	tm.dialDone = time.Now()
+	tm.localAddr = conn.LocalAddr().String()
 
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := conn.SetDeadline(deadline); err != nil {
@@ -569,6 +604,7 @@ func sendMuxRequest(ctx context.Context, cancel context.CancelFunc, targetAddr, 
 	if _, err := io.WriteString(conn, reqHeader); err != nil {
 		return 0, "", fmt.Errorf("writing request headers: %w", err)
 	}
+	tm.headerWritten = time.Now()
 
 	headerDone = true
 	headersWg.Done()
@@ -586,8 +622,10 @@ func sendMuxRequest(ctx context.Context, cancel context.CancelFunc, targetAddr, 
 	if _, err := conn.Write(body); err != nil {
 		return 0, "", fmt.Errorf("writing request body: %w", err)
 	}
+	tm.bodyWritten = time.Now()
 
 	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodPost})
+	tm.responseRead = time.Now()
 	if err != nil {
 		return 0, "", fmt.Errorf("reading response: %w", err)
 	}

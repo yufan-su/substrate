@@ -21,8 +21,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        core_tags: ['on', 'off']
-        replica: [1, 2]
+        # The first run had 0 failures in 12 with 'off', so this run only
+        # collects timing from failing runs.
+        core_tags: ['on']
+        replica: [1, 2, 3]
     env:
       E2E_ATENET_DATAPLANE: envoy
       ATE_CREDENTIAL_PROVIDER: '{"name":"k8s.io"}'

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand/v2"
 	"net"
@@ -310,6 +311,7 @@ func (e *Proxy) handle(downstream net.Conn, active *activation) {
 	active.wg.Add(1)
 	e.mu.Unlock()
 
+	accepted := time.Now()
 	go func() {
 		defer active.wg.Done()
 		defer downstream.Close()
@@ -322,6 +324,7 @@ func (e *Proxy) handle(downstream net.Conn, active *activation) {
 		dialCtx, cancelDial := context.WithTimeout(active.ctx, e.tunnelOpenTimeout)
 		upstream, err := active.dialer.DialContext(dialCtx, destination)
 		cancelDial()
+		tunnelOpen := time.Now()
 		if err != nil {
 			slog.WarnContext(active.ctx, "atunnel failed to open egress tunnel", slog.String("destination", destination), slog.Any("err", err))
 			return
@@ -334,33 +337,107 @@ func (e *Proxy) handle(downstream net.Conn, active *activation) {
 		})
 		defer stop()
 
-		copyBothWays(downstream, upstream)
+		t := copyBothWays(downstream, upstream)
+		var connectSent time.Time
+		if stream, ok := upstream.(*h2StreamConn); ok {
+			if ns := stream.reqBody.headersWritten.Load(); ns != 0 {
+				connectSent = time.Unix(0, ns)
+			}
+		}
+		slog.InfoContext(active.ctx, "atunnel egress connection timing",
+			slog.String("actorAddr", downstream.RemoteAddr().String()),
+			slog.String("destination", destination),
+			slog.String("accepted", accepted.UTC().Format(time.RFC3339Nano)),
+			slog.Float64("connectSentMs", msAfter(accepted, connectSent)),
+			slog.Float64("tunnelOpenMs", msAfter(accepted, tunnelOpen)),
+			slog.Float64("firstActorReadMs", msAfter(accepted, t.firstActorRead)),
+			slog.Float64("firstUpstreamWriteMs", msAfter(accepted, t.firstUpstreamWrite)),
+			slog.Float64("firstActorWriteMs", msAfter(accepted, t.firstActorWrite)),
+			slog.Float64("upDoneMs", msAfter(accepted, t.upDone)),
+			slog.Float64("downDoneMs", msAfter(accepted, t.downDone)),
+			slog.Int64("actorBytes", t.actorBytes),
+			slog.Int64("originBytes", t.originBytes),
+			slog.Any("upErr", t.upErr),
+			slog.Any("downErr", t.downErr))
 	}()
 }
 
-func copyBothWays(a, b net.Conn) {
+// msAfter returns the milliseconds from start to t, or -1 if t was never reached.
+func msAfter(start, t time.Time) float64 {
+	if t.IsZero() {
+		return -1
+	}
+	return float64(t.Sub(start).Microseconds()) / 1000
+}
+
+// copyTiming records when each direction of a proxied connection first moved
+// data and when it ended.
+type copyTiming struct {
+	firstActorRead, firstUpstreamWrite, firstActorWrite time.Time
+	upDone, downDone                                    time.Time
+	actorBytes, originBytes                             int64
+	upErr, downErr                                      error
+}
+
+// copyBothWays copies actor connection a to and from upstream b. Unlike
+// io.Copy, it doesn't hold a 32 KiB buffer per direction while the tunnel is
+// idle.
+func copyBothWays(a, b net.Conn) copyTiming {
+	var t copyTiming
 	done := make(chan struct{}, 2)
+	toActor := &timedWriter{w: a}
 	go func() {
-		_, _ = copyConn(a, b)
+		if stream, ok := b.(*h2StreamConn); ok {
+			t.originBytes, t.downErr = stream.writeTo(toActor)
+		} else {
+			t.originBytes, t.downErr = (&streamCopy{dest: toActor, src: b}).do()
+		}
+		t.downDone = time.Now()
 		closeWrite(a)
 		done <- struct{}{}
 	}()
+	fromActor := &timedReader{r: a}
+	toUpstream := &timedWriter{w: b}
 	go func() {
-		_, _ = copyConn(b, a)
+		t.actorBytes, t.upErr = (&streamCopy{dest: toUpstream, src: fromActor}).do()
+		t.upDone = time.Now()
 		closeWrite(b)
 		done <- struct{}{}
 	}()
 	<-done
 	<-done
+	t.firstActorRead = fromActor.at
+	t.firstUpstreamWrite = toUpstream.at
+	t.firstActorWrite = toActor.at
+	return t
 }
 
-// copyConn copies src to dst until EOF. Unlike io.Copy, it doesn't hold a 32 KiB
-// buffer per direction while the tunnel is idle.
-func copyConn(dst, src net.Conn) (int64, error) {
-	if stream, ok := src.(*h2StreamConn); ok {
-		return stream.writeTo(dst)
+// timedReader records when its first non-empty read returned.
+type timedReader struct {
+	r  io.Reader
+	at time.Time
+}
+
+func (t *timedReader) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if n > 0 && t.at.IsZero() {
+		t.at = time.Now()
 	}
-	return (&streamCopy{dest: dst, src: src}).do()
+	return n, err
+}
+
+// timedWriter records when its first non-empty write returned.
+type timedWriter struct {
+	w  io.Writer
+	at time.Time
+}
+
+func (t *timedWriter) Write(p []byte) (int, error) {
+	n, err := t.w.Write(p)
+	if n > 0 && t.at.IsZero() {
+		t.at = time.Now()
+	}
+	return n, err
 }
 
 func closeWrite(conn net.Conn) {

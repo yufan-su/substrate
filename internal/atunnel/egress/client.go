@@ -442,6 +442,9 @@ func (c *Client) connectH2(ctx context.Context, h2Conn *h2ClientConn, wasVerifie
 	streamCtx, streamCancel := context.WithCancel(context.Background())
 	reqBody := newH2RequestBody()
 	traceCtx := httptrace.WithClientTrace(streamCtx, &httptrace.ClientTrace{
+		WroteHeaders: func() {
+			reqBody.headersWritten.Store(time.Now().UnixNano())
+		},
 		WroteRequest: func(info httptrace.WroteRequestInfo) {
 			reqBody.onWroteRequest(info.Err)
 		},
@@ -609,6 +612,10 @@ type h2RequestBody struct {
 
 	errMu    sync.Mutex
 	writeErr error
+
+	// headersWritten is when the CONNECT headers were written, in Unix
+	// nanoseconds.
+	headersWritten atomic.Int64
 
 	// Guarded by h2StreamConn.writeMu.
 	pendingSlot *readSlot
