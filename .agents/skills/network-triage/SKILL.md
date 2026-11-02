@@ -1,0 +1,173 @@
+---
+name: network-triage
+description: Finds which Agent Substrate networking component a customer's network problem comes from. Use when a support engineer has a ticket about substrate networking. Sorts the issue into setup, ingress, or egress, walks that path hop by hop, names the component and root cause with evidence, and checks the repo's issues for a known match. Read-only.
+---
+
+# Network Triage
+
+Name the networking component the customer's problem comes from, its root
+cause, and the evidence, and give next steps.
+
+Rules:
+
+1. **Read-only.** Run only `get`, `describe`, `logs`, `top`, admin-port GETs,
+   `gh` `list` and `view`, and `gcloud` `describe` and `list`.
+   Ask before anything that changes state, including Envoy admin POSTs such as
+   `/logging`, restarts, and `kubectl ate` lifecycle commands.
+2. **Cite evidence.** Back each conclusion with the status and body the caller
+   saw, a log line, or a config value. Label guesses as guesses.
+3. **Rule out hops in order.** If the evidence doesn't single out one component,
+   list the hops you cleared and the data that would decide between the rest.
+4. **Protect customer data.** The upstream repo is public. Replace atespace and
+   actor names, IPs, and hostnames before drafting a GitHub issue.
+
+This skill covers the default Envoy dataplane. The agentgateway dataplane
+(`ate-setup --atenet-dataplane=agentgateway`, `manifests/ate-install/components/agentgateway`)
+runs one `agentgateway` container in both atenet-router and atenet-egress. It
+replaces `envoy` and `atenet-router` in the router, and `envoy`, `ext-proc`, and
+`sdsmint` in the egress gateway, so the Envoy and ext_proc steps don't apply.
+
+## Components and root causes
+
+The **component** is the networking piece where the request failed: Ingress
+router, atunnel, DNS relay, Egress gateway, Credential provider, or Sandbox
+network. Each reference file describes the components on its path. If the
+failure is in none of them, the component is none.
+
+The **root cause** is why it failed: the component itself, or a cause outside
+networking listed in [references/shared-causes.md](references/shared-causes.md).
+
+## 1. Collect facts
+
+Ask the user for what's missing:
+
+- Who was calling whom: a caller reaching an actor, or the actor reaching out,
+  including DNS.
+- The exact status code and body, or the client error text (curl output, TLS
+  error, `Could not resolve host`).
+- Atespace, actor, time window, sandbox class (`gvisor` or `microvm`).
+- Substrate version, from the image tags. A from-source install has
+  digest-only images and no tag.
+  `kubectl -n ate-system get deploy,ds -o 'custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[*].image'`
+- Scope: one actor, one WorkerPool, or every actor.
+- What changed just before it started, such as an install or upgrade, a new
+  NetworkPolicy, a CNI change, or an egress policy edit. Recent changes are the
+  most likely cause.
+
+Then record the cluster:
+
+```bash
+kubectl version
+kubectl get nodes -o wide -L node.kubernetes.io/instance-type,kubernetes.io/arch,topology.kubernetes.io/zone
+kubectl get workerpool -A
+kubectl ate get workers
+
+# On GKE:
+gcloud container clusters describe <cluster> --location <location> \
+  --format='value(currentMasterVersion,networkConfig.datapathProvider,networkPolicy.enabled)'
+gcloud container node-pools list --cluster <cluster> --location <location>
+```
+
+- Kubernetes version of the control plane and of each node pool. Pod
+  certificates need GKE 1.37, or 1.36 with the beta APIs enabled. On 1.36,
+  nodes created before the APIs were enabled fail pod certificate mounts with
+  `MountVolume.SetUp failed: unimplemented` until they are replaced.
+- Platform and CNI. On GKE, `ADVANCED_DATAPATH` is Dataplane V2, which
+  enforces NetworkPolicy. On the legacy datapath, NetworkPolicy is enforced
+  only if `networkPolicy.enabled` is true. Elsewhere, find the CNI pods in
+  `kube-system`.
+- Sizing: node count, machine types, architecture, zones, WorkerPools, and
+  worker usage from the `ACTORS` column of `kubectl ate get workers`.
+
+## 2. Check setup
+
+A component that isn't up looks like a request failure further down the path.
+Check that first:
+
+```bash
+kubectl -n ate-system get pods -o wide -l 'app in (atenet-router,atenet-egress,k8s-credential-provider)'
+kubectl -n podcertificate-controller-system get pods
+kubectl ate get actor <actor> -a <atespace> -o yaml   # state, worker pod, uid
+kubectl -n <pool-ns> get pods -l ate.dev/worker-pool=<pool>
+kubectl -n ate-system logs deploy/atenet-router -c atenet-router --since=10m | grep 'health check failed'
+```
+
+Ready doesn't mean working: the router stays Ready when it can't reach
+ate-api-server. If a pod isn't Running and Ready, the actor is `CRASHED`, or
+the router logs health check failures, read
+[references/setup.md](references/setup.md). The category is **setup**.
+
+## 3. Pick the direction
+
+- A caller → actor request fails: category **ingress**. Read
+  [references/ingress.md](references/ingress.md). It covers the ingress router
+  and atunnel (ingress).
+- The actor's outbound call or DNS fails: category **egress**. Read
+  [references/egress.md](references/egress.md). It covers the sandbox network,
+  the DNS relay, atunnel (egress), the egress gateway, and the credential
+  provider.
+
+Start at the row that matches what the caller saw. Confirm with the log line
+before you name the component. Follow the hand-offs at the end of each section.
+NetworkPolicy and pod certificates break hops in both directions; they are in
+[references/shared-causes.md](references/shared-causes.md).
+
+## 4. Check known issues
+
+Search the repo's issues and merged PRs. Start with the exact error text or log
+message, then the component and symptom in plain words. Not every issue has a
+label, so search once without `--label` too.
+
+```bash
+gh issue list --repo agent-substrate/substrate --state all --label area/network --search '"<error text>"'
+gh issue list --repo agent-substrate/substrate --state all --search '"<log message>"'
+gh pr list --repo agent-substrate/substrate --state merged --search '"<error text>"' \
+  --json number,title,mergeCommit
+gh issue view <number> --repo agent-substrate/substrate --comments
+```
+
+Sort each candidate:
+
+- **Match:** same component, symptom, and root cause. If a merged PR fixes it,
+  find the first release that has the fix with
+  `git tag --list 'v*' --contains <merge-sha> --sort=v:refname | head -1`, after fetching
+  upstream tags. Compare it with the customer's version.
+- **Similar:** same component or symptom, but a different trigger, version, or
+  root cause. Say what differs. It can still give a workaround or the owner.
+- **None:** list the searches you ran.
+
+Don't comment on or open issues without approval.
+
+## 5. Know the gaps
+
+- atunnel and the DNS relay have no metrics. Use logs. The egress gateway's
+  ext_proc denials count in `atenet.router.route.duration` with
+  `ate.router.outcome=denied`. A TLS connection refused at the ClientHello
+  shows only in the `leg: clienthello` access log.
+- The DNS relay logs neither a name the policy denies nor an upstream that
+  doesn't answer. Compare the name with the egress policy.
+- The worker logs at info. atunnel's stale-assignment reject and "egress not
+  active" lines are debug only.
+- The egress gateway's per-request logs (`leg: mitm`, `leg: cleartext`) keep
+  only status 400 and above, response flags, non-OK gRPC, and a 1% sample.
+  Envoy `runtime_modify` can't change this: it answers 503
+  `No admin layer specified`. The CONNECT log (`[egress] authority=...`) and
+  `leg: passthrough` record every tunnel. `leg: clienthello` records only
+  connections that matched no filter chain (`NR`).
+- The worker image has no shell, so `kubectl exec` into it doesn't work.
+
+## 6. Report
+
+```
+Category:    setup | ingress | egress
+Component:   Ingress router | atunnel (ingress) | atunnel (egress) | DNS relay | Egress gateway | Credential provider | Sandbox network | none
+Root cause:  the component itself, or a root cause from shared-causes.md
+Caller saw:  <status, body, or error text, or the pod status>
+Cluster:     <platform and version, CNI, nodes and machine types, WorkerPools>, Substrate <tag>
+Evidence:    log lines and config, each with its pod and container
+Ruled out:   hops checked and cleared
+Known issue: #<number> match | similar | none found; fixed in <tag>, customer runs <tag>
+Confidence:  high | medium | low
+Next steps:  for the support engineer; for the customer, with commands or a workaround
+Owner:       area/network for any component, or the root cause's owner in shared-causes.md
+```

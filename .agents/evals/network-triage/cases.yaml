@@ -1,0 +1,130 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# One case per category and component. Tickets use the customer's words and
+# new names, never the source issue's title or number.
+
+- description: 'setup / atunnel (ingress): worker pods crash on a missing pod certificate'
+  vars:
+    ticket: |
+      We installed Substrate v1.0.0-rc.1 on a new GKE 1.37 cluster. The
+      control plane pods are running, but the worker pods in our WorkerPool
+      "agents" keep restarting in CrashLoopBackOff, so no actor can start.
+
+      kubectl logs <worker-pod> -c worker --previous:
+      {"level":"ERROR","msg":"Error while executing","err":"configuring ingress: ingress: reading credential bundle: open /run/podidentity.podcert.ate.dev/credential-bundle.pem: no such file or directory"}
+    category: setup
+    component: atunnel (ingress)
+    root_cause: [pod certificate]
+
+# Source: #3269
+- description: 'ingress / Ingress router: 503 for a crashed actor'
+  vars:
+    ticket: |
+      Every request to actor billing-7 in atespace payments waits about 5
+      seconds and then fails with HTTP 503. Other actors are fine. Its worker
+      pod was deleted during a node drain earlier today. Substrate
+      v1.0.0-rc.1, gVisor.
+
+      Response body:
+      actor payments/billing-7 unavailable: AssignWorker prerequisite not met for Actor: payments/billing-7 (got: ACTOR_STATE_CRASHED, want ACTOR_STATE_SUSPENDED)
+    category: ingress
+    component: Ingress router
+    root_cause: [ate-api-server]
+
+# Source: #689, with evidence from the current code.
+- description: 'ingress / atunnel (ingress): app moved off port 80'
+  vars:
+    ticket: |
+      We rebuilt our agent image on a new base, and since then every request
+      to the actor through the router fails with HTTP 503 and an empty body.
+      The actor shows RUNNING. The app inside now listens on port 8080. We
+      call it the same way as before, with only the ate-target-actor header.
+
+      Router log:
+      {"level":"INFO","msg":"Route ok","actor":"research/agent-3","targetAddr":"10.8.2.17:8443"}
+
+      Worker log:
+      {"level":"WARN","msg":"atunnel CONNECT upstream failed","actor":"research/agent-3","port":"80","err":"dial tcp 169.254.17.2:80: connect: connection refused"}
+    category: ingress
+    component: atunnel (ingress)
+    root_cause: [actor app, caller]
+
+# Source: #2062
+- description: 'egress / Sandbox network: metadata server blocked'
+  vars:
+    ticket: |
+      Our agent uses the cloud SDK's default credentials. Inside the actor,
+      every call to the metadata server fails at once:
+
+      curl: (7) Failed to connect to 169.254.169.254 port 80 after 0 ms: Couldn't connect to server
+
+      Calls to the external APIs we allow work. Substrate v1.0.0-rc.1 on GKE.
+    category: egress
+    component: Sandbox network
+    root_cause: [itself, sandbox network, by design]
+
+# Source: #3228
+- description: 'egress / DNS relay: no egress policy looks like a DNS failure'
+  vars:
+    ticket: |
+      Inside a new actor, `wget -q -O- https://api.github.com/zen` fails with
+      `wget: bad address 'api.github.com'`. We haven't set anything up for
+      outbound traffic yet. Nothing says the request was blocked. Substrate
+      v1.0.0-rc.1.
+    category: egress
+    component: DNS relay
+    root_cause: [customer config]
+
+- description: 'egress / atunnel (egress): default-deny NetworkPolicy blocks the gateway'
+  vars:
+    ticket: |
+      This morning our security team applied a default-deny egress
+      NetworkPolicy to every namespace. Since then, outbound HTTPS calls from
+      our actors open a connection and then close it at once with no data.
+      Substrate v1.0.0-rc.1.
+
+      Worker log, repeated:
+      {"level":"WARN","msg":"atunnel failed to open egress tunnel","destination":"203.0.113.10:443","err":"egress: connecting to egress gateway: dial tcp 10.96.41.7:443: i/o timeout"}
+    category: egress
+    component: atunnel (egress)
+    root_cause: [cluster network]
+
+# Source: #1937
+- description: 'egress / Egress gateway: WebSocket unsupported'
+  vars:
+    ticket: |
+      Our agent opens a WebSocket to wss://stream.example.com/v1/events, a
+      host our egress policy allows. The handshake gets HTTP 403 with the body
+      "WebSocket egress is not supported". Plain HTTPS requests to the same
+      host work. Substrate v1.0.0-rc.1.
+    category: egress
+    component: Egress gateway
+    root_cause: [itself, egress gateway, by design, unsupported]
+
+- description: 'egress / Credential provider: atespace not allowed for the secret namespace'
+  vars:
+    ticket: |
+      Requests from actors in atespace team-b to api.partner.com get HTTP 403.
+      Our egress policy injects an API key from a Kubernetes Secret, and the
+      same policy works for actors in atespace team-a. Substrate v1.0.0-rc.1.
+
+      Egress gateway ext-proc log:
+      {"level":"ERROR","msg":"egress denied: credential fetch failed","host":"api.partner.com","uri":"ate-secret://k8s.io/default/partner-keys/api-key/token","err":"rpc error: code = PermissionDenied desc = atespace \"team-b\" is not permitted to resolve secrets in namespace \"partner-keys\""}
+
+      Credential provider log:
+      {"level":"WARN","msg":"credential request denied: atespace not permitted for namespace","atespace":"team-b","namespace":"partner-keys"}
+    category: egress
+    component: Credential provider
+    root_cause: [itself, credential provider, customer config]
