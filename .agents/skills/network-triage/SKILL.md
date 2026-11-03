@@ -1,6 +1,6 @@
 ---
 name: network-triage
-description: Finds which Agent Substrate networking component a customer's network problem comes from. Use when a support engineer has a ticket about substrate networking. Sorts the issue into setup, ingress, or egress, walks that path hop by hop, names the component and root cause with evidence, and checks the repo's issues for a known match. Read-only.
+description: Finds which Agent Substrate networking component a customer's network problem comes from. Use when a support engineer has a ticket about Substrate networking: requests to an actor failing with an error or timeout, an actor's outbound calls or DNS failing, networking pods not running, or an actor crashing on resume. Sorts the issue into setup, ingress, or egress, walks that path hop by hop, names the component and root cause with evidence, and checks the repo's issues for a known match. Read-only.
 ---
 
 # Network Triage
@@ -31,8 +31,12 @@ replaces `envoy` and `atenet-router` in the router, and `envoy`, `ext-proc`, and
 
 The **component** is the networking piece where the request failed: Ingress
 router, atunnel, DNS relay, Egress gateway, Credential provider, or Sandbox
-network. Each reference file describes the components on its path. If the
-failure is in none of them, the component is none.
+network. It is the piece that returned the error or dropped the connection,
+even when the cause is elsewhere: a 503 the ingress router returns because the
+actor is `CRASHED` is component Ingress router, root cause ate-api-server. Each
+reference file describes the components on its path. The component is none
+only when no networking piece is involved, such as a worker that never
+registers.
 
 The **root cause** is why it failed: the component itself, or a cause outside
 networking listed in [references/shared-causes.md](references/shared-causes.md).
@@ -93,9 +97,11 @@ kubectl -n ate-system logs deploy/atenet-router -c atenet-router --since=10m | g
 ```
 
 Ready doesn't mean working: the router stays Ready when it can't reach
-ate-api-server. If a pod isn't Running and Ready, the actor is `CRASHED`, or
-the router logs health check failures, read
-[references/setup.md](references/setup.md). The category is **setup**.
+ate-api-server. If a pod isn't Running and Ready, the router logs health check
+failures, or the actor is `CRASHED` with a network error in
+`status.crash.message`, read [references/setup.md](references/setup.md). The
+category is **setup**. A `CRASHED` actor without a network error isn't a setup
+problem: triage the failing requests in step 3.
 
 ## 3. Pick the direction
 

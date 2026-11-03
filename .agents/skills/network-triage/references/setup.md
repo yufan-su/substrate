@@ -61,7 +61,8 @@ A worker error during run or restore moves the actor to `CRASHED`, unless atelet
 was unavailable or the call timed out or was canceled. Those leave the actor
 assigned so a retry can finish. The reason is in `status.crash.message` of
 `kubectl ate get actor -o yaml`, as `atelet <RPC>: <message>`. If it matches
-none of these rows, the crash isn't a networking problem.
+none of these rows, the crash has no network cause. Triage the requests that
+fail because of it by direction, in ingress.md or egress.md.
 
 | Message contains | Component | Root cause | Confirm |
 |---|---|---|---|

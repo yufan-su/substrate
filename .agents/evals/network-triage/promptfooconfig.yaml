@@ -38,6 +38,9 @@ prompts:
 tests: file://cases.yaml
 
 defaultTest:
+  options:
+    # Keep root_cause lists whole; by default each list item becomes its own test.
+    disableVarExpansion: true
   assert:
     - type: skill-used
       value: network-triage

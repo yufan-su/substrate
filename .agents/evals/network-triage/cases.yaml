@@ -27,6 +27,8 @@
     category: setup
     component: atunnel (ingress)
     root_cause: [pod certificate]
+  metadata:
+    kind: regression
 
 # Source: #3269
 - description: 'ingress / Ingress router: 503 for a crashed actor'
@@ -42,6 +44,8 @@
     category: ingress
     component: Ingress router
     root_cause: [ate-api-server]
+  metadata:
+    kind: regression
 
 # Source: #689, with evidence from the current code.
 - description: 'ingress / atunnel (ingress): app moved off port 80'
@@ -60,6 +64,8 @@
     category: ingress
     component: atunnel (ingress)
     root_cause: [actor app, caller]
+  metadata:
+    kind: regression
 
 # Source: #2062
 - description: 'egress / Sandbox network: metadata server blocked'
@@ -74,6 +80,8 @@
     category: egress
     component: Sandbox network
     root_cause: [itself, sandbox network, by design]
+  metadata:
+    kind: regression
 
 # Source: #3228
 - description: 'egress / DNS relay: no egress policy looks like a DNS failure'
@@ -86,6 +94,8 @@
     category: egress
     component: DNS relay
     root_cause: [customer config]
+  metadata:
+    kind: regression
 
 - description: 'egress / atunnel (egress): default-deny NetworkPolicy blocks the gateway'
   vars:
@@ -100,6 +110,8 @@
     category: egress
     component: atunnel (egress)
     root_cause: [cluster network]
+  metadata:
+    kind: regression
 
 # Source: #1937
 - description: 'egress / Egress gateway: WebSocket unsupported'
@@ -112,6 +124,8 @@
     category: egress
     component: Egress gateway
     root_cause: [itself, egress gateway, by design, unsupported]
+  metadata:
+    kind: regression
 
 - description: 'egress / Credential provider: atespace not allowed for the secret namespace'
   vars:
@@ -128,3 +142,251 @@
     category: egress
     component: Credential provider
     root_cause: [itself, credential provider, customer config]
+  metadata:
+    kind: regression
+
+# Source: #646
+- description: 'ingress / Ingress router: 500 during a node upgrade'
+  vars:
+    ticket: |
+      During a GKE node upgrade this afternoon, requests to some of our actors
+      returned HTTP 500 for about 15 seconds. A few actors were left stuck in
+      SUSPENDING. Retrying later worked. Substrate v1.0.0-rc.1.
+
+      Response body:
+      error resuming actor support/agent-12
+
+      ate-api-server log:
+      rpc error: code = Internal desc = internal server error: workflow failed at step CallAteletRestore: selected atelet "ate-system/atelet-k4m2p" has no assigned IPs
+    category: ingress
+    component: Ingress router
+    root_cause: [ate-api-server]
+  metadata:
+    kind: regression
+
+# Source: #1081
+- description: 'ingress / Ingress router: router at capacity during a cold-start burst'
+  vars:
+    ticket: |
+      During a burst of cold starts after a deploy, requests to actors that
+      were already running also got HTTP 503, even though those actors didn't
+      need waking. Substrate v0.1.0.
+
+      Response body:
+      actor "chat/session-88" unavailable: router at capacity
+    category: ingress
+    component: Ingress router
+    root_cause: [itself, ingress router]
+  metadata:
+    kind: regression
+
+# Source: #2866
+- description: 'ingress / Ingress router: request times out with parking off'
+  vars:
+    ticket: |
+      We set --parked-request-max=0 on the router to turn request parking off.
+      Now when an actor is briefly busy, requests to it fail after about 5
+      seconds with a 5xx and an empty body, not a 503 that says why.
+      Substrate v1.0.0-rc.1.
+    category: ingress
+    component: Ingress router
+    root_cause: [itself, ingress router]
+  metadata:
+    kind: regression
+
+# Source: #1342
+- description: 'egress / Sandbox network: UDP blocked'
+  vars:
+    ticket: |
+      UDP from our actor doesn't work. Our StatsD client and time sync fail at
+      once, and pinging external hosts fails too. HTTPS calls to the hosts our
+      egress policy allows work. Substrate v1.0.0-rc.1.
+    category: egress
+    component: Sandbox network
+    root_cause: [itself, sandbox network, by design]
+  metadata:
+    kind: regression
+
+# Source: #1430
+- description: 'egress / DNS relay: telemetry blocked by egress policy'
+  vars:
+    ticket: |
+      Since we turned on egress policies, our actors no longer export
+      OpenTelemetry metrics or traces to our in-cluster collector at
+      otel-collector.observability.svc.cluster.local:4317. The exporter logs
+      say it can't resolve the collector's name. Our policy allows only
+      api.example.com. Substrate v1.0.0-rc.1.
+    category: egress
+    component: DNS relay
+    root_cause: [customer config]
+  metadata:
+    kind: regression
+
+# Source: #2487
+- description: 'egress / Egress gateway: no egress policy on an older release'
+  vars:
+    ticket: |
+      Our agent runs, but every call it makes to api.anthropic.com fails with
+      "API Error: 403 egress denied", so it never gets a model response. We
+      haven't created an egress policy for it. Substrate v0.4.0.
+
+      Worker log:
+      atunnel: egress gateway rejected CONNECT with 403 Forbidden: egress denied
+    category: egress
+    component: Egress gateway
+    root_cause: [customer config]
+  metadata:
+    kind: regression
+
+# Source: #3243
+- description: 'egress / Egress gateway: PostgreSQL through the gateway gets a 400'
+  vars:
+    ticket: |
+      Our test agents can't connect to PostgreSQL or a Kafka broker running as
+      Services in the cluster. The Postgres client gets an HTTP 400 back, and
+      other TCP connections open and then close with no bytes. Substrate
+      v0.6.0, GKE 1.36.
+    category: egress
+    component: Egress gateway
+    root_cause: [itself, egress gateway, unsupported, by design]
+  metadata:
+    kind: regression
+
+# Source: #1424
+- description: 'egress / Egress gateway: actor does not trust the MITM CA'
+  vars:
+    ticket: |
+      After we turned on egress inspection, HTTPS calls from our actor to
+      api.example.com, which our policy allows, fail with:
+      x509: certificate signed by unknown authority
+      Substrate v1.0.0-rc.1.
+    category: egress
+    component: Egress gateway
+    root_cause: [customer config]
+  metadata:
+    kind: regression
+
+# Source: #3137
+- description: 'egress / Egress gateway: actor JWT not injected without a placeholder'
+  vars:
+    ticket: |
+      We set our egress policy to add the agent's identity token to calls to
+      our model gateway at llm.internal.example.com, but the requests arrive
+      without it, and the gateway returns 401. The agent's code doesn't set
+      an Authorization header itself. Substrate v1.0.0-rc.1.
+    category: egress
+    component: Egress gateway
+    root_cause: [customer config]
+  metadata:
+    kind: regression
+
+# Capability cases: the skill has no row for these yet, so they fail until it
+# gets one.
+
+# Source: #3268
+- description: 'setup / Ingress router: not ready for 15 seconds after each start'
+  vars:
+    ticket: |
+      Right after install, and whenever a router pod restarts, every request
+      to our actors fails for about 15 seconds. The new pod's readiness probe
+      fails for that whole time. Substrate v1.0.0-rc.1.
+
+      envoy log, twice, 15 seconds after "cds: added/updated 6 cluster(s)":
+      gRPC config: initial fetch timed out for type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret
+
+      Pod event:
+      Readiness probe failed: Get "http://10.64.0.23:9902/ready": dial tcp 10.64.0.23:9902: connect: connection refused
+    category: setup
+    component: Ingress router
+    root_cause: [itself, ingress router]
+  metadata:
+    kind: capability
+
+# Source: #1193
+- description: 'setup / Ingress router: envoy crash-loops on large nodes'
+  vars:
+    ticket: |
+      We moved our system node pool to 128-core machines. Since then the
+      router pods are in CrashLoopBackOff. The envoy container logs "Too many
+      open files", and the atenet-router container stays healthy. Substrate
+      v1.0.0-rc.1.
+
+      envoy log:
+      [warn] evutil_make_internal_pipe_: pipe: Too many open files
+      [err]  evsig_init_: socketpair: Too many open files
+    category: setup
+    component: Ingress router
+    root_cause: [itself, ingress router]
+  metadata:
+    kind: capability
+
+# Source: #1572
+- description: 'ingress / atunnel (ingress): suspend cuts off an in-flight request'
+  vars:
+    ticket: |
+      If an actor is suspended while it's handling a request, the caller gets
+      HTTP 502 with the body "bad gateway". The actor is fine afterwards, and
+      a retry works. Substrate v0.4.0, gVisor.
+
+      Worker log:
+      {"level":"WARN","msg":"atunnel upstream request failed","err":"context canceled"}
+    category: ingress
+    component: atunnel (ingress)
+    root_cause: [itself, atunnel]
+  metadata:
+    kind: capability
+
+# Source: #246
+- description: 'egress / Sandbox network: IPv6 destinations unreachable'
+  vars:
+    ticket: |
+      Our agent runs in an actor on EKS, where Services are IPv6-only. It
+      can't reach an in-cluster Service: the name resolves, but the
+      connection fails at once. Substrate v1.0.0-rc.1.
+
+      Agent log:
+      dial tcp [fd00:10:96::5a1c]:8083: connect: network is unreachable
+    category: egress
+    component: Sandbox network
+    root_cause: [itself, sandbox network, ipv4]
+  metadata:
+    kind: capability
+
+# Source: #3142
+- description: 'egress / atunnel (egress): outbound calls reset an hour after start'
+  vars:
+    ticket: |
+      About an hour after an actor starts, all its outbound HTTP calls fail
+      with "Connection reset by peer". They keep failing while the agent
+      retries, then recover after a minute with no traffic. Substrate v0.6.0.
+
+      Worker log:
+      {"level":"WARN","msg":"atunnel failed to open egress tunnel","err":"egress: gateway rejected CONNECT with 403 Forbidden: egress denied: invalid actor certificate"}
+
+      Egress gateway ext-proc log:
+      {"level":"WARN","msg":"egress denied: actor certificate rejected","err":"actor certificate is outside its validity period (2026-10-22T21:36:52Z..2026-10-22T22:41:52Z)"}
+
+      ate-api-server, 6 minutes earlier: MintWorkerActorCertificate succeeded
+      for this actor.
+    category: egress
+    component: atunnel (egress)
+    root_cause: [itself, atunnel]
+  metadata:
+    kind: capability
+
+# Source: #3285
+- description: 'egress / Egress gateway: policy change does not affect an open connection'
+  vars:
+    ticket: |
+      We changed an actor's rule for example.com from https to
+      tls_passthrough. Every later request from the actor to example.com gets
+      HTTP 403 "egress denied" on its existing connection. Substrate
+      v1.0.0-rc.1.
+
+      Egress gateway ext-proc log:
+      {"level":"WARN","msg":"egress denied: no https rule covers the connection's SNI","leg":"egress_tls_mitm","host":"example.com","sni":"example.com"}
+    category: egress
+    component: Egress gateway
+    root_cause: [itself, egress gateway, by design]
+  metadata:
+    kind: capability
