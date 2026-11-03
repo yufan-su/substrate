@@ -146,6 +146,22 @@ load_actor() {
   ACTOR_PATTERN="\"atespace\":\"${atespace}\",\"name\":\"${name}\"|${atespace}/${name}"
 }
 
+# actor_logs prints actor $2's lifecycle events, then its containers' output.
+# These show whether a request reached the actor and what its own outbound
+# calls returned. kubectl ate logs reads the actor's current worker only.
+actor_logs() {
+  local source out
+  section "Actor logs"
+  for source in lifecycle containers; do
+    printf '\n$ kubectl ate logs actor %s -a %s --source=%s\n' "$2" "$1" "${source}"
+    if ! out="$(kubectl ate logs actor "$2" -a "$1" --source="${source}" 2>&1)"; then
+      printf '%s\n(kubectl ate logs failed)\n' "${out}"
+      continue
+    fi
+    printf '%s' "${out}" | tail_lines
+  done
+}
+
 # print_actor prints the actor fields that triage needs.
 print_actor() {
   section "Actor"

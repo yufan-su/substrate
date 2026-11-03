@@ -18,7 +18,7 @@ Collect the evidence first:
 scripts/egress.sh <atespace> <actor>
 ```
 
-It prints the actor's egress policy, the DNS relay and atunnel lines on its
+It prints the actor's own logs and egress policy, the DNS relay and atunnel lines on its
 worker, the egress gateway's lines for the actor and errors for any actor, the
 gateway's stats, and the credential provider's warnings and namespace policy.
 Some lines are logged once per change, so widen the window, such as

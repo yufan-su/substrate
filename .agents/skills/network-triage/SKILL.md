@@ -98,15 +98,35 @@ problem: triage the failing requests in step 3.
 
 ## 3. Pick the direction
 
-- A caller → actor request fails: category **ingress**. Read
-  [references/ingress.md](references/ingress.md). It covers the ingress router
-  and atunnel (ingress).
-- The actor's outbound call or DNS fails: category **egress**. Read
-  [references/egress.md](references/egress.md). It covers the sandbox network,
-  the DNS relay, atunnel (egress), the egress gateway, and the credential
-  provider.
+Each piece on the path writes its errors in its own form, so the first error
+the customer saw tells you where to start.
 
-Start at the row that matches what the caller saw. Confirm with the log line
+| First signal | Category | Start at |
+|---|---|---|
+| No HTTP response from the router: connection refused, or a TLS failure | ingress | ingress.md § Ingress router |
+| A short `text/plain` body naming the actor, such as `actor … unavailable`, `error resuming actor …`, or `invalid actor reference` | ingress | ingress.md § Ingress router |
+| An empty 500 or 504, or `upstream request timeout` after about 5 minutes | ingress | ingress.md § Ingress router |
+| Envoy's `upstream connect error …` body, or a 503 after the router logged `Route ok` | ingress | ingress.md § atunnel (ingress) |
+| The actor's DNS fails: `bad address`, `Could not resolve host`, NXDOMAIN, SERVFAIL | egress | egress.md § DNS relay |
+| ping, UDP other than DNS, or the metadata server fails | egress | egress.md § Sandbox network |
+| The actor's TCP connection opens, then closes with no data | egress | egress.md § atunnel (egress) |
+| The actor gets an HTTP error from the gateway, such as 403 `egress denied`, or its TLS handshake fails | egress | egress.md § Egress gateway |
+| Errors only on requests that inject a credential | egress | egress.md § Egress gateway, then § Credential provider |
+| The actor's own error, and nothing fails on either path | none | Actor app |
+
+[references/ingress.md](references/ingress.md) covers the ingress router and
+atunnel (ingress). [references/egress.md](references/egress.md) covers the
+sandbox network, the DNS relay, atunnel (egress), the egress gateway, and the
+credential provider. Run the script at the top of the file first.
+
+**When the request reaches the actor.** A caller's request can fail because of
+the actor's own outbound call: an agent that can't reach its model API returns
+an error to its caller. The ingress hop worked: the router logged `Route ok`,
+and the actor's logs show the request arriving and its outbound call failing.
+Both scripts print the actor's logs. Triage the outbound call: the category is
+egress, and the caller's error is only evidence.
+
+In that file, start at the row that matches what the caller saw. Confirm with the log line
 before you name the component. Follow the hand-offs at the end of each section.
 NetworkPolicy and pod certificates break hops in both directions; they are in
 [references/shared-causes.md](references/shared-causes.md).

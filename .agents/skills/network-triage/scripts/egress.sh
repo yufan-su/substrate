@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Collects the egress evidence for one actor: its egress policy, the DNS relay
-# and atunnel lines on its worker, the egress gateway's lines and errors, and
-# the credential provider's warnings and namespace policy.
+# Collects the egress evidence for one actor: its own logs, its egress policy,
+# the DNS relay and atunnel lines on its worker, the egress gateway's lines and
+# errors, and the credential provider's warnings and namespace policy.
 #
 # Usage: egress.sh <atespace> <actor>
 
@@ -32,6 +32,7 @@ fi
 
 load_actor "$1" "$2"
 print_actor
+actor_logs "$1" "$2"
 
 section "Egress policy"
 run kubectl ate get egress-policy "$2" -a "$1" -o yaml

@@ -20,7 +20,7 @@ Collect the evidence first:
 scripts/ingress.sh <atespace> <actor>
 ```
 
-It prints the router's lines for the actor and errors for any actor, Envoy
+It prints the actor's own logs, the router's lines for the actor and errors for any actor, Envoy
 stats, recent requests, router metrics, and atunnel's lines on the actor's
 worker. Only Envoy's tunnel lines name the actor, and a healthy tunnel logs
 when it closes. Match per-request lines by time and status.

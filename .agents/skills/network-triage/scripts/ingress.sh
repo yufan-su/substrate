@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Collects the ingress evidence for one actor: the ingress router's lines for
-# it, router errors, Envoy stats, recent requests and metrics, and atunnel's
-# lines on the actor's worker.
+# Collects the ingress evidence for one actor: its own logs, the ingress
+# router's lines for it, router errors, Envoy stats, recent requests and
+# metrics, and atunnel's lines on the actor's worker.
 #
 # Usage: ingress.sh <atespace> <actor>
 
@@ -32,6 +32,7 @@ fi
 
 load_actor "$1" "$2"
 print_actor
+actor_logs "$1" "$2"
 
 section "Ingress router: lines for this actor"
 logs ate-system deploy/atenet-router atenet-router "${ACTOR_PATTERN}"
