@@ -12,13 +12,21 @@ Path:
 The actor uses no proxy settings. Only HTTP, HTTPS, and TLS whose SNI matches a
 `tls_passthrough` rule reach the origin.
 
+Collect the evidence first:
+
+```bash
+scripts/egress.sh <atespace> <actor>
+```
+
+It prints the actor's egress policy, the DNS relay and atunnel lines on its
+worker, the egress gateway's lines for the actor and errors for any actor, the
+gateway's stats, and the credential provider's warnings and namespace policy.
+Some lines are logged once per change, so widen the window, such as
+`SINCE=24h`, when the problem started earlier.
+
 Read the policy first. With no policy, all egress is denied, DNS included.
 Policy edits take up to 10s to reach the egress gateway and 5s to reach the DNS
 relay.
-
-```bash
-kubectl ate get egress-policy <actor> -a <atespace> -o yaml
-```
 
 ## Sandbox network
 
@@ -49,11 +57,6 @@ NXDOMAIN for the rest. Its log lines contain `dns relay` or `egress policy`.
 | NXDOMAIN for one name | Customer config: no `http`, `https`, or `tls_passthrough` rule matches the host. Nothing logs it | Compare the name with the policy |
 | NXDOMAIN for every name | Customer config: no egress policy. Or the relay hasn't fetched the policy through atelet since the actor resumed | `worker` log `Actor has no egress policy; blocking all DNS queries`, or `Could not fetch the actor's egress policy; refusing its DNS queries`. Each is logged once per change, so widen `--since`. Later fetch failures keep the cached policy and log `Could not refresh the actor's egress policy; using stale cached policy` |
 | SERVFAIL or timeout for an allowed name | [Cluster network](shared-causes.md#networkpolicy): kube-dns down or failing, or a NetworkPolicy blocks DNS from worker pods | Usually nothing logs it. Check kube-dns pods and the pool namespace's NetworkPolicies. `dns relay: could not send query to upstream` appears only when the send fails, and `dns relay: could not reach any upstream` only for DNS over TCP |
-
-```bash
-kubectl -n <pool-ns> logs <worker-pod> -c worker --since=1h | grep -E 'dns relay|egress policy'
-```
-
 ## atunnel (egress)
 
 atunnel runs in container `worker` of the worker pod, in the WorkerPool
@@ -77,11 +80,6 @@ attributes, so match it on time and `destination`.
 
 **Hand-off:** if `err` has `gateway rejected CONNECT with <status>: <body>`,
 atunnel reached the egress gateway and it refused. Go to Egress gateway.
-
-```bash
-kubectl -n <pool-ns> logs <worker-pod> -c worker --since=1h | grep -E 'atunnel|certificate'
-```
-
 ## Egress gateway
 
 atenet-egress, in `ate-system` with pods `app=atenet-egress`. Container
@@ -114,14 +112,6 @@ Requests the actor sends:
 `ext-proc` log `egress denied: credential fetch failed`, comes from the
 credential provider.
 
-```bash
-kubectl -n ate-system logs deploy/atenet-egress -c ext-proc --since=1h | grep -E 'egress denied|unavailable|lookup failed'
-kubectl -n ate-system logs deploy/atenet-egress -c envoy --since=1h | grep -E '<actor>|clienthello'
-kubectl -n ate-system logs deploy/atenet-egress -c sdsmint --since=1h | grep 'certificate request denied'
-kubectl -n ate-system port-forward deploy/atenet-egress 15000:15000 15090:15090
-curl -s localhost:15090/stats/prometheus
-```
-
 The egress gateway reports `atenet.router.route.duration` with
 `ate.router.outcome`. The outcome follows the gRPC code of the cause first, such
 as `not_found`, `timeout`, `denied`, or `failed_precondition`. Otherwise it
@@ -146,8 +136,3 @@ each of these, except an empty secret, which logs
 
 The provider reads its namespace policy only at startup, so an edit needs a
 restart. Ask before restarting it.
-
-```bash
-kubectl -n ate-system logs deploy/k8s-credential-provider --since=1h
-kubectl -n ate-system get cm k8s-credential-provider-namespace-policy -o yaml
-```

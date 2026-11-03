@@ -47,10 +47,12 @@ resolves the egress gateway's name.
   protects the traffic.
 
 ```bash
-kubectl get networkpolicy -A
-kubectl -n <pool-ns> get networkpolicy substrate-<pool> -o yaml
-kubectl get events -A --field-selector reason=NetworkPolicyConflict
+scripts/shared-causes.sh [<atespace> <actor>]
 ```
+
+It prints every NetworkPolicy, `NetworkPolicyConflict` events, and, with an
+actor, the `substrate-<pool>` policy of the actor's WorkerPool. It also prints
+the pod certificate checks below.
 
 ## Pod certificates
 
@@ -70,9 +72,6 @@ Certificates reload without a restart: atunnel ingress on each connection,
 Envoy on file change. atunnel's egress client reads the gateway's trust bundle
 once per actor activation.
 
-```bash
-kubectl get clustertrustbundles -l podcert.ate.dev/canarying=live
-kubectl get podcertificaterequests -A
-kubectl -n podcertificate-controller-system logs deploy/podcertificate-controller --since=1h \
-  | grep 'Error while handling PodCertificateRequest'
-```
+`scripts/shared-causes.sh` prints the trust bundles, every
+PodCertificateRequest, and podcertcontroller's
+`Error while handling PodCertificateRequest` lines.

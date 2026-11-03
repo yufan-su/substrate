@@ -74,16 +74,12 @@ fail because of it by direction, in ingress.md or egress.md.
 ## Commands
 
 ```bash
-kubectl -n ate-system describe pod -l app=atenet-router
-kubectl -n ate-system logs deploy/atenet-router -c atenet-router --since=1h | grep 'health check failed'
-kubectl -n ate-system logs deploy/atenet-egress -c ext-proc --previous
-kubectl -n podcertificate-controller-system get pods
-kubectl -n podcertificate-controller-system logs deploy/podcertificate-controller --since=1h
-
-kubectl -n ate-system port-forward deploy/atenet-router 9901:9901 4040:4040
-curl -s localhost:9901/listeners
-curl -s 'localhost:4040/statusz?format=json'
-
-kubectl -n <pool-ns> port-forward pod/<worker-pod> 8080:8080
-curl -s localhost:8080/readyz
+scripts/setup.sh [<atespace> <actor>]
 ```
+
+It describes every networking pod that isn't Running and Ready, and prints the
+last run of each restarted container. It prints the router's health check
+failures, its `/statusz` health and flags, and Envoy's listeners. With an
+actor, it prints the actor's state and crash message, its WorkerPool's pods,
+and the worker's `/readyz`. For pod certificate problems, also run
+`scripts/shared-causes.sh`.

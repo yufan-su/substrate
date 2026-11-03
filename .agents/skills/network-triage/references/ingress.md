@@ -14,6 +14,17 @@ writes the rest: an empty 500 or 504 when ext_proc fails, and a `text/plain`
 body starting `upstream connect error` or `upstream request timeout` for
 failures past the router.
 
+Collect the evidence first:
+
+```bash
+scripts/ingress.sh <atespace> <actor>
+```
+
+It prints the router's lines for the actor and errors for any actor, Envoy
+stats, recent requests, router metrics, and atunnel's lines on the actor's
+worker. Only Envoy's tunnel lines name the actor, and a healthy tunnel logs
+when it closes. Match per-request lines by time and status.
+
 ## Ingress router
 
 atenet-router, in `ate-system` with pods `app=atenet-router`. Container `envoy`
@@ -44,21 +55,6 @@ ate-api-server to resume the actor, and points `envoy` at the actor's worker.
 **Hand-off:** if `atenet-router` logged `Route ok` for the request, the router
 resolved the worker. Go to atunnel (ingress).
 
-```bash
-kubectl -n ate-system logs deploy/atenet-router -c atenet-router --since=1h \
-  | grep -E 'Error during ext_proc|ResumeActor result|Route ok|health check failed'
-# Only tunnel lines name the actor. A healthy tunnel logs when it closes.
-# Match per-request lines by time and status.
-kubectl -n ate-system logs deploy/atenet-router -c envoy --since=1h | grep 'actor=<atespace>/<actor>'
-
-# Envoy admin is loopback only; port-forward reaches it.
-kubectl -n ate-system port-forward deploy/atenet-router 9901:9901 4040:4040 9090:9090
-curl -s localhost:9901/clusters
-curl -s 'localhost:9901/stats?filter=ext_proc|actor_connect|ate-cluster|ssl'
-curl -s 'localhost:4040/statusz?format=json'   # recent requests, health, parking
-curl -s localhost:9090/metrics | grep atenet_router
-```
-
 Metric `atenet.router.route.duration` carries `ate.router.outcome`: `ok`,
 `not_found`, `no_capacity`, `failed_precondition`, `lock_conflict`,
 `unavailable`, `timeout`, `denied`, `resume_error`, `cancelled`, `rate_limited`.
@@ -81,10 +77,6 @@ tell them apart.
 | 503; worker log `atunnel CONNECT upstream failed` | Actor app: not listening on that port | `worker` log has `actor`, `port`, `err`. `connect_response` has `:status` 502 |
 | 503; worker log `http: TLS handshake error ... ingress: client is not "spiffe://..."` | [Pod certificates](shared-causes.md#pod-certificates): the router's identity doesn't match the worker's `--atunnel-client-identity`, often because the router runs in another namespace or ServiceAccount | Router namespace and ServiceAccount. The `envoy` tunnel line has `connect_response=-` |
 | 503; `envoy` tunnel line `connect_response` has `:status` 421 and `x-ate-assignment-stale: true` | ate-api-server: stale assignment, the actor isn't active on that worker. The worker logs the reject only at debug | Compare `WORKER IPS` in `kubectl ate get actor` with the IP in the tunnel line |
-| Hangs then fails, for every actor in a pool | [Cluster network](shared-causes.md#networkpolicy): a NetworkPolicy blocks router to worker | `kubectl get networkpolicy -n <pool-ns>` |
+| Hangs then fails, for every actor in a pool | [Cluster network](shared-causes.md#networkpolicy): a NetworkPolicy blocks router to worker | `scripts/shared-causes.sh <atespace> <actor>` |
 | 421 `misdirected request` with `X-Ate-Assignment-Stale: true` | ate-api-server: stale assignment. Only with `--upstream-connect=false` | |
 | 502 `bad gateway` | Actor app: not listening. Only with `--upstream-connect=false` | `worker` log `atunnel upstream request failed` |
-
-```bash
-kubectl -n <pool-ns> logs <worker-pod> -c worker --since=1h | grep -E 'atunnel|ingress:'
-```

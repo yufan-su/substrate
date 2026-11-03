@@ -1,6 +1,6 @@
 ---
 name: network-triage
-description: Finds which Agent Substrate networking component a customer's network problem comes from. Use when a support engineer has a ticket about Substrate networking: requests to an actor failing with an error or timeout, an actor's outbound calls or DNS failing, networking pods not running, or an actor crashing on resume. Sorts the issue into setup, ingress, or egress, walks that path hop by hop, names the component and root cause with evidence, and checks the repo's issues for a known match. Read-only.
+description: Finds which Agent Substrate networking component a customer's network problem comes from. Use when a support engineer has a ticket about Substrate networking, such as requests to an actor failing with an error or timeout, an actor's outbound calls or DNS failing, networking pods not running, or an actor crashing on resume. Sorts the issue into setup, ingress, or egress, walks that path hop by hop, names the component and root cause with evidence, and checks the repo's issues for a known match. Read-only.
 ---
 
 # Network Triage
@@ -10,8 +10,8 @@ cause, and the evidence, and give next steps.
 
 Rules:
 
-1. **Read-only.** Run only `get`, `describe`, `logs`, `top`, admin-port GETs,
-   `gh` `list` and `view`, and `gcloud` `describe` and `list`.
+1. **Read-only.** Run only the scripts in `scripts/`, `get`, `describe`, `logs`,
+   `top`, admin-port GETs, and `gcloud` `describe` and `list`.
    Ask before anything that changes state, including Envoy admin POSTs such as
    `/logging`, restarts, and `kubectl ate` lifecycle commands.
 2. **Cite evidence.** Back each conclusion with the status and body the caller
@@ -50,28 +50,25 @@ Ask the user for what's missing:
 - The exact status code and body, or the client error text (curl output, TLS
   error, `Could not resolve host`).
 - Atespace, actor, time window, sandbox class (`gvisor` or `microvm`).
-- Substrate version, from the image tags. A from-source install has
-  digest-only images and no tag.
-  `kubectl -n ate-system get deploy,ds -o 'custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[*].image'`
 - Scope: one actor, one WorkerPool, or every actor.
 - What changed just before it started, such as an install or upgrade, a new
   NetworkPolicy, a CNI change, or an egress policy edit. Recent changes are the
   most likely cause.
 
+The scripts in `scripts/` collect the evidence for each step. They only read,
+print each command before its output, and keep going when one command fails.
+`SINCE` sets how far back logs go (default `1h`), and `MAX_LINES` caps each log
+section (default 200). If you can't reach the cluster, send the script to the
+customer and ask for its output.
+
 Then record the cluster:
 
 ```bash
-kubectl version
-kubectl get nodes -o wide -L node.kubernetes.io/instance-type,kubernetes.io/arch,topology.kubernetes.io/zone
-kubectl get workerpool -A
-kubectl ate get workers
-
-# On GKE:
-gcloud container clusters describe <cluster> --location <location> \
-  --format='value(currentMasterVersion,networkConfig.datapathProvider,networkPolicy.enabled)'
-gcloud container node-pools list --cluster <cluster> --location <location>
+scripts/cluster.sh [<gke-cluster> <gke-location>]
 ```
 
+- Substrate version, from the image tags. A from-source install has
+  digest-only images and no tag.
 - Kubernetes version of the control plane and of each node pool. Pod
   certificates need GKE 1.37, or 1.36 with the beta APIs enabled. On 1.36,
   nodes created before the APIs were enabled fail pod certificate mounts with
@@ -89,11 +86,7 @@ A component that isn't up looks like a request failure further down the path.
 Check that first:
 
 ```bash
-kubectl -n ate-system get pods -o wide -l 'app in (atenet-router,atenet-egress,k8s-credential-provider)'
-kubectl -n podcertificate-controller-system get pods
-kubectl ate get actor <actor> -a <atespace> -o yaml   # state, worker pod, uid
-kubectl -n <pool-ns> get pods -l ate.dev/worker-pool=<pool>
-kubectl -n ate-system logs deploy/atenet-router -c atenet-router --since=10m | grep 'health check failed'
+scripts/setup.sh [<atespace> <actor>]
 ```
 
 Ready doesn't mean working: the router stays Ready when it can't reach
@@ -120,17 +113,20 @@ NetworkPolicy and pod certificates break hops in both directions; they are in
 
 ## 4. Check known issues
 
-Search the repo's issues and merged PRs. Start with the exact error text or log
-message, then the component and symptom in plain words. Not every issue has a
-label, so search once without `--label` too.
+Search the repo's issues and merged PRs with the exact error text or log
+message, then the component and symptom in plain words. For each phrase, the
+script searches issues labeled `area/network`, then all issues, because not
+every issue has a label, then merged PRs. `--view` prints one issue or PR with
+its comments, and the merge commit of a merged PR.
 
 ```bash
-gh issue list --repo agent-substrate/substrate --state all --label area/network --search '"<error text>"'
-gh issue list --repo agent-substrate/substrate --state all --search '"<log message>"'
-gh pr list --repo agent-substrate/substrate --state merged --search '"<error text>"' \
-  --json number,title,mergeCommit
-gh issue view <number> --repo agent-substrate/substrate --comments
+scripts/known-issues.sh '<error text>' '<log message>' '<symptom in plain words>'
+scripts/known-issues.sh --view <number>
 ```
+
+The script uses `gh` when it is installed and logged in. Otherwise it calls the
+GitHub API with `curl`, which allows 10 searches a minute, about three phrases.
+Set `GITHUB_TOKEN` to raise that.
 
 Sort each candidate:
 
