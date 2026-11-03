@@ -18,6 +18,9 @@
 # version, nodes, WorkerPools, and workers. On GKE, pass the cluster name and
 # location to also print the control plane version, datapath, and node pools.
 #
+# Only the customer can run its kubectl ate calls. When they fail, it says
+# so and still collects what kubectl can read.
+#
 # Usage: cluster.sh [<gke-cluster> <gke-location>]
 
 set -o errexit -o nounset -o pipefail
@@ -43,7 +46,7 @@ run kubectl get nodes -o wide \
 
 section "WorkerPools and workers"
 run kubectl get workerpool -A
-run kubectl ate get workers
+run_ate get workers
 
 if [[ "$#" -eq 2 ]]; then
   section "GKE"

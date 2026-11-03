@@ -14,11 +14,15 @@ Rules:
    `top`, admin-port GETs, and `gcloud` `describe` and `list`.
    Ask before anything that changes state, including Envoy admin POSTs such as
    `/logging`, restarts, and `kubectl ate` lifecycle commands.
-2. **Cite evidence.** Back each conclusion with the status and body the caller
+2. **Only the customer can run `kubectl ate`.** Substrate is the customer's
+   workload, and ate-api-server checks every call against their access policy.
+   Before a step that needs `kubectl ate`, tell the user, and give them the
+   command or script to send the customer.
+3. **Cite evidence.** Back each conclusion with the status and body the caller
    saw, a log line, or a config value. Label guesses as guesses.
-3. **Rule out hops in order.** If the evidence doesn't single out one component,
+4. **Rule out hops in order.** If the evidence doesn't single out one component,
    list the hops you cleared and the data that would decide between the rest.
-4. **Protect customer data.** The upstream repo is public. Replace atespace and
+5. **Protect customer data.** The upstream repo is public. Replace atespace and
    actor names, IPs, and hostnames before drafting a GitHub issue.
 
 This skill covers the default Envoy dataplane. The agentgateway dataplane
@@ -58,8 +62,15 @@ Ask the user for what's missing:
 The scripts in `scripts/` collect the evidence for each step. They only read,
 print each command before its output, and keep going when one command fails.
 `SINCE` sets how far back logs go (default `1h`), and `MAX_LINES` caps each log
-section (default 200). If you can't reach the cluster, send the script to the
-customer and ask for its output.
+section (default 200).
+
+These scripts call `kubectl ate`: `cluster.sh` for workers, `ingress.sh` and
+`egress.sh` for the actor, its logs, and its egress policy, and `setup.sh` and
+`shared-causes.sh` when given an actor. When a
+`kubectl ate` call fails, the script says only the customer can run it, skips
+the rest of its `kubectl ate` calls, and still collects what `kubectl` can
+read. The actor's worker logs need `kubectl ate` to find the worker. For the
+full evidence, ask the customer to run the script and send its output.
 
 Then record the cluster:
 

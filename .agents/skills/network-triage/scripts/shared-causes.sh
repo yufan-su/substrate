@@ -18,6 +18,9 @@
 # pod certificates. With an actor, it also prints the NetworkPolicy of the
 # actor's WorkerPool.
 #
+# Only the customer can run its kubectl ate calls. When they fail, it says
+# so and still collects what kubectl can read.
+#
 # Usage: shared-causes.sh [<atespace> <actor>]
 
 set -o errexit -o nounset -o pipefail
@@ -38,7 +41,7 @@ if [[ "$#" -eq 2 ]]; then
   if [[ -n "${WORKER_POOL}" ]]; then
     run kubectl -n "${WORKER_NS}" get networkpolicy "substrate-${WORKER_POOL}" -o yaml
   else
-    echo "The actor has no worker, so its WorkerPool is unknown."
+    no_worker
   fi
 fi
 

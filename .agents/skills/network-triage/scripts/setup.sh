@@ -19,6 +19,9 @@
 # container, and prints the router's health and listeners. With an actor, it
 # also prints the actor's state, its worker pod, and that worker's readiness.
 #
+# Only the customer can run its kubectl ate calls. When they fail, it says
+# so and still collects what kubectl can read.
+#
 # Usage: setup.sh [<atespace> <actor>]
 
 set -o errexit -o nounset -o pipefail
@@ -72,7 +75,6 @@ fi
 
 if [[ "$#" -eq 2 ]]; then
   load_actor "$1" "$2"
-  print_actor
   if [[ -n "${WORKER_POD}" ]]; then
     section "Worker"
     run kubectl -n "${WORKER_NS}" get pods -o wide -l "ate.dev/worker-pool=${WORKER_POOL}"

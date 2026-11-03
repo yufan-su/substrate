@@ -18,6 +18,9 @@
 # router's lines for it, router errors, Envoy stats, recent requests and
 # metrics, and atunnel's lines on the actor's worker.
 #
+# Only the customer can run its kubectl ate calls. When they fail, it says
+# so and still collects what kubectl can read.
+#
 # Usage: ingress.sh <atespace> <actor>
 
 set -o errexit -o nounset -o pipefail
@@ -31,7 +34,6 @@ if [[ "$#" -ne 2 ]]; then
 fi
 
 load_actor "$1" "$2"
-print_actor
 actor_logs "$1" "$2"
 
 section "Ingress router: lines for this actor"
@@ -62,5 +64,5 @@ section "atunnel (ingress)"
 if [[ -n "${WORKER_POD}" ]]; then
   logs "${WORKER_NS}" "pod/${WORKER_POD}" worker 'atunnel|ingress:'
 else
-  echo "The actor has no worker, so there are no atunnel logs to read."
+  no_worker
 fi

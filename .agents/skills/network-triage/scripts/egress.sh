@@ -18,6 +18,9 @@
 # the DNS relay and atunnel lines on its worker, the egress gateway's lines and
 # errors, and the credential provider's warnings and namespace policy.
 #
+# Only the customer can run its kubectl ate calls. When they fail, it says
+# so and still collects what kubectl can read.
+#
 # Usage: egress.sh <atespace> <actor>
 
 set -o errexit -o nounset -o pipefail
@@ -31,17 +34,16 @@ if [[ "$#" -ne 2 ]]; then
 fi
 
 load_actor "$1" "$2"
-print_actor
 actor_logs "$1" "$2"
 
 section "Egress policy"
-run kubectl ate get egress-policy "$2" -a "$1" -o yaml
+run_ate get egress-policy "$2" -a "$1" -o yaml
 
 section "DNS relay and atunnel (egress)"
 if [[ -n "${WORKER_POD}" ]]; then
   logs "${WORKER_NS}" "pod/${WORKER_POD}" worker 'dns relay|egress policy|atunnel|certificate'
 else
-  echo "The actor has no worker, so there are no worker logs to read."
+  no_worker
 fi
 
 section "Egress gateway: lines for this actor"
