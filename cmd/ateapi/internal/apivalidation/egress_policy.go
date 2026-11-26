@@ -60,6 +60,19 @@ func ValidateCustom_UpdateActorEgressPolicyRequest(_ context.Context, _ operatio
 	return validateEgressPolicyParentAtespace(req.GetActor(), req.GetEgressPolicy(), p)
 }
 
+// This exists to do partial validation of the target resource in an update.
+func ValidateCustom_UpdateActorEgressPolicyRequest_EgressPolicy(ctx context.Context, op operation.Operation, fldPath *field.Path, policy, _ *ateapi.EgressPolicy) field.ErrorList {
+	if policy == nil || policy.Metadata == nil {
+		return nil // handled by DV
+	}
+
+	// Updates are validated in 2 steps: first the update request and then the
+	// resource itself. DV for the request doesn't descend into the resource
+	// metadata. What we need is something like:
+	//   +k8s:subfield(metadata)=+k8s:validateType
+	return Validate_ResourceMetadata(ctx, op, fldPath.Child("metadata"), policy.Metadata, nil)
+}
+
 func validateEgressPolicyParentAtespace(actor *ateapi.ObjectRef, policy *ateapi.EgressPolicy, p *field.Path) field.ErrorList {
 	if actor == nil || actor.Atespace == "" {
 		return nil // regular DV will handle it
@@ -225,8 +238,13 @@ func ValidateCustom_CredentialHeader_CredentialUri(_ context.Context, _ operatio
 }
 
 func validCredentialURI(raw string) bool {
+	// url.Parse lowercases the scheme, and leaves RawQuery and Fragment empty
+	// for a trailing "?" or "#", so check the raw string.
+	if !strings.HasPrefix(raw, "ate-secret://") || strings.ContainsAny(raw, "?#") {
+		return false
+	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "ate-secret" || u.Host == "" || u.Host != u.Hostname() || u.User != nil || u.RawQuery != "" || u.Fragment != "" || len(validation.IsDNS1123Subdomain(u.Host)) != 0 {
+	if err != nil || u.Host == "" || u.Host != u.Hostname() || u.User != nil || len(validation.IsDNS1123Subdomain(u.Host)) != 0 {
 		return false
 	}
 	escapedPath := u.EscapedPath()

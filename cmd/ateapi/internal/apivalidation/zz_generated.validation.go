@@ -2742,6 +2742,9 @@ func Validate_CredentialHeader(
 			if e := ValidateCustom_CredentialHeader_CredentialUri(ctx, op, fldPath, obj, oldObj); len(e) != 0 {
 				errs = append(errs, e...)
 			}
+			if e := validate.MaxLength(ctx, op, fldPath, obj, oldObj, 1024); len(e) != 0 {
+				errs = append(errs, e...)
+			}
 			return
 		}
 		oldVal := safe.Field(oldObj,
@@ -3642,6 +3645,7 @@ func Validate_EgressPolicy(
 			fldPath *field.Path,
 			obj, oldObj []*v1.EgressRule,
 			oldValueCorrelated bool) (errs field.ErrorList) {
+			// Uniqueness validation is implemented via custom, handwritten validation
 			// don't revalidate unchanged data
 			if oldValueCorrelated && op.Type == operation.Update {
 				if ateDeepEqual(obj, oldObj) {
@@ -3669,7 +3673,7 @@ func Validate_EgressPolicy(
 				errs = append(errs, e...)
 			}
 			// iterate the list and call the type's validation function
-			if e := validate.EachPtrSliceVal(ctx, op, fldPath, obj, oldObj, nil, nil, Validate_EgressRule); len(e) != 0 {
+			if e := validate.EachPtrSliceVal(ctx, op, fldPath, obj, oldObj, ateDeepEqual, nil, Validate_EgressRule); len(e) != 0 {
 				errs = append(errs, e...)
 			}
 			return
@@ -9382,8 +9386,55 @@ func Validate_UpdateActorEgressPolicyRequest(
 			if earlyReturn {
 				return // do not proceed
 			}
-			// call the type's validation function
-			errs = append(errs, Validate_EgressPolicy(ctx, op, fldPath, obj, oldObj)...)
+			// custom validation
+			if e := ValidateCustom_UpdateActorEgressPolicyRequest_EgressPolicy(ctx, op, fldPath, obj, oldObj); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			func() { // cohort = "metadata"
+				earlyReturn := false
+				if e := validate.Subfield(ctx, op, fldPath, obj, oldObj, "metadata",
+					func(o *v1.EgressPolicy) *v1.ResourceMetadata { return o.Metadata }, ateDeepEqual,
+					func(ctx context.Context, op operation.Operation, fldPath *field.Path, obj, oldObj *v1.ResourceMetadata) field.ErrorList {
+						return validate.RequiredPointer(ctx, op, fldPath, obj, oldObj)
+					}).MarkShortCircuit(); len(e) != 0 {
+					errs = append(errs, e...)
+					earlyReturn = true
+				}
+				if earlyReturn {
+					return // do not proceed
+				}
+			}()
+			func() { // cohort = "metadata.atespace"
+				earlyReturn := false
+				if e := validate.Subfield(ctx, op, fldPath, obj, oldObj, "metadata",
+					func(o *v1.EgressPolicy) *v1.ResourceMetadata { return o.Metadata }, ateDeepEqual,
+					func(ctx context.Context, op operation.Operation, fldPath *field.Path, obj, oldObj *v1.ResourceMetadata) field.ErrorList {
+						return validate.Subfield(ctx, op, fldPath, obj, oldObj, "atespace",
+							func(o *v1.ResourceMetadata) *string { return &o.Atespace }, validate.DirectEqual,
+							func(ctx context.Context, op operation.Operation, fldPath *field.Path, obj, oldObj *string) field.ErrorList {
+								return validate.RequiredValue(ctx, op, fldPath, obj, oldObj)
+							})
+					}).MarkShortCircuit(); len(e) != 0 {
+					errs = append(errs, e...)
+					earlyReturn = true
+				}
+				if earlyReturn {
+					return // do not proceed
+				}
+			}()
+			func() { // cohort = "metadata.name"
+				if e := validate.Subfield(ctx, op, fldPath, obj, oldObj, "metadata",
+					func(o *v1.EgressPolicy) *v1.ResourceMetadata { return o.Metadata }, ateDeepEqual,
+					func(ctx context.Context, op operation.Operation, fldPath *field.Path, obj, oldObj *v1.ResourceMetadata) field.ErrorList {
+						return validate.Subfield(ctx, op, fldPath, obj, oldObj, "name",
+							func(o *v1.ResourceMetadata) *string { return &o.Name }, validate.DirectEqual,
+							func(ctx context.Context, op operation.Operation, fldPath *field.Path, obj, oldObj *string) field.ErrorList {
+								return validate.Matches(ctx, op, fldPath, obj, oldObj, formatPattern_ate_singleton_name, "must be \"default\"", "format=ate-singleton-name")
+							})
+					}); len(e) != 0 {
+					errs = append(errs, e...)
+				}
+			}()
 			return
 		}
 		oldVal := safe.Field(oldObj,

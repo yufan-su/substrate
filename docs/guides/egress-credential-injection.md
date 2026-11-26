@@ -119,10 +119,11 @@ cluster admin grants its atespace access to the `ns1` namespace.
 A credential URI has the form
 `ate-secret://<provider-class>/<provider-specific-tail>`. The
 host names the provider that resolves it, and the provider interprets the
-path. The API requires the host to be a DNS-1123 subdomain and the path to
-have at least two non-empty segments. It rejects a port, userinfo, query, fragment,
-percent-encoding, or trailing slash. A URI the provider refuses denies the
-request with 403.
+path. The API requires the lowercase `ate-secret` scheme, a host that is a
+DNS-1123 subdomain, and a path with at least two non-empty segments. It rejects
+a port, userinfo, query, fragment, percent-encoding, or trailing slash, and a
+URI longer than 1024 characters. A URI
+the provider refuses denies the request with 403.
 
 * **Kubernetes Secrets** (provider class `k8s.io`) — see
   [The reference provider](#the-reference-provider).

@@ -621,6 +621,8 @@ message EgressPolicy {
   // +k8s:optional
   // +k8s:maxItems=256
   // +k8s:listType=atomic
+  // +k8s:unique=set
+  // +k8s:customUnique
   // +k8s:customValidation # no two rules tie on a name and port
   repeated EgressRule rules = 2;
 }
@@ -843,6 +845,7 @@ message CredentialHeader {
   //
   // +k8s:optional
   // +k8s:unionMember
+  // +k8s:maxLength=1024
   // +k8s:customValidation # format
   string credential_uri = 3;
 
@@ -1943,9 +1946,15 @@ message UpdateActorEgressPolicyRequest {
   ObjectRef actor = 1;
 
   // Full replacement. Metadata UID and version are required preconditions;
-  // atespace and name are immutable and must match the existing policy.
+  // atespace and name are immutable and must match the existing policy. A rule
+  // equal to a rule of the existing policy is not revalidated.
   //
   // +k8s:required
+  // +k8s:opaqueType # updates are handled in 2 steps, do not descend
+  // +k8s:customValidation # descend into metadata
+  // +k8s:subfield(metadata)=+k8s:required
+  // +k8s:subfield(metadata)=+k8s:subfield(atespace)=+k8s:required
+  // +k8s:subfield(metadata)=+k8s:subfield(name)=+k8s:format=ate-singleton-name
   EgressPolicy egress_policy = 2;
 }
 

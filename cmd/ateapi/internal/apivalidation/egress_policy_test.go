@@ -322,19 +322,114 @@ func TestValidateUpdateActorEgressPolicyRequest(t *testing.T) {
 			field.Invalid(field.NewPath("egress_policy", "metadata", "atespace"), "other", "must match actor.atespace"),
 		},
 	}, {
+		name: "missing metadata",
+		req: func() *ateapi.UpdateActorEgressPolicyRequest {
+			r := validReq()
+			r.EgressPolicy.Metadata = nil
+			return r
+		}(),
+		want: field.ErrorList{
+			field.Required(field.NewPath("egress_policy", "metadata"), ""),
+		},
+	}, {
+		name: "missing policy atespace",
+		req: func() *ateapi.UpdateActorEgressPolicyRequest {
+			r := validReq()
+			r.EgressPolicy.Metadata.Atespace = ""
+			return r
+		}(),
+		want: field.ErrorList{
+			field.Required(field.NewPath("egress_policy", "metadata", "atespace"), ""),
+		},
+	}, {
+		name: "wrong policy name",
+		req: func() *ateapi.UpdateActorEgressPolicyRequest {
+			r := validReq()
+			r.EgressPolicy.Metadata.Name = "other"
+			return r
+		}(),
+		want: field.ErrorList{
+			field.Invalid(field.NewPath("egress_policy", "metadata", "name"), "other", `must be "default"`).WithOrigin("format=ate-singleton-name"),
+		},
+	}, {
+		// ValidateEgressPolicyUpdate validates the rules against the stored policy.
 		name: "invalid rule",
 		req: func() *ateapi.UpdateActorEgressPolicyRequest {
 			r := validReq()
 			r.EgressPolicy.Rules[0].Http.Hostnames = nil
 			return r
 		}(),
-		want: field.ErrorList{
-			field.Required(field.NewPath("egress_policy", "rules").Index(0).Child("http", "hostnames"), ""),
-		},
 	}}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assertValidateErr(t, ValidateUpdateActorEgressPolicyRequest(context.Background(), tc.req), tc.want)
+		})
+	}
+}
+
+func TestValidateEgressPolicyUpdate(t *testing.T) {
+	root := field.NewPath("egress_policy")
+	const validURI = "ate-secret://kubernetes.io/provider/ns/name"
+	// legacyURI was valid before the scheme had to be lowercase.
+	const legacyURI = "ATE-SECRET://kubernetes.io/provider/ns/name"
+	rule := func(hostname, uri string) *ateapi.EgressRule {
+		return &ateapi.EgressRule{Http: &ateapi.HttpRule{
+			Hostnames: []string{hostname},
+			Effects: &ateapi.HttpRuleEffects{ReplaceHeaders: []*ateapi.CredentialHeader{{
+				Header:        "Authorization",
+				CredentialUri: uri,
+			}}},
+		}}
+	}
+	legacyRule := func() *ateapi.EgressRule { return rule("legacy.example.com", legacyURI) }
+	otherRule := func() *ateapi.EgressRule { return rule("other.example.com", validURI) }
+	policy := func(rules ...*ateapi.EgressRule) *ateapi.EgressPolicy {
+		p := validEgressPolicy()
+		p.Rules = rules
+		defaults.Apply(p)
+		return p
+	}
+	uriPath := func(i int) *field.Path {
+		return root.Child("rules").Index(i).Child("http", "effects", "replace_headers").Index(0).Child("credential_uri")
+	}
+
+	tests := []struct {
+		name   string
+		newObj *ateapi.EgressPolicy
+		want   field.ErrorList
+	}{{
+		name:   "unchanged",
+		newObj: policy(legacyRule(), otherRule()),
+	}, {
+		name:   "another rule added",
+		newObj: policy(legacyRule(), otherRule(), rule("new.example.com", validURI)),
+	}, {
+		name:   "rules reordered",
+		newObj: policy(otherRule(), legacyRule()),
+	}, {
+		name:   "legacy URI repaired",
+		newObj: policy(rule("legacy.example.com", validURI), otherRule()),
+	}, {
+		name:   "legacy URI changed to another invalid one",
+		newObj: policy(rule("legacy.example.com", legacyURI+"?"), otherRule()),
+		want:   field.ErrorList{field.Invalid(uriPath(0), nil, "")},
+	}, {
+		name:   "rule with the legacy URI changed",
+		newObj: policy(rule("changed.example.com", legacyURI), otherRule()),
+		want:   field.ErrorList{field.Invalid(uriPath(0), nil, "")},
+	}, {
+		name:   "legacy URI copied to a new rule",
+		newObj: policy(legacyRule(), otherRule(), rule("new.example.com", legacyURI)),
+		want:   field.ErrorList{field.Invalid(uriPath(2), nil, "")},
+	}, {
+		name:   "invalid new rule",
+		newObj: policy(legacyRule(), otherRule(), &ateapi.EgressRule{Http: &ateapi.HttpRule{}}),
+		want:   field.ErrorList{field.Required(root.Child("rules").Index(2).Child("http", "hostnames"), "")},
+	}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			oldObj := policy(legacyRule(), otherRule())
+			assertValidateErr(t, ValidateEgressPolicyUpdate(context.Background(), root, tc.newObj, oldObj), tc.want)
 		})
 	}
 }
@@ -871,6 +966,14 @@ func TestValidateEgressPolicyRules(t *testing.T) {
 			field.Invalid(staticHeader.Child("credential_uri"), "https://example.com/secret", "must be ate-secret://<provider-class>/<provider-name>/<provider-specific-tail>"),
 		},
 	}, {
+		name: "credential URI too long",
+		mutate: func(p *ateapi.EgressPolicy) {
+			p.Rules[0].Http.Effects.ReplaceHeaders[0].CredentialUri = "ate-secret://kubernetes.io/provider/" + strings.Repeat("x", 989)
+		},
+		want: field.ErrorList{
+			field.TooLong(staticHeader.Child("credential_uri"), nil, 1024).WithOrigin("maxLength"),
+		},
+	}, {
 		name: "actor JWT on an http rule",
 		mutate: func(p *ateapi.EgressPolicy) {
 			p.Rules[0].Http.Effects.ReplaceHeaders[0] = actorJWTHeader("https://api.example.com")
@@ -1023,6 +1126,11 @@ func TestCredentialURIValidation(t *testing.T) {
 		"ate-secret://kubernetes.io:443/provider/secret",
 		"ate-secret://kubernetes.io/provider/sec%2Fret", // percent-encoded separator
 		"ate-secret://kubernetes.io/provider/sec%2Dret", // percent-encoding of any kind
+		"ATE-SECRET://kubernetes.io/provider/secret",    // url.Parse lowercases the scheme
+		"ate-secret://kubernetes.io/provider/secret?",   // empty query
+		"ate-secret://kubernetes.io/provider/secret#",   // empty fragment
+		"ate-secret://kubernetes.io/provider/secret?version=1",
+		"ate-secret://kubernetes.io/provider/secret#key",
 	} {
 		if validCredentialURI(uri) {
 			t.Errorf("validCredentialURI(%q) = true", uri)

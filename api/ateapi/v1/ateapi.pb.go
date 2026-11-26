@@ -1335,6 +1335,8 @@ type EgressPolicy struct {
 	// +k8s:optional
 	// +k8s:maxItems=256
 	// +k8s:listType=atomic
+	// +k8s:unique=set
+	// +k8s:customUnique
 	// +k8s:customValidation # no two rules tie on a name and port
 	Rules         []*EgressRule `protobuf:"bytes,2,rep,name=rules,proto3" json:"rules,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1964,6 +1966,7 @@ type CredentialHeader struct {
 	//
 	// +k8s:optional
 	// +k8s:unionMember
+	// +k8s:maxLength=1024
 	// +k8s:customValidation # format
 	CredentialUri string `protobuf:"bytes,3,opt,name=credential_uri,json=credentialUri,proto3" json:"credential_uri,omitempty"`
 	// A Substrate-issued JWT asserting the identity of the Actor that sent the
@@ -5653,9 +5656,15 @@ type UpdateActorEgressPolicyRequest struct {
 	// +k8s:subfield(atespace)=+k8s:required
 	Actor *ObjectRef `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
 	// Full replacement. Metadata UID and version are required preconditions;
-	// atespace and name are immutable and must match the existing policy.
+	// atespace and name are immutable and must match the existing policy. A rule
+	// equal to a rule of the existing policy is not revalidated.
 	//
 	// +k8s:required
+	// +k8s:opaqueType # updates are handled in 2 steps, do not descend
+	// +k8s:customValidation # descend into metadata
+	// +k8s:subfield(metadata)=+k8s:required
+	// +k8s:subfield(metadata)=+k8s:subfield(atespace)=+k8s:required
+	// +k8s:subfield(metadata)=+k8s:subfield(name)=+k8s:format=ate-singleton-name
 	EgressPolicy  *EgressPolicy `protobuf:"bytes,2,opt,name=egress_policy,json=egressPolicy,proto3" json:"egress_policy,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

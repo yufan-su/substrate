@@ -168,6 +168,38 @@ func TestUpdateActorEgressPolicy(t *testing.T) {
 	assertGrpcError(t, err, codes.Aborted, "EgressPolicy version conflict")
 }
 
+// A rule stored before credential URI validation required a lowercase scheme
+// does not block an update that leaves it unchanged.
+func TestUpdateActorEgressPolicy_StoredInvalidRule(t *testing.T) {
+	tc, actor := setupEgressPolicyActor(t, "ns-update-egress-policy-stored-invalid")
+	ctx := context.Background()
+	stored := functionalEgressPolicy()
+	stored.Rules = append(stored.Rules, &ateapi.EgressRule{Http: &ateapi.HttpRule{
+		Hostnames: []string{"legacy.example.com"},
+		Effects: &ateapi.HttpRuleEffects{ReplaceHeaders: []*ateapi.CredentialHeader{{
+			Header:        "Authorization",
+			CredentialUri: "ATE-SECRET://k8s.io/default/ns/secret/key",
+		}}},
+	}})
+	if _, err := tc.persistence.CreateEgressPolicy(ctx, resources.ActorRefFromObjectRef(actor), stored); err != nil {
+		t.Fatalf("CreateEgressPolicy failed: %v", err)
+	}
+	policy, err := tc.client.GetActorEgressPolicy(ctx, &ateapi.GetActorEgressPolicyRequest{Actor: actor, Name: resources.SingletonName})
+	if err != nil {
+		t.Fatalf("GetActorEgressPolicy failed: %v", err)
+	}
+
+	policy.Rules = append(policy.Rules, &ateapi.EgressRule{Http: &ateapi.HttpRule{Hostnames: []string{"new.example.com"}}})
+	policy, err = tc.client.UpdateActorEgressPolicy(ctx, &ateapi.UpdateActorEgressPolicyRequest{Actor: actor, EgressPolicy: policy})
+	if err != nil {
+		t.Fatalf("UpdateActorEgressPolicy failed: %v", err)
+	}
+
+	policy.Rules[1].Http.Hostnames = []string{"changed.example.com"}
+	_, err = tc.client.UpdateActorEgressPolicy(ctx, &ateapi.UpdateActorEgressPolicyRequest{Actor: actor, EgressPolicy: policy})
+	assertGrpcErrorRegex(t, err, codes.InvalidArgument, `rules\[1\]\.http\.effects\.replace_headers\[0\]\.credential_uri: Invalid value`)
+}
+
 func TestUpdateActorEgressPolicy_Preconditions(t *testing.T) {
 	tc, actor := setupEgressPolicyActor(t, "ns-update-egress-policy-preconditions")
 	created := createEgressPolicy(t, tc, actor)
